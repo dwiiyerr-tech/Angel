@@ -10,6 +10,7 @@ export function formatRecipients(shareholders) {
 }
 
 export function signalLabel(signals = {}) {
+  signals = signals || {};
   return [
     signals.hasFeeClaim ? 'fees' : null,
     signals.hasGraduated ? 'graduated' : null,
@@ -22,23 +23,23 @@ export function candidateSummary(candidate, decision = null) {
     || candidate.chart?.windows?.find(row => row.label === 'recent_24h_5m' && row.available);
   const route = candidate.signals?.label || signalLabel(candidate.signals);
   const lines = [
-    `🛶 <b>Charon Candidate</b>`,
+    `🛶 <b>Angel Candidate</b>`,
     '',
     `Signal: <b>${escapeHtml(route)}</b>`,
-    candidate.token.name || candidate.token.symbol ? `Name: <b>${escapeHtml(candidate.token.name || candidate.token.symbol)}${candidate.token.symbol && candidate.token.name ? ` (${escapeHtml(candidate.token.symbol)})` : ''}</b>` : null,
-    `Token: <a href="${gmgnLink(candidate.token.mint)}">${short(candidate.token.mint)}</a>`,
-    `<code>${escapeHtml(candidate.token.mint)}</code>`,
+    candidate.token?.name || candidate.token?.symbol ? `Name: <b>${escapeHtml(candidate.token?.name || candidate.token?.symbol)}${candidate.token?.symbol && candidate.token?.name ? ` (${escapeHtml(candidate.token.symbol)})` : ''}</b>` : null,
+    `Token: <a href="${gmgnLink(candidate.token?.mint)}">${short(candidate.token?.mint)}</a>`,
+    `<code>${escapeHtml(candidate.token?.mint)}</code>`,
     [
-      `Mcap: ${fmtUsd(candidate.metrics.marketCapUsd)}`,
-      `Liq: ${fmtUsd(candidate.metrics.liquidityUsd)}`,
-      `Fees: ${fmtSol(candidate.metrics.gmgnTotalFeesSol)} SOL`,
-      `Grad vol: ${fmtUsd(candidate.metrics.graduatedVolumeUsd)}`,
+      `Mcap: ${fmtUsd(candidate.metrics?.marketCapUsd)}`,
+      `Liq: ${fmtUsd(candidate.metrics?.liquidityUsd)}`,
+      `Fees: ${fmtSol(candidate.metrics?.gmgnTotalFeesSol)} SOL`,
+      `Grad vol: ${fmtUsd(candidate.metrics?.graduatedVolumeUsd)}`,
     ].join(' · '),
     [
-      `Holders: ${candidate.metrics.holderCount || '?'}`,
-      `Top20: ${fmtPct(candidate.holders.top20Percent)}`,
-      `Max holder: ${fmtPct(candidate.holders.maxHolderPercent)}`,
-      `Saved wallets: ${candidate.savedWalletExposure.holderCount}/${candidate.savedWalletExposure.checked}`,
+      `Holders: ${candidate.metrics?.holderCount || '?'}`,
+      `Top20: ${fmtPct(candidate.holders?.top20Percent)}`,
+      `Max holder: ${fmtPct(candidate.holders?.maxHolderPercent)}`,
+      `Saved wallets: ${candidate.savedWalletExposure?.holderCount}/${candidate.savedWalletExposure?.checked}`,
     ].join(' · '),
     candidate.trending ? [
       `Trending: #${candidate.trending.rank || '?'}/${escapeHtml(candidate.trending.interval || '')}`,
@@ -50,7 +51,7 @@ export function candidateSummary(candidate, decision = null) {
     chartWindow ? [
       `ATH ctx: ${fmtPct(chartWindow.belowHighPercent)} from 24h high`,
       `Range low: ${fmtPct(chartWindow.aboveLowPercent)}`,
-      `Top risk: ${candidate.chart.topBlastRisk ? 'yes' : 'no'}`,
+      `Top risk: ${candidate.chart?.topBlastRisk ? 'yes' : 'no'}`,
     ].join(' · ') : null,
     candidate.twitterNarrative?.metrics ? [
       `Tweet: ${candidate.twitterNarrative.metrics.likes} likes`,
@@ -59,9 +60,12 @@ export function candidateSummary(candidate, decision = null) {
       `${candidate.twitterNarrative.metrics.quotes} quotes`,
     ].join(' · ') : null,
     candidate.feeClaim ? `Fee claim: <b>${fmtSol(candidate.feeClaim.distributedSol)} SOL</b>` : null,
+    candidate.reaccumulationResult ? `Smart Money: <b>${escapeHtml(candidate.reaccumulationResult.phase)}</b> (${candidate.reaccumulationResult.confidenceScore}% conf)` : null,
     candidate.twitterNarrative?.text ? `Narrative: ${escapeHtml(candidate.twitterNarrative.text.slice(0, 220))}` : null,
     decision ? `LLM: <b>${escapeHtml(decision.verdict)}</b> ${fmtPct(decision.confidence)} — ${escapeHtml(decision.reason || '')}` : null,
-    candidate.filters.passed ? null : `Filtered: ${escapeHtml(candidate.filters.failures.join('; '))}`,
+    (decision && decision.thesis && decision.thesis.length > 0) ? `Thesis: ${escapeHtml(decision.thesis.join(', '))}` : null,
+    (decision && decision.missing_confirmation && decision.missing_confirmation.length > 0) ? `Missing: ${escapeHtml(decision.missing_confirmation.join(', '))}` : null,
+    (candidate.filters?.passed || !candidate.filters?.failures) ? null : `Filtered: ${escapeHtml(candidate.filters.failures.join('; '))}`,
   ];
   return lines.filter(Boolean).join('\n');
 }
@@ -85,13 +89,15 @@ export function batchRevealSummary(batchId, rows, decision, triggerCandidateId =
   const selected = rows.find(row => row.id === Number(decision.selected_candidate_id));
   const trigger = rows.find(row => row.id === Number(triggerCandidateId));
   const lines = [
-    '🧭 <b>Charon Screening</b>',
+    '🧭 <b>Angel Screening</b>',
     '',
     `Batch: <b>#${batchId}</b> · Screened: <b>${rows.length}</b>`,
     trigger ? `Trigger: ${compactCandidateLine(trigger)}` : null,
     selected ? `Pick: ${compactCandidateLine(selected)}` : 'Pick: <b>none</b>',
     `Decision: <b>${escapeHtml(decision.verdict || 'WATCH')}</b> ${fmtPct(decision.confidence || 0)}`,
     decision.reason ? `Reason: ${escapeHtml(String(decision.reason).slice(0, 420))}` : null,
+    (decision.thesis && decision.thesis.length > 0) ? `Thesis: ${escapeHtml(decision.thesis.join(', '))}` : null,
+    (decision.missing_confirmation && decision.missing_confirmation.length > 0) ? `Missing: ${escapeHtml(decision.missing_confirmation.join(', '))}` : null,
   ];
   return lines.filter(Boolean).join('\n');
 }

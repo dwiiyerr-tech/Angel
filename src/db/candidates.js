@@ -1,6 +1,6 @@
 import { db } from './connection.js';
 import { now, safeJson, json } from '../utils.js';
-import { numSetting } from './settings.js';
+import { numSetting, setting } from './settings.js';
 
 export function candidateSignalKey(candidate, signature = null) {
   const route = candidate.signals?.route || 'signal';
@@ -12,7 +12,15 @@ export function candidateSignalKey(candidate, signature = null) {
 export function upsertCandidate(candidate, signature) {
   const signalKey = candidateSignalKey(candidate, signature);
   return db.transaction(() => {
-    const existing = db.prepare('SELECT id FROM candidates WHERE signal_key = ?').get(signalKey);
+    // A candidate can arrive through a new route key while carrying the same
+    // on-chain signature. Resolve both unique identities before inserting.
+    const existing = db.prepare(`
+      SELECT id FROM candidates
+      WHERE signal_key = ?
+         OR (? IS NOT NULL AND signature = ? AND mint = ?)
+      ORDER BY id DESC
+      LIMIT 1
+    `).get(signalKey, signature, signature, candidate.token.mint);
     if (existing) {
       db.prepare(`
         UPDATE candidates
@@ -71,13 +79,53 @@ export function latestCandidateByMint(mint) {
   return row ? { ...row, candidate: safeJson(row.candidate_json, {}) } : null;
 }
 
+export function pruneOldFilteredCandidates({ olderThanMs = 3 * 24 * 60 * 60 * 1000, limit = 5000 } = {}) {
+  const cutoff = now() - olderThanMs;
+  const result = db.prepare(`
+    DELETE FROM candidates
+    WHERE id IN (
+      SELECT c.id
+      FROM candidates c
+      WHERE c.created_at_ms < ?
+        AND NOT EXISTS (SELECT 1 FROM llm_decisions d WHERE d.candidate_id = c.id)
+        AND NOT EXISTS (SELECT 1 FROM dry_run_positions p WHERE p.candidate_id = c.id)
+        AND NOT EXISTS (SELECT 1 FROM trade_intents i WHERE i.candidate_id = c.id)
+        AND NOT EXISTS (SELECT 1 FROM alerts a WHERE a.candidate_id = c.id)
+      ORDER BY c.id
+      LIMIT ?
+    )
+  `).run(cutoff, Math.max(1, Number(limit) || 5000));
+  return result.changes;
+}
+
+export function pruneOldSignalEvents({ olderThanMs = 7 * 24 * 60 * 60 * 1000, limit = 20_000 } = {}) {
+  const cutoff = now() - olderThanMs;
+  const result = db.prepare(`
+    DELETE FROM signal_events
+    WHERE id IN (
+      SELECT id FROM signal_events
+      WHERE at_ms < ?
+      ORDER BY id
+      LIMIT ?
+    )
+  `).run(cutoff, Math.max(1, Number(limit) || 20_000));
+  return result.changes;
+}
+
 export function recentEligibleCandidates(limit = 10) {
-  const maxAgeMs = numSetting('llm_candidate_max_age_ms', 10 * 60 * 1000);
+  const maxAgeMs = numSetting('llm_candidate_max_age_ms', 2 * 60 * 1000);
   const cutoff = now() - Math.max(30_000, maxAgeMs);
   // Lesson #3: block unprofitable routes at query level — prevents blocked routes from drowning out profitable ones
   // pumpfun_pregrad: pre-grad tokens still on bonding curve, can't reliably trade yet — keep for data only
-  const BLOCKED_ROUTES = ['dual_source', 'fee_graduated_trending', 'pumpfun_pregrad', 'graduated_trending'];
-  const blockedClause = BLOCKED_ROUTES.map(r => `signal_key NOT LIKE '${r}:%'`).join(' AND ');
+  let BLOCKED_ROUTES = [];
+  try {
+    BLOCKED_ROUTES = JSON.parse(setting('blocked_routes', '[]')).filter(r => r);
+  } catch (e) {
+    BLOCKED_ROUTES = [];
+  }
+  const blockedClause = BLOCKED_ROUTES.length > 0 
+    ? BLOCKED_ROUTES.map(() => `signal_key NOT LIKE ? || ':%'`).join(' AND ') 
+    : '1=1';
   const rows = db.prepare(`
     SELECT c.*
     FROM candidates c
@@ -96,6 +144,6 @@ export function recentEligibleCandidates(limit = 10) {
     ) latest ON c.id = latest.max_id
     ORDER BY c.id DESC
     LIMIT ?
-  `).all(cutoff, limit);
+  `).all(cutoff, ...BLOCKED_ROUTES, limit);
   return rows.map(row => ({ ...row, candidate: safeJson(row.candidate_json, {}) })).reverse();
 }

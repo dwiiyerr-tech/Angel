@@ -88,7 +88,7 @@ export async function sendDailyReport(chatId = TELEGRAM_CHAT_ID) {
   try {
     const report = await buildDailyReport();
     const buffer = await generateDailyCard(report);
-    tmpPath = `/tmp/charon_daily_${new Date().toISOString().slice(0, 10)}.png`;
+    tmpPath = `/tmp/angel_daily_${new Date().toISOString().slice(0, 10)}.png`;
     writeFileSync(tmpPath, buffer);
 
     await bot.sendPhoto(chatId, tmpPath, {

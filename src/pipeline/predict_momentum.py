@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-Momentum prediction for Charon candidate entry filter.
+Momentum prediction for Angel candidate entry filter.
 Called from Node.js via subprocess. Receives candidate JSON on stdin,
 returns momentum score + features on stdout.
 
@@ -46,6 +46,15 @@ def safe_float(v, default=0.0):
     except (ValueError, TypeError):
         return default
 
+def coalesce_float(*args, default=0.0):
+    for arg in args:
+        if arg is not None:
+            try:
+                return float(arg)
+            except (ValueError, TypeError):
+                pass
+    return default
+
 def extract_features(candidate):
     """Extract features from candidate JSON (same logic as backtest)."""
     metrics = candidate.get("metrics", {}) or {}
@@ -58,9 +67,18 @@ def extract_features(candidate):
     trenches = candidate.get("trenchesEntry") or {}
     if not isinstance(trenches, dict):
         trenches = {}
+        
+    jupiter = candidate.get("jupiterAsset") or {}
+    if not isinstance(jupiter, dict):
+        jupiter = {}
+    audit = jupiter.get("audit") or {}
+    stats5m = jupiter.get("stats5m") or {}
+    trending = candidate.get("trending") or {}
+    if not isinstance(trending, dict):
+        trending = {}
     
     f = {}
-    f["price_current"] = safe_float(price.get("price"))
+    f["price_current"] = coalesce_float(price.get("price"), metrics.get("priceUsd"), jupiter.get("usdPrice"))
     f["price_1m"] = safe_float(price.get("price_1m"))
     f["price_5m"] = safe_float(price.get("price_5m"))
     f["price_1h"] = safe_float(price.get("price_1h"))
@@ -70,22 +88,22 @@ def extract_features(candidate):
     else:
         f["price_velocity_5m"] = 0.0
     
-    if f["price_5m"] > 0 and f["price_1m"] > 0:
+    if f["price_5m"] > 0 and f["price_1m"] > 0 and f["price_current"] > 0:
         vel_1m = (f["price_current"] - f["price_1m"]) / f["price_1m"]
-        f["price_acceleration"] = vel_1m - f["price_velocity_5m"]
+        f["price_acceleration"] = vel_1m - (f["price_velocity_5m"] / 5.0)
     else:
         f["price_acceleration"] = 0.0
     
     f["volume_1m"] = safe_float(price.get("volume_1m"))
-    f["volume_5m"] = safe_float(price.get("volume_5m"))
-    f["volume_1h"] = safe_float(price.get("volume_1h"))
+    f["volume_5m"] = coalesce_float(price.get("volume_5m"), stats5m.get("volume"))
+    f["volume_1h"] = coalesce_float(price.get("volume_1h"), jupiter.get("stats1h", {}).get("volume"))
     f["buy_volume_1m"] = safe_float(price.get("buy_volume_1m"))
     f["sell_volume_1m"] = safe_float(price.get("sell_volume_1m"))
     
     if f["sell_volume_1m"] > 0:
         f["buy_sell_ratio_1m"] = f["buy_volume_1m"] / f["sell_volume_1m"]
     else:
-        f["buy_sell_ratio_1m"] = f["buy_volume_1m"] if f["buy_volume_1m"] > 0 else 0.0
+        f["buy_sell_ratio_1m"] = f["buy_volume_1m"] / 0.01 if f["buy_volume_1m"] > 0 else 0.0
     
     if f["volume_1h"] > 0:
         f["volume_5m_ratio"] = f["volume_5m"] / f["volume_1h"]
@@ -93,14 +111,14 @@ def extract_features(candidate):
         f["volume_5m_ratio"] = 0.0
     
     f["swaps_1m"] = safe_float(price.get("swaps_1m"))
-    f["swaps_5m"] = safe_float(price.get("swaps_5m"))
+    f["swaps_5m"] = coalesce_float(price.get("swaps_5m"), safe_float(stats5m.get("numBuys", 0)) + safe_float(stats5m.get("numSells", 0)))
     f["buys_1m"] = safe_float(price.get("buys_1m"))
     f["sells_1m"] = safe_float(price.get("sells_1m"))
     
     if f["sells_1m"] > 0:
         f["buy_swap_ratio"] = f["buys_1m"] / f["sells_1m"]
     else:
-        f["buy_swap_ratio"] = f["buys_1m"] if f["buys_1m"] > 0 else 0.0
+        f["buy_swap_ratio"] = f["buys_1m"] / 1.0 if f["buys_1m"] > 0 else 0.0
     
     f["market_cap"] = safe_float(metrics.get("marketCapUsd"))
     f["liquidity"] = safe_float(metrics.get("liquidityUsd"))
@@ -108,17 +126,27 @@ def extract_features(candidate):
     
     f["holder_count"] = safe_float(metrics.get("holderCount"))
     smart_wallets = (gmgn.get("wallet_tags_stat") or {}).get("smart_wallets", 0)
-    f["smart_degen_count"] = safe_float(metrics.get("trendingSmartDegenCount") or smart_wallets)
-    f["sniper_count"] = safe_float(trenches.get("sniper_count", 0))
+    
+    val1 = metrics.get("trendingSmartDegenCount")
+    if val1 is not None:
+        f["smart_degen_count"] = safe_float(val1)
+    else:
+        f["smart_degen_count"] = safe_float(smart_wallets or stats5m.get("numOrganicBuyers", 0))
+        
+    f["sniper_count"] = coalesce_float(trenches.get("sniper_count"), audit.get("sniperPct"))
     f["smart_holder_ratio"] = f["smart_degen_count"] / f["holder_count"] if f["holder_count"] > 0 else 0.0
     
-    f["top_10_holder_rate"] = safe_float(trenches.get("top_10_holder_rate"))
-    f["bot_degen_rate"] = safe_float(trenches.get("bot_degen_rate"))
-    f["bundler_rate"] = safe_float(trenches.get("bundler_trader_amount_rate"))
-    f["rug_ratio"] = safe_float(trenches.get("rug_ratio"))
+    top10_audit = safe_float(audit.get("topHoldersPercentage", 0)) / 100.0
+    f["top_10_holder_rate"] = coalesce_float(trenches.get("top_10_holder_rate"), top10_audit)
+    
+    bot_audit = safe_float(audit.get("botHoldersPercentage", 0)) / 100.0
+    f["bot_degen_rate"] = coalesce_float(trenches.get("bot_degen_rate"), bot_audit)
+    
+    f["bundler_rate"] = coalesce_float(trenches.get("bundler_trader_amount_rate"), trending.get("bundler_rate"))
+    f["rug_ratio"] = coalesce_float(trenches.get("rug_ratio"), trending.get("rug_ratio"))
     f["fresh_wallet_rate"] = safe_float(trenches.get("fresh_wallet_rate"))
     
-    chart = gmgn.get("chart") or {}
+    chart = candidate.get("chart") or gmgn.get("chart") or {}
     if not isinstance(chart, dict):
         chart = {}
     f["below_ath_pct"] = safe_float(chart.get("belowHighPercent") or chart.get("distanceFromAthPercent"))
@@ -173,11 +201,27 @@ def predict(candidate_json):
     }
 
 if __name__ == "__main__":
-    try:
-        input_data = json.loads(sys.stdin.read())
-        result = predict(input_data)
-        print(json.dumps(result))
-    except json.JSONDecodeError as e:
-        print(json.dumps({"error": f"Invalid JSON input: {e}", "momentum_score": -1}))
-    except Exception as e:
-        print(json.dumps({"error": str(e), "momentum_score": -1}))
+    load_model()
+    for line in sys.stdin:
+        input_data = None
+        if not line.strip():
+            continue
+        try:
+            input_data = json.loads(line)
+            result = predict(input_data)
+            if "id" in input_data:
+                result["id"] = input_data["id"]
+            print(json.dumps(result))
+            sys.stdout.flush()
+        except json.JSONDecodeError as e:
+            err = {"error": f"Invalid JSON input: {e}", "momentum_score": -1}
+            if input_data is not None and isinstance(input_data, dict) and "id" in input_data:
+                err["id"] = input_data["id"]
+            print(json.dumps(err))
+            sys.stdout.flush()
+        except Exception as e:
+            err = {"error": str(e), "momentum_score": -1}
+            if input_data is not None and isinstance(input_data, dict) and "id" in input_data:
+                err["id"] = input_data["id"]
+            print(json.dumps(err))
+            sys.stdout.flush()

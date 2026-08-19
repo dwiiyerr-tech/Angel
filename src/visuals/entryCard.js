@@ -190,7 +190,7 @@ function drawFooter(ctx, position) {
   ctx.textAlign = 'center';
   ctx.fillStyle = '#3f4660';
   ctx.font = 'bold 10px sans-serif';
-  ctx.fillText('CHARON', W / 2, H - 18);
+  ctx.fillText('ANGEL', W / 2, H - 18);
 
   ctx.textAlign = 'right';
   ctx.font = '10px sans-serif';

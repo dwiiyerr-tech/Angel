@@ -1,3 +1,4 @@
 #!/bin/bash
-cd /home/ubuntu/projects/charon
-exec node index.js >> charon.log 2>&1
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+cd "$SCRIPT_DIR"
+exec node index.js >> angel.log 2>&1

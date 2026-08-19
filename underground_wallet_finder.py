@@ -11,28 +11,26 @@ from collections import defaultdict
 DEX_BASE = "https://api.dexscreener.com"
 DB_PATH = os.path.expanduser("~/.hermes/data/underground_wallets.db")
 
-def timeout_handler(signum, frame): raise TimeoutError()
 def rpc(base, method, params):
-    signal.signal(signal.SIGALRM, timeout_handler)
-    signal.alarm(8)
     try:
-        r = requests.post(base, json={"jsonrpc":"2.0","id":1,"method":method,"params":params}, timeout=6)
-        signal.alarm(0)
+        r = requests.post(base, json={"jsonrpc":"2.0","id":1,"method":method,"params":params}, timeout=10)
         if r.status_code == 200: return r.json().get("result")
     except: pass
-    signal.alarm(0)
     return None
 
 def load_env():
     env = {}
-    p = os.path.expanduser("~/projects/charon/.env")
+    p = os.path.join(os.path.dirname(os.path.abspath(__file__)), ".env")
     if os.path.exists(p):
         for line in open(p):
             line = line.strip()
             if line and not line.startswith("#") and "=" in line:
                 k, v = line.split("=", 1)
                 env[k.strip()] = v.strip().strip('"').strip("'")
-    key = env.get("SOLANA_RPC_URL", "").split("api-key=")[-1]
+    key = env.get("HELIUS_API_KEY") or env.get("SOLANA_RPC_URL", "").split("api-key=")[-1]
+    if not key or "http" in key:
+        print("ERROR: Helius API key not found in .env (SOLANA_RPC_URL).")
+        exit(1)
     return f"https://mainnet.helius-rpc.com/?api-key={key}"
 
 def init_db():
@@ -166,7 +164,7 @@ def find_underground(conn):
     for w, d in wd.items():
         n = len(d["tokens"])
         if n < 2: continue  # Must appear in 2+ tokens
-        span = max((d["last"] - d["first"]) / 86400, 0.01) if d["first"] < float('inf') and d["last"] > 0 else 1
+        span = max((d["last"] - d["first"]) / 86400, 1.0) if d["first"] < float('inf') and d["last"] > 0 else 1.0
         cons = n / span
         score = n * cons  # tokens × consistency
         results.append({
@@ -197,11 +195,11 @@ def deep_score(wallet_data, conn):
             time.sleep(0.15)
         except: pass
     
-    # Simple PnL estimate: assume early entry at $10K mcap
+    # Simple PnL estimate: assume average entry at $30K mcap
     pnl = 0; w_count = 0; l_count = 0
     for t in trades:
         if t["mcap"] > 0:
-            pct = (t["mcap"] / 10000 - 1) * 100
+            pct = (t["mcap"] / 30000 - 1) * 100
             if pct > 0: w_count += 1
             else: l_count += 1
             pnl += 0.1 * (pct / 100)
@@ -274,6 +272,29 @@ def main():
         ("v4", len(tokens), len(underground), len(final),
          datetime.fromtimestamp(start).isoformat(), now, dur))
     conn.commit()
+
+    # Auto-populate Charon main DB saved_wallets table
+    charon_db_path = os.path.expanduser("~/Kaiser.charon/charon.sqlite")
+    if os.path.exists(charon_db_path):
+        try:
+            charon_conn = sqlite3.connect(charon_db_path)
+            charon_c = charon_conn.cursor()
+            now_ms = int(time.time() * 1000)
+            added_count = 0
+            for i, r in enumerate(final):
+                addr = r["wallet"]
+                label = f"whale_{addr[:6]}_{addr[-4:]}"
+                try:
+                    charon_c.execute("INSERT OR IGNORE INTO saved_wallets (label, address, created_at_ms) VALUES (?, ?, ?)",
+                                     (label, addr, now_ms))
+                    added_count += 1
+                except Exception as ex:
+                    pass
+            charon_conn.commit()
+            charon_conn.close()
+            print(f"[phase5] Successfully synced {added_count} smart wallets into Charon charon.sqlite!")
+        except Exception as e:
+            print(f"[phase5] Error syncing to Charon DB: {e}")
     
     print(f"\n{'='*60}")
     print("TOP UNDERGROUND WALLETS")

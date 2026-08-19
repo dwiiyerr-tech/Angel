@@ -2,7 +2,7 @@ import WebSocket from 'ws';
 import fs from 'fs';
 
 const WS_URL = 'wss://pumpportal.fun/api/data';
-const LOG_FILE = '/home/ubuntu/projects/charon/migration_test.log';
+const LOG_FILE = './migration_test.log';
 
 function log(msg) {
   const line = `[${new Date().toISOString()}] ${msg}`;

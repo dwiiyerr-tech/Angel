@@ -4,9 +4,16 @@ import { now } from '../utils.js';
 import { activeStrategy } from '../db/settings.js';
 import { storeSignalEvent, trendingSignalPass, trending } from './trending.js';
 import { graduated } from './graduated.js';
+import { observeVolumeAcceleration } from '../pipeline/volumeAcceleration.js';
 
 let candidateHandler = null;
 let degenHandler = null;
+
+const candidateQueue = [];
+const queuedMints = new Set();
+let activeCandidateTasks = 0;
+const MAX_CONCURRENT_CANDIDATES = 3;
+const MAX_QUEUED_CANDIDATES = 300;
 
 export function setCandidateHandler(fn) { candidateHandler = fn; }
 export function setDegenHandler(fn) { degenHandler = fn; }
@@ -30,7 +37,38 @@ async function triggerCandidate({ mint, fee, signature, graduatedCoin, trendingT
   await candidateHandler({ mint, fee, signature, graduatedCoin, trendingToken, route });
 }
 
+function drainCandidateQueue() {
+  while (activeCandidateTasks < MAX_CONCURRENT_CANDIDATES && candidateQueue.length > 0) {
+    const payload = candidateQueue.shift();
+    activeCandidateTasks += 1;
+    triggerCandidate(payload)
+      .catch(err => console.log(`[server] candidate ${payload.mint.slice(0, 8)} failed: ${err.message}`))
+      .finally(() => {
+        activeCandidateTasks -= 1;
+        queuedMints.delete(payload.mint);
+        drainCandidateQueue();
+      });
+  }
+}
+
+export function enqueueCandidate(payload) {
+  if (!payload?.mint || queuedMints.has(payload.mint)) return false;
+  if (candidateQueue.length >= MAX_QUEUED_CANDIDATES) {
+    console.warn(`[server] candidate queue full (${candidateQueue.length}); refusing ${payload.mint.slice(0, 8)}...`);
+    return false;
+  }
+  queuedMints.add(payload.mint);
+  candidateQueue.push(payload);
+  drainCandidateQueue();
+  return true;
+}
+
+export function candidateQueueStatus() {
+  return { queued: candidateQueue.length, active: activeCandidateTasks, capacity: MAX_QUEUED_CANDIDATES };
+}
+
 export async function fetchServerSignals() {
+  let activeSignalKey = null;
   try {
     const url = new URL('/api/signals', SIGNAL_SERVER_URL);
     url.searchParams.set('limit', '100');
@@ -48,6 +86,10 @@ export async function fetchServerSignals() {
     let processed = 0;
     let triggered = 0;
     let dipAlerts = 0;
+    let enqueued = 0;
+    const scheduleCandidate = payload => {
+      if (enqueueCandidate(payload)) enqueued += 1;
+    };
 
     for (const signal of signals) {
       const mint = signal.mint;
@@ -84,15 +126,32 @@ export async function fetchServerSignals() {
           seenAt: now(),
           ...signal.trending,
         };
+        trendingToken.volumeAcceleration = observeVolumeAcceleration({
+          token: { mint },
+          metrics: {
+            priceUsd: signal.priceUsd,
+            liquidityUsd: signal.liquidityUsd,
+            volume5mUsd: signal.volume5m ?? signal.volume24h ?? null,
+          },
+          trending: trendingToken,
+          jupiterAsset: {
+            stats5m: {
+              numBuys: signal.trending.buys,
+              numSells: signal.trending.sells,
+              numNetBuyers: signal.trending.netBuyers,
+            },
+          },
+        });
         trending.set(mint, trendingToken);
       }
 
       const key = `signal:${mint}`;
       if (seenSignals.has(key)) { processed++; continue; }
       seenSignals.set(key, now());
+      activeSignalKey = key;
 
       // Store signal events
-      for (const source of signal.sources) {
+      for (const source of Array.isArray(signal.sources) ? signal.sources : []) {
         const kind = source.includes('trending') ? 'trending' : source.includes('fee') ? 'fee_claim' : 'graduated';
         storeSignalEvent(mint, kind, source, signal);
       }
@@ -103,15 +162,15 @@ export async function fetchServerSignals() {
       const sourceCount = signal.sourceCount || 1;
 
       // Strategy gate: check source count
-      if (sourceCount < strat.min_source_count) { processed++; continue; }
+      if (sourceCount < strat.min_source_count) { processed++; activeSignalKey = null; continue; }
 
       // Strategy gate: fee claim requirement
-      if (strat.require_fee_claim && !hasFee) { processed++; continue; }
+      if (strat.require_fee_claim && !hasFee) { processed++; activeSignalKey = null; continue; }
 
       // Strategy gate: token age
       if (strat.token_age_max_ms > 0) {
         const tokenAge = signal.ageMs || 0;
-        if (tokenAge > strat.token_age_max_ms) { processed++; continue; }
+        if (tokenAge > strat.token_age_max_ms) { processed++; activeSignalKey = null; continue; }
       }
 
       // Determine route
@@ -145,7 +204,7 @@ export async function fetchServerSignals() {
         const athDist = signal.graduated?.distanceFromAthPercent;
         if (athDist != null && athDist <= strat.max_ath_distance_pct) {
           // Already at dip target, trigger immediately
-          await triggerCandidate({ mint, fee, signature, graduatedCoin, trendingToken, route });
+          scheduleCandidate({ mint, fee, signature, graduatedCoin, trendingToken, route });
           triggered++;
         } else {
           // Store price alert for later
@@ -164,16 +223,20 @@ export async function fetchServerSignals() {
         }
       } else {
         // Immediate entry mode (sniper, smart_money, degen)
-        await triggerCandidate({ mint, fee, signature, graduatedCoin, trendingToken, route });
+        scheduleCandidate({ mint, fee, signature, graduatedCoin, trendingToken, route });
         triggered++;
       }
 
       processed++;
+      activeSignalKey = null;
     }
 
     const dipPart = dipAlerts > 0 ? `, ${dipAlerts} dip alerts` : '';
-    console.log(`[server] ${processed} signals, ${triggered} triggered${dipPart}, tracking ${trending.size}`);
+    const queue = candidateQueueStatus();
+    console.log(`[server] ${processed} signals, ${triggered} triggered, ${enqueued} queued${dipPart}, queue ${queue.active}+${queue.queued}/${queue.capacity}, tracking ${trending.size}`);
   } catch (err) {
+    if (activeSignalKey) seenSignals.delete(activeSignalKey);
     console.log(`[server] ${err.message}`);
+    throw err;
   }
 }

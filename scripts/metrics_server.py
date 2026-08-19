@@ -1,10 +1,12 @@
 #!/usr/bin/env python3
-"""Charon metrics for Grafana JSON API datasource — per-endpoint, array format."""
+"""Angel metrics for Grafana JSON API datasource — per-endpoint, array format."""
 import sqlite3, json, time, os
 from http.server import HTTPServer, BaseHTTPRequestHandler
 from urllib.parse import urlparse, parse_qs
 
-DB = "/home/ubuntu/projects/charon/charon.sqlite"
+SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
+PROJECT_ROOT = os.path.dirname(SCRIPT_DIR)
+DB = os.path.join(PROJECT_ROOT, "angel.sqlite")
 
 
 def q(sql, params=()):

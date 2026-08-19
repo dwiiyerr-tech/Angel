@@ -1,21 +1,23 @@
 #!/usr/bin/env python3
 """
-Full enrichment feature analysis for Charon dry-run positions.
+Full enrichment feature analysis for Angel dry-run positions.
 Extracts 70+ features from candidates.candidate_json across 6 enrichment sources,
 ranks by effect size, and tests filter combinations.
 
 Usage:
     python3 scripts/full-enrichment-analysis.py
     python3 scripts/full-enrichment-analysis.py --days 30
-    python3 scripts/full-enrichment-analysis.py --output /tmp/charon_features.csv
+    python3 scripts/full-enrichment-analysis.py --output /tmp/angel_features.csv
 
 Output: ranked feature list + top filter combos + daily consistency table.
 """
 
-import sqlite3, json, csv, sys
+import sqlite3, json, csv, sys, os
 from datetime import datetime, timedelta
 
-DB_PATH = '/home/ubuntu/projects/charon/charon.sqlite'
+SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
+PROJECT_ROOT = os.path.dirname(SCRIPT_DIR)
+DB_PATH = os.path.join(PROJECT_ROOT, 'angel.sqlite')
 
 def safe_num(d, *keys, default=0):
     for k in keys:
@@ -190,7 +192,7 @@ def main():
     # Export CSV
     if '--output' in sys.argv:
         idx = sys.argv.index('--output') + 1
-        path = sys.argv[idx] if idx < len(sys.argv) else '/tmp/charon_features.csv'
+        path = sys.argv[idx] if idx < len(sys.argv) else '/tmp/angel_features.csv'
         with open(path, 'w', newline='') as fh:
             w = csv.DictWriter(fh, fieldnames=features[0].keys())
             w.writeheader()

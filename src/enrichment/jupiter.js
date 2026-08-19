@@ -1,9 +1,50 @@
 import axios from 'axios';
-import { WSOL_MINT, JSON_HEADERS } from '../config.js';
+import { WSOL_MINT, JSON_HEADERS, JUPITER_SLIPPAGE_BPS } from '../config.js';
 import { now } from '../utils.js';
+import { rateLimiter } from './rateLimiter.js';
 
-const jupiterAssetCache = new Map();
+class SimpleLRUCache {
+  constructor(maxSize = 500) {
+    this.maxSize = maxSize;
+    this.cache = new Map();
+  }
+
+  get(key) {
+    if (!this.cache.has(key)) return undefined;
+    const value = this.cache.get(key);
+    this.cache.delete(key);
+    this.cache.set(key, value);
+    return value;
+  }
+
+  set(key, value) {
+    if (this.cache.has(key)) {
+      this.cache.delete(key);
+    } else if (this.cache.size >= this.maxSize) {
+      const oldestKey = this.cache.keys().next().value;
+      this.cache.delete(oldestKey);
+    }
+    this.cache.set(key, value);
+  }
+}
+
+const jupiterAssetCache = new SimpleLRUCache(500);
 let jupiterAssetBackoffUntil = 0;
+const MAX_STALE_ASSET_MS = 2 * 60 * 1000;
+
+function withDataQuality(data, { fetchedAt, stale = false, error = null } = {}) {
+  if (!data) return null;
+  return {
+    ...data,
+    _dataQuality: {
+      source: 'jupiter',
+      fetchedAt: fetchedAt || now(),
+      ageMs: Math.max(0, now() - (fetchedAt || now())),
+      stale,
+      error,
+    },
+  };
+}
 
 function jupiterAssetBackoffActive() {
   return now() < jupiterAssetBackoffUntil;
@@ -63,7 +104,10 @@ function normalizeJupiterTrendingRow(row, interval, rank) {
     smart_degen_count: Number(stats.numOrganicBuyers ?? 0),
     hot_level: Number(row?.organicScore ?? 0),
     rug_ratio: null,
-    bundler_rate: Number.isFinite(botHolders) ? botHolders / 100 : null,
+    // Jupiter exposes bot-holder percentage, not bundler participation. Keep the
+    // semantics separate so missing bundler data cannot look artificially clean.
+    bundler_rate: null,
+    bot_degen_rate: Number.isFinite(botHolders) ? botHolders / 100 : null,
     source: 'jupiter_toptrending',
     interval,
     rank,
@@ -73,32 +117,39 @@ function normalizeJupiterTrendingRow(row, interval, rank) {
 
 async function fetchJupiterAsset(mint, { useCache = true, ttlMs = 20_000 } = {}) {
   const cached = jupiterAssetCache.get(mint);
-  if (useCache && cached && now() - cached.at < ttlMs) return cached.data;
-  if (jupiterAssetBackoffActive()) return cached?.data || null;
+  const cacheAge = cached ? now() - cached.at : Infinity;
+  if (useCache && cached && cacheAge < ttlMs) return withDataQuality(cached.data, { fetchedAt: cached.at });
+  if (jupiterAssetBackoffActive()) {
+    return cacheAge <= MAX_STALE_ASSET_MS
+      ? withDataQuality(cached.data, { fetchedAt: cached.at, stale: true, error: 'rate_limited' })
+      : null;
+  }
   try {
     const url = new URL('https://datapi.jup.ag/v1/assets/search');
     url.searchParams.set('query', mint);
-    const res = await axios.get(url.toString(), {
+    const res = await rateLimiter.schedule(() => axios.get(url.toString(), {
       timeout: 10_000,
       headers: JSON_HEADERS,
-    });
+    }), 'jup_api');
     const rows = Array.isArray(res.data) ? res.data : [];
     const data = rows.find(row => row?.id === mint) || rows[0] || null;
     jupiterAssetCache.set(mint, { at: now(), data });
-    return data;
+    return withDataQuality(data, { fetchedAt: now() });
   } catch (err) {
     setJupiterAssetBackoff(err);
     if (err.response?.status !== 429) console.log(`[asset] ${mint.slice(0, 8)}... ${err.response?.status || ''} ${err.message}`);
-    return cached?.data || null;
+    return cacheAge <= MAX_STALE_ASSET_MS
+      ? withDataQuality(cached.data, { fetchedAt: cached.at, stale: true, error: err.code || err.message })
+      : null;
   }
 }
 
 async function fetchSolUsdPrice() {
   try {
-    const res = await axios.get(`https://lite-api.jup.ag/price/v3?ids=${WSOL_MINT}`, {
+    const res = await rateLimiter.schedule(() => axios.get(`https://lite-api.jup.ag/price/v3?ids=${WSOL_MINT}`, {
       timeout: 5000,
       headers: JSON_HEADERS,
-    });
+    }), 'jup_price');
     const price = Number(res.data?.[WSOL_MINT]?.usdPrice);
     return Number.isFinite(price) && price > 0 ? price : null;
   } catch (err) {
@@ -116,14 +167,17 @@ async function estimateTokenAmountFromSol(sizeSol, entryPrice) {
 
 async function fetchJupiterHolders(mint) {
   try {
-    const res = await axios.get(`https://datapi.jup.ag/v1/holders/${mint}`, {
+    const res = await rateLimiter.schedule(() => axios.get(`https://datapi.jup.ag/v1/holders/${mint}`, {
       timeout: 10_000,
       headers: JSON_HEADERS,
-    });
+    }), 'jup_data');
     const holders = Array.isArray(res.data?.holders) ? res.data.holders : [];
-    const total = holders.reduce((sum, holder) => sum + Number(holder.amount || 0), 0);
+    const supply = Number(res.data?.totalSupply ?? res.data?.supply ?? 0);
     const mapped = holders.map((holder, index) => {
-      const pct = total > 0 ? Number(holder.amount || 0) / total * 100 : null;
+      const suppliedPct = Number(holder.percentage ?? holder.percent ?? holder.pct);
+      const pct = Number.isFinite(suppliedPct)
+        ? suppliedPct
+        : supply > 0 ? Number(holder.amount || 0) / supply * 100 : null;
       return {
         address: holder.address,
         rank: index + 1,
@@ -137,12 +191,26 @@ async function fetchJupiterHolders(mint) {
       count: holders.length,
       holders: mapped,
       top20,
-      top20Percent: top20.reduce((sum, holder) => sum + Number(holder.percent || 0), 0),
-      maxHolderPercent: Math.max(0, ...top20.map(holder => Number(holder.percent || 0))),
+      top20Percent: top20.every(holder => Number.isFinite(holder.percent))
+        ? top20.reduce((sum, holder) => sum + holder.percent, 0)
+        : null,
+      maxHolderPercent: top20.some(holder => Number.isFinite(holder.percent))
+        ? Math.max(...top20.filter(holder => Number.isFinite(holder.percent)).map(holder => holder.percent))
+        : null,
+      percentageBasis: supply > 0 ? 'total_supply' : (mapped.some(holder => holder.percent != null) ? 'api_percentage' : 'unknown'),
+      dataQuality: { source: 'jupiter_holders', fetchedAt: now(), stale: false, complete: supply > 0 },
     };
   } catch (err) {
     console.log(`[holders] ${mint.slice(0, 8)}... ${err.response?.status || ''} ${err.message}`);
-    return { count: 0, holders: [], top20: [], top20Percent: null, maxHolderPercent: null };
+    return {
+      count: null,
+      holders: [],
+      top20: [],
+      top20Percent: null,
+      maxHolderPercent: null,
+      percentageBasis: 'unknown',
+      dataQuality: { source: 'jupiter_holders', fetchedAt: now(), stale: false, error: err.code || err.message },
+    };
   }
 }
 
@@ -179,10 +247,10 @@ async function fetchJupiterChartWindow(mint, interval, candles, label) {
   url.searchParams.set('candles', String(candles));
   url.searchParams.set('type', 'price');
   url.searchParams.set('quote', 'native');
-  const res = await axios.get(url.toString(), {
+  const res = await rateLimiter.schedule(() => axios.get(url.toString(), {
     timeout: 10_000,
     headers: JSON_HEADERS,
-  });
+  }), 'jup_data');
   return summarizeCandles(label, Array.isArray(res.data?.candles) ? res.data.candles : []);
 }
 
@@ -255,6 +323,26 @@ async function fetchTokenSpotViaQuote(mint) {
   }
 }
 
+async function fetchTokenExitQuote(mint, rawAmount) {
+  if (quoteBackoffActive() || !rawAmount || BigInt(rawAmount) <= 0n) return null;
+  try {
+    const url = new URL('https://lite-api.jup.ag/swap/v1/quote');
+    url.searchParams.set('inputMint', mint);
+    url.searchParams.set('outputMint', WSOL_MINT);
+    url.searchParams.set('amount', String(rawAmount));
+    url.searchParams.set('slippageBps', String(JUPITER_SLIPPAGE_BPS));
+    const quoteRes = await axios.get(url.toString(), { timeout: 10_000, headers: JSON_HEADERS });
+    const outLamports = Number(quoteRes.data?.outAmount);
+    return Number.isFinite(outLamports) && outLamports >= 0
+      ? { outLamports, outSol: outLamports / 1_000_000_000 }
+      : null;
+  } catch (err) {
+    setQuoteBackoff(err);
+    if (err.response?.status !== 429) console.log(`[exit-quote] ${mint.slice(0, 8)}... ${err.response?.status || ''} ${err.message}`);
+    return null;
+  }
+}
+
 async function fetchJupiterWalletPnl(walletAddress) {
   try {
     const url = new URL('https://datapi.jup.ag/v1/pnl');
@@ -282,6 +370,7 @@ export {
   fetchJupiterChartContext,
   fetchJupiterWalletPnl,
   fetchTokenSpotViaQuote,
+  fetchTokenExitQuote,
   jupiterAssetBackoffActive,
   setJupiterAssetBackoff,
 };

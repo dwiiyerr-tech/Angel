@@ -5,10 +5,18 @@ import { numSetting, boolSetting, setting } from '../db/settings.js';
 import { db } from '../db/connection.js';
 import { gmgnBackoffActive, setGmgnBackoff, gmgnFetch, normalizedTrendingRows } from '../enrichment/gmgn.js';
 import { normalizeJupiterTrendingRow } from '../enrichment/jupiter.js';
+import { rateLimiter } from '../enrichment/rateLimiter.js';
+import { observeVolumeAcceleration } from '../pipeline/volumeAcceleration.js';
 
 export const trending = new Map();
 let degenHandler = null;
 let trendingCandidateHandler = null;
+
+function optionalNumber(value) {
+  if (value === null || value === undefined || value === '') return null;
+  const parsed = Number(value);
+  return Number.isFinite(parsed) ? parsed : null;
+}
 
 export function setDegenHandler(fn) {
   degenHandler = fn;
@@ -26,15 +34,15 @@ export function storeSignalEvent(mint, kind, source, payload) {
 }
 
 export function trendingSignalPass(row) {
-  const volume = Number(row?.volume ?? 0);
-  const swaps = Number(row?.swaps ?? 0);
-  const rugRatio = Number(row?.rug_ratio ?? 0);
-  const bundlerRate = Number(row?.bundler_rate ?? 0);
-  const holderCount = Number(row?.holder_count ?? 0);
-  const top10Rate = Number(row?.top_10_holder_rate ?? 0);
-  const marketCap = Number(row?.market_cap ?? 0);
-  const botDegenRate = Number(row?.bot_degen_rate ?? 0);
-  const minVolume = numSetting('trending_min_volume_usd', 50000);
+  const volume = optionalNumber(row?.volume);
+  const swaps = optionalNumber(row?.swaps);
+  const rugRatio = optionalNumber(row?.rug_ratio);
+  const bundlerRate = optionalNumber(row?.bundler_rate);
+  const holderCount = optionalNumber(row?.holder_count);
+  const top10Rate = optionalNumber(row?.top_10_holder_rate);
+  const marketCap = optionalNumber(row?.market_cap);
+  const botDegenRate = optionalNumber(row?.bot_degen_rate);
+  const minVolume = numSetting('trending_min_volume_usd', 0);
   const minSwaps = numSetting('trending_min_swaps', 500);
   const minHolders = numSetting('trending_min_holders', 100);
   const maxTop10Rate = numSetting('trending_max_top10_rate', 0.3);
@@ -46,9 +54,12 @@ export function trendingSignalPass(row) {
   if (minVolume > 0 && (!Number.isFinite(volume) || volume < minVolume)) return false;
   if (minSwaps > 0 && (!Number.isFinite(swaps) || swaps < minSwaps)) return false;
   if (minHolders > 0 && (!Number.isFinite(holderCount) || holderCount < minHolders)) return false;
-  if (maxTop10Rate > 0 && Number.isFinite(top10Rate) && top10Rate > maxTop10Rate) return false;
+  if (maxTop10Rate > 0 && (!Number.isFinite(top10Rate) || top10Rate > maxTop10Rate)) return false;
   if (minMcap > 0 && (!Number.isFinite(marketCap) || marketCap < minMcap)) return false;
   if (maxMcap > 0 && Number.isFinite(marketCap) && marketCap > maxMcap) return false;
+  // Unknown risk metrics are not converted to zero. They may pass this source
+  // gate only when that metric is genuinely unavailable from the provider;
+  // downstream dataQuality records the absence and never awards a clean bonus.
   if (maxRugRatio > 0 && Number.isFinite(rugRatio) && rugRatio > maxRugRatio) return false;
   if (maxBundlerRate > 0 && Number.isFinite(bundlerRate) && bundlerRate > maxBundlerRate) return false;
   if (maxBotDegenRate > 0 && Number.isFinite(botDegenRate) && botDegenRate > maxBotDegenRate) return false;
@@ -65,10 +76,10 @@ export async function fetchJupiterTrendingRows(interval, limit) {
   const window = supported.has(interval) ? interval : '5m';
   const url = new URL(`https://api.jup.ag/tokens/v2/toptrending/${window}`);
   url.searchParams.set('limit', String(limit));
-  const res = await axios.get(url.toString(), {
+  const res = await rateLimiter.schedule(() => axios.get(url.toString(), {
     timeout: 10_000,
     headers: { ...JSON_HEADERS, 'x-api-key': JUPITER_API_KEY },
-  });
+  }), 'jup_data');
   const rows = Array.isArray(res.data) ? res.data : [];
   return rows.map((row, index) => normalizeJupiterTrendingRow(row, window, index + 1));
 }
@@ -116,17 +127,34 @@ export async function fetchGmgnTrending() {
     let skipped = 0;
     for (const [index, row] of rows.entries()) {
       const mint = row?.address || row?.mint;
-      if (!mint || !String(mint).endsWith('pump') || !trendingSignalPass(row)) continue;
+      if (!mint || !trendingSignalPass(row)) continue;
+      const volumeAcceleration = observeVolumeAcceleration({
+        token: { mint },
+        metrics: {
+          priceUsd: row.price,
+          liquidityUsd: row.liquidity,
+          volume5mUsd: row.volume,
+        },
+        trending: row,
+        jupiterAsset: row,
+      });
       // Dedup: skip if already tracked in this trending map (prevents re-trigger every poll cycle)
       if (trending.has(mint)) {
+        trending.set(mint, { ...trending.get(mint), ...row, volumeAcceleration, seenAt });
         skipped++;
         continue;
       }
-      const token = { ...row, address: mint, interval, rank: index + 1, seenAt };
+      const token = { ...row, address: mint, interval, rank: index + 1, volumeAcceleration, seenAt };
       trending.set(mint, token);
       tracked++;
       storeSignalEvent(mint, 'trending', token.source || source, token);
-      if (degenHandler) await degenHandler(mint, token);
+      if (degenHandler) {
+        try {
+          await degenHandler(mint, token);
+        } catch (err) {
+          console.log(`[trending] degenHandler failed for ${mint.slice(0, 8)}: ${err.message}`);
+        }
+      }
       if (trendingCandidateHandler) {
         trendingCandidateHandler({ mint, trendingToken: token, route: 'trending' }).catch(err =>
           console.log(`[trending] candidate trigger failed for ${mint.slice(0, 8)}: ${err.message}`),
@@ -140,5 +168,6 @@ export async function fetchGmgnTrending() {
     const body = err.response?.data;
     const resetAt = body?.reset_at ? ` reset_at=${body.reset_at}` : '';
     if (source !== 'gmgn' || (status !== 403 && status !== 429)) console.log(`[trending:${source}] ${status} ${body?.code || ''} ${body?.message || err.message}${resetAt}`);
+    throw err;
   }
 }

@@ -1,9 +1,11 @@
 #!/usr/bin/env python3
 """General filter: find best UNIVERSAL filters across ALL routes."""
 
-import sqlite3, json
+import sqlite3, json, os
 
-DB_PATH = '/home/ubuntu/projects/charon/charon.sqlite'
+SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
+PROJECT_ROOT = os.path.dirname(SCRIPT_DIR)
+DB_PATH = os.path.join(PROJECT_ROOT, 'angel.sqlite')
 
 def extract(row):
     cj = json.loads(row['candidate_json']) if row['candidate_json'] else {}

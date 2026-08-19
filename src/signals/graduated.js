@@ -3,9 +3,9 @@ import { JSON_HEADERS, GRADUATED_LOOKBACK_MS, GRADUATED_POLL_MS } from '../confi
 import { now, sleep } from '../utils.js';
 import { numSetting, boolSetting } from '../db/settings.js';
 import { fetchGmgnTokenInfo, gmgnBackoffActive, setGmgnBackoff } from '../enrichment/gmgn.js';
+import { pregradTokens } from './pumpfunPregrad.js';
 
 export const graduated = new Map();
-const watchedMints = new Map();
 let pollTimer = null;
 
 const PUMP_FUN_GRADUATION_LIQUIDITY_SOL = 85;
@@ -26,10 +26,13 @@ function isGraduated(info) {
 }
 
 function getRecentPumpMints() {
-  return new Set(watchedMints.keys());
+  return new Set();
 }
 
 export async function fetchGraduatedCoins() {
+  // The former pump.fun advanced endpoint now returns a permanent 404.
+  // Server signals, PumpPortal, and GMGN token polling remain active sources.
+  if (!boolSetting('pump_graduated_endpoint_enabled', false)) return;
   try {
     const res = await axios.get('https://advanced-api-v2.pump.fun/coins/graduated', {
       timeout: 10_000,
@@ -50,36 +53,16 @@ export async function fetchGraduatedCoins() {
     }
     console.log(`[graduated] pump.fun loaded ${coins.length}, tracking ${graduated.size}`);
   } catch (err) {
+    if (err.response?.status === 404) {
+      console.log('[graduated] pump.fun endpoint unavailable (404); using server/PumpPortal/GMGN sources');
+      return;
+    }
     console.log(`[graduated] pump.fun fetch failed: ${err.message}`);
   }
 }
 
 export async function fetchLatestPumpCoins(limit = 50) {
-  try {
-    const res = await axios.get(`https://advanced-api-v2.pump.fun/coins/latest?limit=${limit}`, {
-      timeout: 10_000,
-      headers: JSON_HEADERS,
-    });
-    const coins = Array.isArray(res.data?.coins) ? res.data.coins : [];
-    const cutoff = now() - GRADUATED_LOOKBACK_MS;
-    let added = 0;
-    for (const coin of coins) {
-      const mint = coin?.coinMint || coin?.mint;
-      if (!mint) continue;
-      const createdAt = Number(coin.created_timestamp || coin.createdAt || 0);
-      if (createdAt > 0 && createdAt < cutoff) continue;
-      if (!watchedMints.has(mint)) {
-        watchedMints.set(mint, { addedAt: now(), source: 'pump_latest' });
-        added++;
-      }
-    }
-    for (const [mint, entry] of watchedMints) {
-      if (Number(entry.addedAt || 0) < cutoff) watchedMints.delete(mint);
-    }
-    if (added > 0) console.log(`[graduated] watching ${added} new pump mints (total ${watchedMints.size})`);
-  } catch (err) {
-    console.log(`[graduated] pump.latest fetch failed: ${err.message}`);
-  }
+  // fetchLatestPumpCoins removed — endpoint /coins/latest returns 404
 }
 
 export async function pollGraduationStatus() {
@@ -87,9 +70,9 @@ export async function pollGraduationStatus() {
   if (!boolSetting('graduation_polling_enabled', true)) return;
   const batchSize = Math.max(1, Math.min(20, Math.floor(numSetting('graduation_poll_batch_size', 8))));
   const cutoff = now() - GRADUATED_LOOKBACK_MS;
-  const mints = [...watchedMints.keys()]
+  const mints = [...pregradTokens.keys()]
     .filter(mint => !graduated.has(mint))
-    .sort((a, b) => Number(watchedMints.get(a)?.addedAt || 0) - Number(watchedMints.get(b)?.addedAt || 0))
+    .sort((a, b) => Number(pregradTokens.get(a)?.seenAt || 0) - Number(pregradTokens.get(b)?.seenAt || 0))
     .slice(0, batchSize);
   if (!mints.length) return;
 
@@ -99,7 +82,7 @@ export async function pollGraduationStatus() {
     const info = await fetchGmgnTokenInfo(mint, false);
     if (!info) continue;
     if (!isGraduated(info)) continue;
-    const entry = watchedMints.get(mint) || {};
+    const entry = pregradTokens.get(mint) || {};
     graduated.set(mint, {
       coinMint: mint,
       name: info.name || entry.name || '',
@@ -160,11 +143,11 @@ export function stopGraduationPolling() {
 }
 
 export function _internalForTest() {
-  return { graduated, watchedMints, isGraduated, getRecentPumpMints };
+  return { graduated, isGraduated, getRecentPumpMints };
 }
 
-if (process.env.CHARON_GRADUATED_TEST === '1') {
-  const mint = process.env.CHARON_TEST_MINT;
+if (process.env.ANGEL_GRADUATED_TEST === '1') {
+  const mint = process.env.ANGEL_TEST_MINT;
   if (mint) {
     fetchGmgnTokenInfo(mint, false).then(info => {
       console.log(JSON.stringify({ mint, isGraduated: isGraduated(info), info }, null, 2));

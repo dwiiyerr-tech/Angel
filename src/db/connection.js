@@ -10,6 +10,17 @@ export function initDb() {
       key TEXT PRIMARY KEY,
       value TEXT NOT NULL
     );
+    CREATE TABLE IF NOT EXISTS parameter_mutation_history (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      param_key TEXT NOT NULL,
+      strategy TEXT,
+      old_value TEXT,
+      new_value TEXT,
+      lesson_id INTEGER,
+      applied_at_ms INTEGER NOT NULL,
+      rolled_back INTEGER DEFAULT 0,
+      rollback_reason TEXT
+    );
     CREATE TABLE IF NOT EXISTS saved_wallets (
       label TEXT PRIMARY KEY,
       address TEXT NOT NULL UNIQUE,
@@ -127,6 +138,28 @@ export function initDb() {
       llm_decision_id INTEGER,
       payload_json TEXT NOT NULL
     );
+    CREATE TABLE IF NOT EXISTS execution_operations (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      mint TEXT NOT NULL,
+      side TEXT NOT NULL,
+      status TEXT NOT NULL,
+      position_id INTEGER,
+      intent_id INTEGER,
+      input_amount TEXT,
+      output_amount TEXT,
+      signature TEXT,
+      error TEXT,
+      created_at_ms INTEGER NOT NULL,
+      updated_at_ms INTEGER NOT NULL
+    );
+    CREATE TABLE IF NOT EXISTS live_config_snapshots (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      created_at_ms INTEGER NOT NULL,
+      approved_at_ms INTEGER,
+      checksum TEXT NOT NULL,
+      config_json TEXT NOT NULL,
+      status TEXT NOT NULL DEFAULT 'pending'
+    );
     CREATE TABLE IF NOT EXISTS decision_logs (
       id INTEGER PRIMARY KEY AUTOINCREMENT,
       at_ms INTEGER NOT NULL,
@@ -152,6 +185,26 @@ export function initDb() {
       at_ms INTEGER NOT NULL,
       source TEXT NOT NULL,
       payload_json TEXT NOT NULL
+    );
+    CREATE TABLE IF NOT EXISTS narrative_signals (
+      mint TEXT PRIMARY KEY,
+      ticker TEXT,
+      tweet_velocity_5m INTEGER DEFAULT 0,
+      narrative_theme TEXT,
+      organic_score INTEGER DEFAULT 0,
+      is_authentic INTEGER DEFAULT 0,
+      stage TEXT DEFAULT 'BIRTH',
+      updated_at_ms INTEGER
+    );
+    CREATE TABLE IF NOT EXISTS market_snapshots (
+      mint TEXT PRIMARY KEY,
+      observed_at_ms INTEGER NOT NULL,
+      volume_5m REAL,
+      buys_5m REAL,
+      sells_5m REAL,
+      net_buyers_5m REAL,
+      price_usd REAL,
+      liquidity_usd REAL
     );
     CREATE TABLE IF NOT EXISTS learning_runs (
       id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -193,12 +246,61 @@ export function initDb() {
     );
     CREATE INDEX IF NOT EXISTS idx_alerts_status ON price_alerts(status, expires_at_ms);
     CREATE INDEX IF NOT EXISTS idx_candidates_mint ON candidates(mint);
+    CREATE INDEX IF NOT EXISTS idx_candidates_created_at_ms ON candidates(created_at_ms);
     CREATE INDEX IF NOT EXISTS idx_positions_status ON dry_run_positions(status);
     CREATE INDEX IF NOT EXISTS idx_positions_mint_status ON dry_run_positions(mint, status);
+    CREATE UNIQUE INDEX IF NOT EXISTS idx_positions_one_active_mint
+      ON dry_run_positions(mint)
+      WHERE status IN ('open', 'entry_unknown', 'exit_unknown', 'partial_exit_unknown');
+    CREATE INDEX IF NOT EXISTS idx_positions_candidate_id ON dry_run_positions(candidate_id);
+    CREATE INDEX IF NOT EXISTS idx_llm_decisions_candidate_id ON llm_decisions(candidate_id);
     CREATE INDEX IF NOT EXISTS idx_trade_intents_status ON trade_intents(status);
+    CREATE UNIQUE INDEX IF NOT EXISTS idx_trade_intents_one_pending_buy
+      ON trade_intents(mint)
+      WHERE side = 'buy' AND status IN ('pending_confirmation', 'executing', 'outcome_unknown');
+    CREATE INDEX IF NOT EXISTS idx_execution_operations_status ON execution_operations(status, updated_at_ms);
+    CREATE INDEX IF NOT EXISTS idx_live_config_snapshots_status ON live_config_snapshots(status, approved_at_ms);
+    CREATE UNIQUE INDEX IF NOT EXISTS idx_execution_operations_active_mint_side
+      ON execution_operations(mint, side)
+      WHERE status IN ('pending', 'outcome_unknown');
     CREATE INDEX IF NOT EXISTS idx_decision_logs_mint ON decision_logs(selected_mint);
     CREATE INDEX IF NOT EXISTS idx_signal_events_mint ON signal_events(mint);
+    CREATE INDEX IF NOT EXISTS idx_market_snapshots_observed ON market_snapshots(observed_at_ms);
     CREATE INDEX IF NOT EXISTS idx_learning_lessons_status ON learning_lessons(status, created_at_ms);
+    CREATE TABLE IF NOT EXISTS decision_cache (
+      mint TEXT PRIMARY KEY,
+      verdict TEXT NOT NULL,
+      confidence REAL NOT NULL,
+      reason TEXT,
+      route TEXT,
+      created_at_ms INTEGER NOT NULL,
+      expires_at_ms INTEGER NOT NULL,
+      mcap_snapshot REAL,
+      holders_snapshot INTEGER,
+      liq_snapshot REAL
+    );
+  `);
+  const activeStrategies = db.prepare('SELECT id FROM strategies WHERE enabled = 1 ORDER BY rowid').all();
+  if (activeStrategies.length > 1) {
+    const keepId = activeStrategies[0].id;
+    db.prepare('UPDATE strategies SET enabled = CASE WHEN id = ? THEN 1 ELSE 0 END').run(keepId);
+    console.warn(`[db] normalized multiple active strategies; preserved ${keepId}`);
+  }
+  db.exec('CREATE UNIQUE INDEX IF NOT EXISTS idx_strategies_single_active ON strategies(enabled) WHERE enabled = 1');
+  db.exec(`
+    CREATE TRIGGER IF NOT EXISTS trg_position_delete_trades
+    AFTER DELETE ON dry_run_positions BEGIN
+      DELETE FROM dry_run_trades WHERE position_id = OLD.id;
+      DELETE FROM tp_sl_rules WHERE position_id = OLD.id;
+    END;
+    CREATE TRIGGER IF NOT EXISTS trg_trade_requires_position
+    BEFORE INSERT ON dry_run_trades
+    WHEN NOT EXISTS (SELECT 1 FROM dry_run_positions WHERE id = NEW.position_id)
+    BEGIN SELECT RAISE(ABORT, 'dry_run_trade requires position'); END;
+    CREATE TRIGGER IF NOT EXISTS trg_rule_requires_position
+    BEFORE INSERT ON tp_sl_rules
+    WHEN NOT EXISTS (SELECT 1 FROM dry_run_positions WHERE id = NEW.position_id)
+    BEGIN SELECT RAISE(ABORT, 'tp_sl_rule requires position'); END;
   `);
   ensureColumn('candidates', 'signal_key', 'TEXT');
   db.exec('CREATE UNIQUE INDEX IF NOT EXISTS idx_candidates_signal_key ON candidates(signal_key) WHERE signal_key IS NOT NULL');
@@ -208,31 +310,55 @@ export function initDb() {
   ensureColumn('dry_run_positions', 'token_amount_raw', 'TEXT');
   ensureColumn('dry_run_positions', 'strategy_id', "TEXT DEFAULT 'sniper'");
   ensureColumn('dry_run_positions', 'partial_tp_done', 'INTEGER DEFAULT 0');
+  ensureColumn('dry_run_positions', 'partial_tp_retry_after_ms', 'INTEGER DEFAULT 0');
+  ensureColumn('dry_run_positions', 'realized_pnl_sol', 'REAL DEFAULT 0');
+  ensureColumn('dry_run_positions', 'realized_cost_sol', 'REAL DEFAULT 0');
   ensureColumn('decision_logs', 'strategy_id', 'TEXT');
+  ensureColumn('strategy_evolution', 'config_json', 'TEXT');
+  ensureColumn('strategy_evolution', 'created_at', 'INTEGER');
+  ensureColumn('strategy_evolution', 'reason', 'TEXT');
+  ensureColumn('evolution_cycles', 'error_msg', 'TEXT');
+  ensureColumn('trade_dna', 'token_address', 'TEXT');
+  ensureColumn('parameter_mutation_history', 'rollback_checked_at_ms', 'INTEGER');
+  ensureColumn('learning_lessons', 'approved_at_ms', 'INTEGER');
+  // Lessons created before the human-approval workflow must never silently
+  // become trusted LLM behavior guidance.
+  db.prepare("UPDATE learning_lessons SET status = 'archived' WHERE status = 'active' AND approved_at_ms IS NULL").run();
 
   const defaults = {
     agent_enabled: 'true',
+    learning_auto_apply_enabled: 'false',
+    live_circuit_breaker_open: 'false',
     trading_mode: process.env.TRADING_MODE || 'dry_run',
     llm_candidate_pick_count: process.env.LLM_CANDIDATE_PICK_COUNT || '10',
-    llm_candidate_max_age_ms: process.env.LLM_CANDIDATE_MAX_AGE_MS || String(10 * 60 * 1000),
-    llm_min_confidence: '75',
-    sideways_timeout_minutes: '0',
+    llm_candidate_max_age_ms: process.env.LLM_CANDIDATE_MAX_AGE_MS || String(2 * 60 * 1000),
+    llm_min_confidence: '20',
+    sideways_timeout_minutes: '10',
     max_open_positions: process.env.MAX_OPEN_POSITIONS || '3',
     dry_run_buy_sol: '0.1',
+    min_executable_position_sol: process.env.MIN_EXECUTABLE_POSITION_SOL || '0.001',
+    min_opportunity_size_multiplier: process.env.MIN_OPPORTUNITY_SIZE_MULTIPLIER || '0.35',
     default_tp_percent: '50',
     default_sl_percent: '-25',
     default_trailing_enabled: 'true',
     default_trailing_percent: '20',
+    default_partial_tp_enabled: '1',
+    default_partial_tp_at_percent: '20',
+    default_partial_tp_sell_percent: '25',
     min_fee_claim_sol: process.env.MIN_FEE_CLAIM_SOL || '2',
-    min_mcap_usd: process.env.MIN_MCAP_USD || '25000',
-    min_holders: process.env.MIN_HOLDERS || '30',
+    min_mcap_usd: process.env.MIN_MCAP_USD || '0',
+    min_holders: process.env.MIN_HOLDERS || '168',
     max_mcap_usd: '0',
     min_gmgn_total_fee_sol: '0',
     min_graduated_volume_usd: '0',
     max_top20_holder_percent: '100',
     min_saved_wallet_holders: '0',
+    filter_max_bot_holders_pct: '25',
+    filter_extreme_bot_holders_pct: '70',
+    filter_extreme_dev_migrations: '100',
     gmgn_request_delay_ms: process.env.GMGN_REQUEST_DELAY_MS || '2500',
     gmgn_max_retries: process.env.GMGN_MAX_RETRIES || '2',
+    fresh_gmgn_budget_ms: process.env.FRESH_GMGN_BUDGET_MS || '1200',
     trending_enabled: process.env.TRENDING_ENABLED || 'true',
     trending_source: process.env.TRENDING_SOURCE || 'jupiter',
     trending_allow_degen: process.env.TRENDING_ALLOW_DEGEN || 'false',
@@ -256,11 +382,11 @@ export function initDb() {
     min_source_count: 1,
     require_fee_claim: false,
     token_age_max_ms: 0,
-    min_mcap_usd: 25000,
-    max_mcap_usd: 0,
+    min_mcap_usd: 0,
+    max_mcap_usd: 500000,
     min_fee_claim_sol: 0,
     min_gmgn_total_fee_sol: 0,
-    min_holders: 30,
+    min_holders: 168,
     max_top20_holder_percent: 100,
     min_saved_wallet_holders: 0,
     max_ath_distance_pct: 0,
@@ -270,9 +396,11 @@ export function initDb() {
     trending_max_rug_ratio: 1,
     trending_max_bundler_rate: 1,
     position_size_sol: 0.08,
-    max_open_positions: 3,
+    max_open_positions: 2,
     tp_percent: 25,
     sl_percent: -15,
+    use_dynamic_sl: true,
+    atr_sl_multiplier: 2.5,
     trailing_enabled: true,
     trailing_percent: 10,
     partial_tp: false,
@@ -280,8 +408,11 @@ export function initDb() {
     partial_tp_sell_percent: 0,
     max_hold_ms: 1800000,
     use_llm: true,
-    llm_min_confidence: 40,
+    llm_min_confidence: 20,
     momentum_threshold: 0.5,
+    prescore_hard_floor: 35,
+    prescore_veto_floor: -50,
+    momentum_veto_floor: 0.1,
   }), ts);
 
   stratInsert.run('dip_buy', 'Dip Buy', 0, JSON.stringify({
@@ -289,11 +420,11 @@ export function initDb() {
     min_source_count: 1,
     require_fee_claim: false,
     token_age_max_ms: 86400000,
-    min_mcap_usd: 25000,
+    min_mcap_usd: 0,
     max_mcap_usd: 500000,
     min_fee_claim_sol: 0,
     min_gmgn_total_fee_sol: 0,
-    min_holders: 30,
+    min_holders: 168,
     max_top20_holder_percent: 100,
     min_saved_wallet_holders: 0,
     max_ath_distance_pct: -40,
@@ -306,12 +437,14 @@ export function initDb() {
     max_open_positions: 3,
     tp_percent: 30,
     sl_percent: -20,
+    use_dynamic_sl: true,
+    atr_sl_multiplier: 2.5,
     trailing_enabled: true,
     trailing_percent: 15,
     partial_tp: false,
     partial_tp_at_percent: 0,
     partial_tp_sell_percent: 0,
-    max_hold_ms: 0,
+    max_hold_ms: 1800000,
     use_llm: true,
     llm_min_confidence: 60,
   }), ts);
@@ -321,16 +454,16 @@ export function initDb() {
     min_source_count: 2,
     require_fee_claim: false,
     token_age_max_ms: 86400000,
-    min_mcap_usd: 25000,
+    min_mcap_usd: 0,
     max_mcap_usd: 1000000,
     min_fee_claim_sol: 0,
     min_gmgn_total_fee_sol: 0,
-    min_holders: 30,
+    min_holders: 168,
     max_top20_holder_percent: 50,
     min_saved_wallet_holders: 0,
     max_ath_distance_pct: 0,
     min_graduated_volume_usd: 0,
-    trending_min_volume_usd: 5000,
+    trending_min_volume_usd: 0,
     trending_min_swaps: 100,
     trending_max_rug_ratio: 0.2,
     trending_max_bundler_rate: 0.3,
@@ -338,12 +471,14 @@ export function initDb() {
     max_open_positions: 3,
     tp_percent: 100,
     sl_percent: -25,
+    use_dynamic_sl: true,
+    atr_sl_multiplier: 2.5,
     trailing_enabled: false,
     trailing_percent: 0,
     partial_tp: true,
     partial_tp_at_percent: 100,
     partial_tp_sell_percent: 50,
-    max_hold_ms: 0,
+    max_hold_ms: 1800000,
     use_llm: true,
     llm_min_confidence: 70,
   }), ts);
@@ -353,11 +488,11 @@ export function initDb() {
     min_source_count: 1,
     require_fee_claim: false,
     token_age_max_ms: 3600000,
-    min_mcap_usd: 25000,
+    min_mcap_usd: 0,
     max_mcap_usd: 100000,
     min_fee_claim_sol: 0,
     min_gmgn_total_fee_sol: 0,
-    min_holders: 30,
+    min_holders: 168,
     max_top20_holder_percent: 100,
     min_saved_wallet_holders: 0,
     max_ath_distance_pct: 0,
@@ -370,12 +505,14 @@ export function initDb() {
     max_open_positions: 5,
     tp_percent: 30,
     sl_percent: -15,
+    use_dynamic_sl: true,
+    atr_sl_multiplier: 2.5,
     trailing_enabled: true,
     trailing_percent: 10,
     partial_tp: false,
     partial_tp_at_percent: 0,
     partial_tp_sell_percent: 0,
-    max_hold_ms: 0,
+    max_hold_ms: 1800000,
     use_llm: false,
     llm_min_confidence: 0,
   }), ts);
@@ -383,5 +520,8 @@ export function initDb() {
 
 export function ensureColumn(table, column, ddl) {
   const columns = db.prepare(`PRAGMA table_info(${table})`).all().map(row => row.name);
+  // Some optional subsystems have been removed. Their legacy migration calls
+  // must not make initialization of a fresh database fail.
+  if (columns.length === 0) return;
   if (!columns.includes(column)) db.exec(`ALTER TABLE ${table} ADD COLUMN ${column} ${ddl}`);
 }

@@ -30,3 +30,6 @@ dashboard/
 test_migration_with_key.js
 close_all.js
 backup_trenches_pause.js
+exports/
+backups/
+__pycache__/

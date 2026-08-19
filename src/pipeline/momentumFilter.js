@@ -1,112 +1,50 @@
-/**
- * Momentum filter — calls Python ML model to predict if a candidate
- * will be a runner (TRAILING_TP) or sideways (MAX_HOLD).
- * 
- * SAFETY: If the model fails or times out, returns PASS so Charon
- * never gets stuck waiting for ML.
- */
+import axios from 'axios';
+import { setting } from '../db/settings.js';
 
-import { spawn } from 'child_process';
-import { fileURLToPath } from 'url';
-import path from 'path';
-
-const __dirname = path.dirname(fileURLToPath(import.meta.url));
-const PYTHON_SCRIPT = path.join(__dirname, 'predict_momentum.py');
-const TIMEOUT_MS = 8000; // 8 seconds max for Python
+const ML_SERVICE_PORT = process.env.ML_SERVICE_PORT || 8001;
+const ML_SERVICE_URL = `http://127.0.0.1:${ML_SERVICE_PORT}/predict`;
+const TIMEOUT_MS = 2000;
 const DEFAULT_THRESHOLD = 0.5;
 
 /**
- * Score a candidate using the momentum model.
- * Spawns a fresh Python process per request (model is small, loads fast).
+ * Score a candidate using the ML service.
+ * Fail-open fallback: always passes if service fails/timeouts.
  */
 export async function momentumFilter(candidate, threshold = DEFAULT_THRESHOLD) {
   const startTime = Date.now();
   const mint = candidate.token?.mint?.slice(0, 8) || 'unknown';
+  const failClosed = setting('trading_mode', 'dry_run') !== 'dry_run';
   
   // Check if we have price data
   const price = candidate.gmgn?.price || {};
   if (!price.price && !price.price_1h) {
     console.log(`[momentum] ${mint}... no price data — pass`);
-    return { passed: true, score: 1.0, reason: 'no_price_data' };
+    return { passed: !failClosed, score: failClosed ? -1 : 1.0, reason: 'no_price_data' };
   }
-  
-  return new Promise((resolve) => {
-    const proc = spawn('python3', [PYTHON_SCRIPT], {
-      stdio: ['pipe', 'pipe', 'pipe'],
-      timeout: TIMEOUT_MS,
-    });
+
+  try {
+    const res = await axios.post(ML_SERVICE_URL, { candidate }, { timeout: TIMEOUT_MS });
+    const score = res.data.momentum_score;
     
-    let stdout = '';
-    let stderr = '';
-    let resolved = false;
+    if (score < 0) {
+      console.error(`[momentum] ${mint}... ML error: ${res.data.error || 'unknown'} — pass`);
+      return { passed: !failClosed, score: -1, reason: res.data.error };
+    }
     
-    const finish = (result) => {
-      if (resolved) return;
-      resolved = true;
-      try { proc.kill(); } catch (e) { /* ignore */ }
-      resolve(result);
-    };
+    const passed = score >= threshold;
+    const latency = Date.now() - startTime;
     
-    const timeout = setTimeout(() => {
-      stderr && console.error(`[momentum] ${mint}... stderr: ${stderr.trim()}`);
-      console.error(`[momentum] ${mint}... timeout after ${TIMEOUT_MS}ms — pass`);
-      finish({ passed: true, score: -1, reason: 'timeout' });
-    }, TIMEOUT_MS);
+    if (!passed) {
+      console.log(`[momentum] ${mint}... REJECTED score=${score.toFixed(3)} < ${threshold} (${latency}ms)`);
+    } else {
+      console.log(`[momentum] ${mint}... PASSED score=${score.toFixed(3)} (${latency}ms)`);
+    }
     
-    proc.stdout.on('data', (data) => {
-      stdout += data.toString();
-    });
-    
-    proc.stderr.on('data', (data) => {
-      stderr += data.toString();
-    });
-    
-    proc.on('error', (err) => {
-      clearTimeout(timeout);
-      console.error(`[momentum] ${mint}... spawn error: ${err.message} — pass`);
-      finish({ passed: true, score: -1, reason: err.message });
-    });
-    
-    proc.on('close', (code) => {
-      clearTimeout(timeout);
-      
-      if (code !== 0) {
-        console.error(`[momentum] ${mint}... exit code ${code} — pass`);
-        finish({ passed: true, score: -1, reason: `exit_${code}` });
-        return;
-      }
-      
-      try {
-        const result = JSON.parse(stdout.trim());
-        const score = result.momentum_score;
-        
-        if (score < 0) {
-          console.error(`[momentum] ${mint}... model error: ${result.error} — pass`);
-          finish({ passed: true, score: -1, reason: result.error });
-          return;
-        }
-        
-        const passed = score >= threshold;
-        const latency = Date.now() - startTime;
-        
-        if (!passed) {
-          console.log(`[momentum] ${mint}... REJECTED score=${score.toFixed(3)} < ${threshold} (${latency}ms)`);
-        } else {
-          console.log(`[momentum] ${mint}... PASSED score=${score.toFixed(3)} (${latency}ms)`);
-        }
-        
-        finish({ passed, score, latency });
-      } catch (e) {
-        console.error(`[momentum] ${mint}... JSON parse error: ${e.message} — pass`);
-        finish({ passed: true, score: -1, reason: 'parse_error' });
-      }
-    });
-    
-    // Send candidate JSON to Python
-    const input = JSON.stringify({ candidate });
-    proc.stdin.write(input);
-    proc.stdin.end();
-  });
+    return { passed, score, latency };
+  } catch (err) {
+    console.error(`[momentum] ${mint}... ML service failed: ${err.message} — pass (fail-open)`);
+    return { passed: !failClosed, score: -1, reason: err.message };
+  }
 }
 
 /**

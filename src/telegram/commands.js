@@ -27,13 +27,21 @@ import { refreshPosition } from '../execution/positions.js';
 import { executeLiveSell } from '../execution/router.js';
 import { handleCallback, editMenuMessage } from './callbacks.js';
 import { consumeNumericFilterInput } from './input.js';
-import { runLearning, sendLessons } from '../learning/commands.js';
+import { approveLesson, rejectLesson, runLearning, sendLessons } from '../learning/commands.js';
 import { fetchWalletPnl } from '../enrichment/wallets.js';
 import { sendDailyReport } from './dailyReport.js';
+import { runBackup, getBackupStatus } from '../db/backup.js';
+import { runLLMCalibration } from '../pipeline/llmCalibrator.js';
+import { setting } from '../db/settings.js';
+import { approveLiveConfigSnapshot, approvedLiveConfig, createLiveConfigSnapshot, liveConfigChecksum } from '../db/liveConfig.js';
 
 export async function handleMessage(msg) {
   const text = (msg.text || '').trim();
   const chatId = msg.chat.id;
+  if (String(chatId) !== String(TELEGRAM_CHAT_ID)) {
+    console.warn(`[telegram] ignored unauthorized chat ${chatId}`);
+    return;
+  }
   if (await consumeNumericFilterInput(chatId, text, msg.message_id)) return;
   if (!text.startsWith('/')) return;
   if (text.startsWith('/menu')) return sendMenu(chatId);
@@ -57,11 +65,11 @@ export async function handleMessage(msg) {
     const [, id, key, ...rest] = parts;
     const value = rest.join(' ');
     if (!id || !key || !value) {
-      return bot.sendMessage(chatId, 'Usage: /stratset <strategy_id> <key> <value>\n\nExample: /stratset sniper tp_percent 75\n\nKeys: tp_percent, sl_percent, position_size_sol, max_open_positions, min_mcap_usd, max_mcap_usd, min_holders, trailing_enabled, trailing_percent, partial_tp, partial_tp_at_percent, partial_tp_sell_percent, max_hold_ms, use_llm, llm_min_confidence, min_source_count, require_fee_claim, min_fee_claim_sol, min_gmgn_total_fee_sol, max_ath_distance_pct');
+      return bot.sendMessage(chatId, 'Usage: /stratset <strategy_id> <key> <value>\n\nExample: /stratset sniper tp_percent 75\n\nKeys: tp_percent, sl_percent, position_size_sol, max_open_positions, min_mcap_usd, max_mcap_usd, min_holders, trailing_enabled, trailing_percent, partial_tp, partial_tp_at_percent, partial_tp_sell_percent, max_hold_ms, use_llm, llm_min_confidence, min_source_count, require_fee_claim, min_fee_claim_sol, min_gmgn_total_fee_sol, max_ath_distance_pct, win_block_days');
     }
     const strat = strategyById(id);
     if (!strat) return bot.sendMessage(chatId, `Strategy "${id}" not found.`);
-    const numKeys = new Set(['tp_percent', 'sl_percent', 'position_size_sol', 'max_open_positions', 'min_mcap_usd', 'max_mcap_usd', 'min_holders', 'max_top20_holder_percent', 'trailing_percent', 'partial_tp_at_percent', 'partial_tp_sell_percent', 'max_hold_ms', 'llm_min_confidence', 'min_source_count', 'min_fee_claim_sol', 'min_gmgn_total_fee_sol', 'max_ath_distance_pct', 'token_age_max_ms', 'trending_min_volume_usd', 'trending_min_swaps', 'trending_max_rug_ratio', 'trending_max_bundler_rate', 'min_saved_wallet_holders', 'min_graduated_volume_usd']);
+    const numKeys = new Set(['tp_percent', 'sl_percent', 'position_size_sol', 'max_open_positions', 'min_mcap_usd', 'max_mcap_usd', 'min_holders', 'max_top20_holder_percent', 'trailing_percent', 'partial_tp_at_percent', 'partial_tp_sell_percent', 'max_hold_ms', 'llm_min_confidence', 'min_source_count', 'min_fee_claim_sol', 'min_gmgn_total_fee_sol', 'max_ath_distance_pct', 'token_age_max_ms', 'trending_min_volume_usd', 'trending_min_swaps', 'trending_max_rug_ratio', 'trending_max_bundler_rate', 'min_saved_wallet_holders', 'min_graduated_volume_usd', 'win_block_days']);
     const boolKeys = new Set(['trailing_enabled', 'partial_tp', 'use_llm', 'require_fee_claim']);
     const newConfig = { ...strat };
     delete newConfig.id;
@@ -78,11 +86,113 @@ export async function handleMessage(msg) {
   }
   if (text.startsWith('/pnl')) return sendPnl(chatId);
   if (text.startsWith('/report')) return sendDailyReport(chatId);
+  if (text.startsWith('/backup')) {
+    try {
+      const backupPath = await runBackup();
+      const status = getBackupStatus();
+      const filename = backupPath.split('/').pop();
+      return bot.sendMessage(chatId, `✅ Backup created: ${filename} (${status.size_mb}MB)\n\nLast 3 backups:\n${status.recent.join('\n')}`);
+    } catch (e) {
+      return bot.sendMessage(chatId, `🔴 Database Backup Failed: ${e.message}`);
+    }
+  }
+  if (text.startsWith('/status')) {
+    const backup = getBackupStatus();
+    const mode = setting('trading_mode') || 'dry_run';
+    const macro = setting('current_macro_state') || 'UNKNOWN';
+    let cal = 'No calibration data';
+    try {
+      cal = await runLLMCalibration() || cal;
+    } catch (e) {}
+    
+    return bot.sendMessage(chatId, `🤖 <b>System Status</b>\n\nMode: ${mode}\nMacro: ${macro}\n\n<b>LLM Calibration:</b>\n${cal}\n\n<b>Backup:</b>\nLast: ${backup.last_backup || 'None'} (${backup.size_mb}MB)`, { parse_mode: 'HTML' });
+  }
+  if (text.startsWith('/mutations')) {
+    const mutations = db.prepare('SELECT * FROM parameter_mutation_history ORDER BY id DESC LIMIT 10').all();
+    if (!mutations.length) return bot.sendMessage(chatId, 'No recent mutations.');
+    const lines = mutations.map(m => {
+      const status = m.rolled_back ? '❌ ROLLED BACK' : '✅ ACTIVE';
+      return `• ${m.param_key}: ${m.old_value} → ${m.new_value} [${status}]`;
+    });
+    return bot.sendMessage(chatId, `🧬 <b>Recent Mutations</b>\n\n${lines.join('\n')}`, { parse_mode: 'HTML' });
+  }
+  if (text.startsWith('/livestatus')) {
+    const approved = approvedLiveConfig();
+    const checksum = liveConfigChecksum();
+    const unresolved = db.prepare("SELECT count(*) AS count FROM execution_operations WHERE status IN ('pending', 'outcome_unknown')").get().count;
+    return bot.sendMessage(chatId, [
+      '🔐 <b>Live Configuration</b>',
+      '',
+      `Current checksum: <code>${checksum}</code>`,
+      `Approved snapshot: ${approved ? `#${approved.id}` : 'none'}`,
+      `Mode: ${escapeHtml(setting('trading_mode', 'dry_run'))}`,
+      `Unresolved executions: ${unresolved}`,
+      `Circuit breaker: ${escapeHtml(setting('live_circuit_breaker_open', 'false'))}`,
+    ].join('\n'), { parse_mode: 'HTML' });
+  }
+  if (text.startsWith('/liveapprove')) {
+    const [, actionOrId, checksum] = text.split(/\s+/);
+    if (actionOrId === 'create') {
+      if (setting('trading_mode', 'dry_run') !== 'dry_run') {
+        return bot.sendMessage(chatId, 'Switch to dry_run before creating a live snapshot.');
+      }
+      const snapshot = createLiveConfigSnapshot();
+      return bot.sendMessage(chatId, [
+        `🔐 Live snapshot #${snapshot.id} created.`,
+        '',
+        `<code>${snapshot.checksum}</code>`,
+        '',
+        `Review it, then approve with:`,
+        `<code>/liveapprove ${snapshot.id} ${snapshot.checksum}</code>`,
+      ].join('\n'), { parse_mode: 'HTML' });
+    }
+    const id = Number(actionOrId);
+    if (!Number.isInteger(id) || !checksum) {
+      return bot.sendMessage(chatId, 'Usage: /liveapprove create OR /liveapprove <id> <full-checksum>');
+    }
+    try {
+      const approved = approveLiveConfigSnapshot(id, checksum);
+      return bot.sendMessage(chatId, `✅ Snapshot #${approved.id} approved. Live mode may now be enabled while its checksum remains unchanged.`);
+    } catch (error) {
+      return bot.sendMessage(chatId, `❌ Approval failed: ${error.message}`);
+    }
+  }
+  if (text.startsWith('/circuitreset')) {
+    if (setting('trading_mode', 'dry_run') !== 'dry_run') {
+      return bot.sendMessage(chatId, 'Circuit reset requires trading_mode=dry_run.');
+    }
+    const unresolved = db.prepare("SELECT count(*) AS count FROM execution_operations WHERE status IN ('pending', 'outcome_unknown')").get().count;
+    if (unresolved > 0) return bot.sendMessage(chatId, `Cannot reset: ${unresolved} unresolved execution(s).`);
+    setSetting('live_circuit_breaker_open', 'false');
+    return bot.sendMessage(chatId, '✅ Circuit breaker reset in dry_run. Create and approve a fresh live snapshot before live/confirm execution.');
+  }
   if (text.startsWith('/learn')) {
     const windowArg = text.split(/\s+/)[1] || '12h';
     return runLearning(chatId, windowArg);
   }
   if (text.startsWith('/lessons')) return sendLessons(chatId);
+  if (text.startsWith('/executions')) {
+    const rows = db.prepare(`
+      SELECT id, mint, side, status, signature, error, updated_at_ms
+      FROM execution_operations ORDER BY id DESC LIMIT 10
+    `).all();
+    const lines = rows.map(row => `#${row.id} ${row.side.toUpperCase()} ${escapeHtml(row.mint.slice(0, 10))}… [${escapeHtml(row.status)}]${row.signature ? ` sig:${escapeHtml(row.signature.slice(0, 12))}…` : ''}${row.error ? `\n${escapeHtml(row.error.slice(0, 160))}` : ''}`);
+    return bot.sendMessage(chatId, `💸 <b>Execution Ledger</b>\n\n${lines.join('\n\n') || 'No execution operations.'}`, { parse_mode: 'HTML' });
+  }
+  if (text.startsWith('/lessonapprove')) {
+    const id = Number(text.split(/\s+/)[1]);
+    if (!Number.isInteger(id)) return bot.sendMessage(chatId, 'Usage: /lessonapprove <id>');
+    return bot.sendMessage(chatId, approveLesson(id)
+      ? `✅ Lesson #${id} approved for LLM context (expires after 30 days).`
+      : `Lesson #${id} is not an approval-ready candidate.`);
+  }
+  if (text.startsWith('/lessonreject')) {
+    const id = Number(text.split(/\s+/)[1]);
+    if (!Number.isInteger(id)) return bot.sendMessage(chatId, 'Usage: /lessonreject <id>');
+    return bot.sendMessage(chatId, rejectLesson(id)
+      ? `Rejected lesson #${id}.`
+      : `Lesson #${id} is not an approval-ready candidate.`);
+  }
   if (text.startsWith('/candidate')) {
     const mint = text.split(/\s+/)[1];
     if (!mint) return bot.sendMessage(chatId, 'Usage: /candidate <mint>');
@@ -240,7 +350,7 @@ export async function toggleTrailing(chatId, id, query = null) {
 
 export function setupTelegram() {
   bot.setMyCommands([
-    { command: 'menu', description: 'Open Charon menu' },
+    { command: 'menu', description: 'Open Angel menu' },
     { command: 'strategy', description: 'Show/switch strategy' },
     { command: 'stratset', description: 'Set strategy config (stratset id key value)' },
     { command: 'positions', description: 'Show dry-run positions' },
@@ -253,11 +363,24 @@ export function setupTelegram() {
     { command: 'walletadd', description: 'Save wallet for exposure/PnL' },
     { command: 'walletremove', description: 'Remove saved wallet' },
     { command: 'wallets', description: 'List saved wallets' },
-  ]).catch(err => console.log(`[telegram] commands ${err.message}`));
+    { command: 'backup', description: 'Create SQLite backup' },
+    { command: 'status', description: 'Show system status and LLM calibration' },
+    { command: 'mutations', description: 'List recent mutations' },
+    { command: 'livestatus', description: 'Show live configuration approval' },
+    { command: 'liveapprove', description: 'Create/approve a live snapshot' },
+    { command: 'executions', description: 'Show durable execution ledger' },
+    { command: 'circuitreset', description: 'Reset latched breaker in dry_run' },
+    { command: 'lessonapprove', description: 'Approve an LLM lesson candidate' },
+    { command: 'lessonreject', description: 'Reject an LLM lesson candidate' },
+  ]).catch(err => {
+    const msg = err?.message || String(err);
+    if (!msg.includes('EFATAL') && !msg.includes('AggregateError')) {
+      console.log(`[telegram] command registration failed: ${msg}`);
+    }
+  });
 
   bot.on('callback_query', query => handleCallback(query).catch(err => console.log(`[callback] ${err.message}`)));
   bot.on('message', msg => handleMessage(msg).catch(err => console.log(`[message] ${err.message}`)));
-  bot.on('polling_error', err => console.log(`[telegram] polling ${err.message}`));
 }
 
 async function sendMenu(chatId = TELEGRAM_CHAT_ID) {

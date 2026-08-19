@@ -113,7 +113,10 @@ export function parseDistFees(data) {
 export function strictJsonFromText(text) {
   const clean = stripThinking(text);
   const fenced = clean.match(/```(?:json)?\s*([\s\S]*?)```/i)?.[1];
-  const raw = fenced || clean.match(/\{[\s\S]*\}/)?.[0] || clean;
+  const raw = (fenced || clean.match(/\{[\s\S]*\}/)?.[0] || clean || '').trim();
+  if (!raw) {
+    throw new Error('Empty response from LLM');
+  }
   return JSON.parse(raw);
 }
 
@@ -143,8 +146,10 @@ export function formatWindow(ms) {
   return `${Math.round(ms / 60_000)}m`;
 }
 
-export function makeFailureTracker(name, alertFn, threshold = 3) {
+export function makeFailureTracker(name, alertFn, threshold = 10, onThreshold = null) {
   let count = 0;
+  let lastAlertMs = 0;
+  const COOLDOWN_MS = 5 * 60 * 1000; // 5 minutes between alerts
   return async (fn) => {
     try {
       await fn();
@@ -152,8 +157,10 @@ export function makeFailureTracker(name, alertFn, threshold = 3) {
     } catch (err) {
       count++;
       console.log(`[${name}] ${err.message}`);
-      if (count >= threshold) {
+      if (count >= threshold && (Date.now() - lastAlertMs) >= COOLDOWN_MS) {
         alertFn(`⚠️ <b>${name}</b> failed ${count}x in a row: ${err.message}`).catch(() => {});
+        if (onThreshold) await onThreshold(err);
+        lastAlertMs = Date.now();
         count = 0;
       }
     }

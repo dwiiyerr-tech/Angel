@@ -1,9 +1,10 @@
 #!/usr/bin/env python3
 """Verify: did the backtest run on positions that already passed ALL filters?"""
-import sqlite3, json
+import sqlite3, json, os
 import pandas as pd
 
-DB_PATH = "/home/ubuntu/projects/charon/charon.sqlite"
+SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
+DB_PATH = os.path.join(SCRIPT_DIR, "charon.sqlite")
 
 db = sqlite3.connect(f"file:{DB_PATH}?mode=ro", uri=True)
 db.row_factory = sqlite3.Row

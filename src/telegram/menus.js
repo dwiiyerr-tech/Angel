@@ -28,7 +28,7 @@ export function menuKeyboard() {
 export function filtersText() {
   const strat = activeStrategy();
   return [
-    `⚙️ <b>Charon Filters</b> (${escapeHtml(strat.name)})`,
+    `⚙️ <b>Angel Filters</b> (${escapeHtml(strat.name)})`,
     `Min claim fee: ${fmtSol(strat.min_fee_claim_sol)} SOL`,
     `Min mcap: ${fmtUsd(strat.min_mcap_usd)}`,
     `Max mcap: ${strat.max_mcap_usd > 0 ? fmtUsd(strat.max_mcap_usd) : 'off'}`,
@@ -116,7 +116,7 @@ export function filtersKeyboard() {
 export function agentText() {
   const strat = activeStrategy();
   return [
-    '🛶 <b>Charon Agent</b>',
+    '🛶 <b>Angel Agent</b>',
     `Strategy: <b>${escapeHtml(strat.name)}</b>`,
     `Agent: <b>${boolSetting('agent_enabled', true) ? 'on' : 'off'}</b>`,
     `Mode: <b>${escapeHtml(tradingMode())}</b>`,
@@ -124,7 +124,7 @@ export function agentText() {
     `Confidence: ${fmtPct(strat.llm_min_confidence || numSetting('llm_min_confidence'))}`,
     `Open positions: ${openPositionCount()}/${strat.max_open_positions || 'unlimited'}`,
     `Batch candidates: ${numSetting('llm_candidate_pick_count', 10)}`,
-    `Candidate freshness: ${Math.round(numSetting('llm_candidate_max_age_ms', 600000) / 1000)}s`,
+    `Candidate freshness: ${Math.round(numSetting('llm_candidate_max_age_ms', 120000) / 1000)}s`,
     `Size: ${fmtSol(strat.position_size_sol)} SOL`,
     `TP/SL: ${fmtPct(strat.tp_percent)} / ${fmtPct(strat.sl_percent)}`,
     `Trailing: ${strat.trailing_enabled ? fmtPct(strat.trailing_percent) : 'off'}`,
@@ -151,9 +151,9 @@ export function agentKeyboard() {
           { text: 'Batch 10', callback_data: 'set:llm_candidate_pick_count:10' },
         ],
         [
+          { text: 'Fresh 2m', callback_data: 'set:llm_candidate_max_age_ms:120000' },
           { text: 'Fresh 5m', callback_data: 'set:llm_candidate_max_age_ms:300000' },
           { text: 'Fresh 10m', callback_data: 'set:llm_candidate_max_age_ms:600000' },
-          { text: 'Fresh 20m', callback_data: 'set:llm_candidate_max_age_ms:1200000' },
         ],
         [{ text: 'Back', callback_data: 'menu:main' }],
       ],
@@ -173,7 +173,7 @@ export function navKeyboard(rows = []) {
 }
 
 export function mainMenuText() {
-  return `🛶 <b>Charon</b>\nDry-run trench agent online.`;
+  return `🛶 <b>Angel</b>\nDry-run trench agent online.`;
 }
 
 export function walletsText() {
@@ -209,6 +209,7 @@ export function strategyMenuText() {
     strat.max_ath_distance_pct < 0 ? `Max ATH distance: ${strat.max_ath_distance_pct}%` : null,
     strat.partial_tp ? `Partial TP: ${strat.partial_tp_sell_percent}% at ${fmtPct(strat.partial_tp_at_percent)}` : null,
     strat.max_hold_ms > 0 ? `Max hold: ${Math.round(strat.max_hold_ms / 60000)}m` : null,
+    `Win Block: ${strat.win_block_days ?? 'default'} days`,
     strat.use_llm ? `LLM: yes (min ${strat.llm_min_confidence}%)` : 'LLM: no (rule-based)',
     '',
     ...all.map(s => `${s.enabled ? '▶' : '○'} ${s.name}`),
@@ -248,8 +249,11 @@ export function strategyKeyboard() {
       { text: `Conf ${strat.llm_min_confidence}%`, callback_data: 'stratinput:llm_min_confidence' },
     ],
     [
-      { text: `Partial TP ${strat.partial_tp ? 'on' : 'off'}`, callback_data: 'stratcfg:partial_tp' },
+      { text: `Win Block ${strat.win_block_days ?? 'def'}d`, callback_data: 'stratinput:win_block_days' },
       { text: `Max Hold ${strat.max_hold_ms > 0 ? Math.round(strat.max_hold_ms/60000)+'m' : 'off'}`, callback_data: 'stratinput:max_hold_ms' },
+    ],
+    [
+      { text: `Partial TP ${strat.partial_tp ? 'on' : 'off'}`, callback_data: 'stratcfg:partial_tp' },
     ],
     [
       { text: `Claim Fee ${fmtSol(strat.min_fee_claim_sol)} SOL`, callback_data: 'stratinput:min_fee_claim_sol' },

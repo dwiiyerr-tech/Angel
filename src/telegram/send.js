@@ -12,12 +12,26 @@ import { generateExitCard } from '../visuals/exitCard.js';
 import { writeFileSync, unlinkSync } from 'fs';
 
 export async function sendTelegram(text, extra = {}) {
-  return bot.sendMessage(TELEGRAM_CHAT_ID, text, {
-    parse_mode: 'HTML',
-    disable_web_page_preview: true,
-    ...(TELEGRAM_TOPIC_ID ? { message_thread_id: Number(TELEGRAM_TOPIC_ID) } : {}),
-    ...extra,
-  });
+  const options = {
+      parse_mode: 'HTML',
+      disable_web_page_preview: true,
+      ...(TELEGRAM_TOPIC_ID ? { message_thread_id: Number(TELEGRAM_TOPIC_ID) } : {}),
+      ...extra,
+    };
+  let lastError;
+  for (let attempt = 1; attempt <= 3; attempt++) {
+    try {
+      return await bot.sendMessage(TELEGRAM_CHAT_ID, text, options);
+    } catch (error) {
+      lastError = error;
+      const status = Number(error?.response?.statusCode || error?.response?.status || 0);
+      const retryable = status === 429 || status >= 500 || /EFATAL|AggregateError|ECONNRESET|ETIMEDOUT|socket hang up/i.test(error?.message || '');
+      if (!retryable || attempt === 3) throw error;
+      const retryAfterMs = Number(error?.response?.body?.parameters?.retry_after || 0) * 1000;
+      await new Promise(resolve => setTimeout(resolve, Math.max(retryAfterMs, attempt * 1000)));
+    }
+  }
+  throw lastError;
 }
 
 export async function sendCandidateAlert(candidateId, candidate, decision) {
@@ -55,7 +69,7 @@ export async function sendBatch(chatId, batchId) {
     `Batch: <b>#${batchId}</b> · Decision: <b>${escapeHtml(batch.verdict)}</b> ${fmtPct(batch.confidence)}`,
     batch.reason ? `Reason: ${escapeHtml(String(batch.reason).slice(0, 500))}` : null,
     '',
-    ...batch.rows.map((row, index) => compactCandidateLine(row, index + 1)),
+    ...batch.rows.slice(0, 15).map((row, index) => compactCandidateLine(row, index + 1)),
   ];
   const keyboard = batch.rows.slice(0, 10).map((row, index) => ([{
     text: `${index + 1}. ${row.candidate.token?.symbol || short(row.candidate.token?.mint || '')}`,
@@ -66,7 +80,7 @@ export async function sendBatch(chatId, batchId) {
     parse_mode: 'HTML',
     disable_web_page_preview: true,
     reply_markup: { inline_keyboard: keyboard },
-  });
+  }).catch(err => console.error('[sendBatch] Failed:', err.message));
 }
 
 export async function sendPositionOpen(positionId) {
@@ -77,7 +91,7 @@ export async function sendPositionOpen(positionId) {
   let photoSent = false;
   try {
     const buffer = await generateEntryCard(position);
-    const tmpPath = `/tmp/charon_entry_${positionId}.png`;
+    const tmpPath = `/tmp/angel_entry_${positionId}.png`;
     writeFileSync(tmpPath, buffer);
     await bot.sendPhoto(TELEGRAM_CHAT_ID, tmpPath, {
       caption: text,
@@ -102,7 +116,7 @@ export async function sendPositionExit(position) {
   let photoSent = false;
   try {
     const buffer = await generateExitCard(position);
-    const tmpPath = `/tmp/charon_exit_${position.id}.png`;
+    const tmpPath = `/tmp/angel_exit_${position.id}.png`;
     writeFileSync(tmpPath, buffer);
     await bot.sendPhoto(TELEGRAM_CHAT_ID, tmpPath, {
       caption: text,
@@ -120,13 +134,13 @@ export async function sendPositionExit(position) {
   }
 }
 
-export async function sendTradeIntent(intentId, candidate, decision) {
+export async function sendTradeIntent(intentId, candidate, decision, approvedSizeSol) {
   await sendTelegram([
     '🧾 <b>Trade intent awaiting confirmation</b>',
     '',
     candidateSummary(candidate, decision),
     '',
-    `Size: <b>${fmtSol(numSetting('dry_run_buy_sol', 0.1))} SOL</b>`,
+    `Maximum approved size: <b>${fmtSol(approvedSizeSol)} SOL</b>`,
     'Execution: confirmation required before signing.',
   ].join('\n'), intentButtons(intentId));
 }

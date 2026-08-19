@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-Retroactive fill reconstruction for Charon dry-run trades.
+Retroactive fill reconstruction for Angel dry-run trades.
 
 Dry-run "fills" at the snapshot price. This script pulls the REAL 1-second
 price prints from Jupiter's chart API (quote=usd) around each entry/exit
@@ -13,10 +13,12 @@ The only cost it CANNOT model is whether your tx actually lands (tip sufficiency
 
 Usage: python3 scripts/fill_reconstruct.py [--days 7] [--limit N] [--latency 2]
 """
-import sqlite3, json, time, argparse, urllib.request, urllib.error
+import sqlite3, json, time, argparse, urllib.request, urllib.error, os
 from statistics import median
 
-DB = "/home/ubuntu/projects/charon/charon.sqlite"
+SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
+PROJECT_ROOT = os.path.dirname(SCRIPT_DIR)
+DB = os.path.join(PROJECT_ROOT, "angel.sqlite")
 CHART = "https://datapi.jup.ag/v2/charts/{mint}?interval=1_SECOND&to={to_ms}&candles=90&type=price&quote=usd"
 
 # ---- friction knobs (analytic grid applied after fills are fetched) ----
@@ -25,7 +27,7 @@ FEE_PCT_SIDE  = [0.0025, 0.005, 0.010] # AMM/LP+platform fee per side (0.25% / 0
 TIP_SOL_TX    = [0.0005, 0.001, 0.002] # priority fee + jito tip per tx (SOL)
 
 REQ_DELAY = 0.18
-HEADERS = {"Accept": "application/json", "User-Agent": "charon-fill-recon/1.0"}
+HEADERS = {"Accept": "application/json", "User-Agent": "angel-fill-recon/1.0"}
 
 def http_get(url, retries=4):
     for i in range(retries):
@@ -142,7 +144,9 @@ def main():
                 if used:
                     print(f"{L:>6}s {fee*100:>7.2f}% {tip:>8.4f} {tot:>+9.2f} {tot-paper_tot:>+9.2f} {100*wins/used:>5.1f}% {tot/used*1000:>+8.1f}")
     # persist per-trade for inspection
-    out = "/home/ubuntu/projects/charon/reports/fill_recon.json"
+    out_dir = os.path.join(PROJECT_ROOT, "reports")
+    os.makedirs(out_dir, exist_ok=True)
+    out = os.path.join(out_dir, "fill_recon.json")
     with open(out, "w") as f:
         json.dump({"n": n, "paper_norm_sol": paper_tot,
                    "trades": [{"size": r["size"], "paper_entry": r["paper_entry"], "paper_exit": r["paper_exit"],

@@ -1,21 +1,23 @@
 #!/bin/bash
-# Charon Health Monitor Script
+# Angel Health Monitor Script
 # Checks: process, signals, trades, config
 
-DB="/home/ubuntu/projects/charon/charon.sqlite"
-LOG="/tmp/charon.log"
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+PROJECT_ROOT="$(dirname "$SCRIPT_DIR")"
+DB="$PROJECT_ROOT/angel.sqlite"
+LOG="/tmp/angel.log"
 
-echo "=== CHARON HEALTH CHECK $(date) ==="
+echo "=== ANGEL HEALTH CHECK $(date) ==="
 
 # 1. Process check
 echo -e "\n[PROCESS]"
 PIDS=$(pgrep -f "node index" | head -1)
 if [ -z "$PIDS" ]; then
-    echo "❌ CRITICAL: Charon NOT running!"
-    cd /home/ubuntu/projects/charon && node index.js &
-    echo "🔄 Auto-restarted Charon"
+    echo "❌ CRITICAL: Angel NOT running!"
+    cd "$PROJECT_ROOT" && node index.js &
+    echo "🔄 Auto-restarted Angel"
 else
-    echo "✅ Charon running (PID: $PIDS)"
+    echo "✅ Angel running (PID: $PIDS)"
 fi
 
 # 2. Config check

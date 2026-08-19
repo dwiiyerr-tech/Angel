@@ -21,14 +21,19 @@ import { sendTelegram, sendBatch, sendPositionOpen, sendTradeIntent } from './se
 import { candidateSummary } from './format.js';
 import { candidateById, updateCandidateStatus } from '../db/candidates.js';
 import { storeDecision, logDecisionEvent } from '../db/decisions.js';
-import { createDryRunPosition, canOpenMorePositions, openPositionCount, tradingMode } from '../db/positions.js';
+import { createDryRunPosition, canOpenMorePositions, openPositionCount, tradingMode, incrementPendingPosition, decrementPendingPosition } from '../db/positions.js';
 import { executeLiveBuy, executeConfirmedIntent, rejectIntent } from '../execution/router.js';
+import { refreshCandidateForExecution } from '../execution/positions.js';
 import { sendCandidate, sendPosition, closePosition, updatePositionRule, toggleTrailing } from './commands.js';
 import { requestNumericFilterInput, requestStrategyNumericInput } from './input.js';
 
 export async function handleCallback(query) {
   const data = query.data || '';
   const chatId = query.message?.chat?.id || TELEGRAM_CHAT_ID;
+  if (String(chatId) !== String(TELEGRAM_CHAT_ID)) {
+    console.warn(`[telegram] ignored unauthorized callback chat ${chatId}`);
+    return bot.answerCallbackQuery(query.id, { text: 'Unauthorized' }).catch(() => {});
+  }
   await answerCallback(query);
   if (!data.startsWith('input:') && !data.startsWith('stratinput:')) {
     const { pendingNumericInputs } = await import('./input.js');
@@ -101,22 +106,35 @@ export async function handleCallback(query) {
     const decision = { verdict: 'BUY', confidence: 100, reason: 'Manual dry buy', risks: [], suggested_tp_percent: numSetting('default_tp_percent', 50), suggested_sl_percent: numSetting('default_sl_percent', -25) };
     const decisionId = storeDecision(row.id, candidate, decision);
     decision.id = decisionId;
-    if (tradingMode() === 'live') {
-      await executeLiveBuy(row, decision, 'manual', [row], row.id);
-      return;
-    }
-    const positionId = await createDryRunPosition(row.id, candidate, decision, 'manual_buy');
-    logDecisionEvent({
-      batchId: 'manual',
-      triggerCandidateId: row.id,
-      selectedRow: row,
-      rows: [row],
-      decision,
-      mode: tradingMode(),
-      action: 'manual_dry_run_entry',
-      execution: { positionId },
+    incrementPendingPosition();
+    try {
+      if (tradingMode() === 'live') {
+        const freshRow = await refreshCandidateForExecution(row);
+        if (!freshRow.candidate.filters?.passed) {
+          return bot.sendMessage(chatId, `Manual live buy rejected by fresh safety check: ${(freshRow.candidate.filters?.failures || []).join('; ')}`);
+        }
+        await executeLiveBuy(freshRow, decision, 'manual', [freshRow], row.id);
+        return;
+      }
+      const result = await createDryRunPosition(row.id, candidate, decision, 'manual_buy');
+      const { id: positionId, isNew, blockedBy } = result;
+      logDecisionEvent({
+        batchId: 'manual',
+        triggerCandidateId: row.id,
+        selectedRow: row,
+        rows: [row],
+        decision,
+        mode: tradingMode(),
+      action: isNew ? 'manual_dry_run_entry' : `manual_dry_run_blocked_${blockedBy || 'duplicate'}`,
+      execution: { positionId, isNew, blockedBy: blockedBy || null },
     });
-    return sendPositionOpen(positionId);
+      if (!isNew) {
+        return bot.sendMessage(chatId, `Manual dry buy blocked: ${blockedBy || 'position already exists or is in cooldown'}.`);
+      }
+      return sendPositionOpen(positionId);
+    } finally {
+      decrementPendingPosition();
+    }
   }
   if (kind === 'tpsl') return sendTpSlDefaults(chatId, query);
   if (kind === 'pos') return sendPosition(chatId, Number(id), query);

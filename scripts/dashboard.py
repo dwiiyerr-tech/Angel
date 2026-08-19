@@ -1,10 +1,12 @@
 #!/usr/bin/env python3
-"""Charon HTML dashboard — mobile-friendly, Chart.js, auto-refresh."""
+"""Angel HTML dashboard — mobile-friendly, Chart.js, auto-refresh."""
 import sqlite3, json, time, os
 from http.server import HTTPServer, BaseHTTPRequestHandler
 from urllib.parse import urlparse
 
-DB = "/home/ubuntu/projects/charon/charon.sqlite"
+SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
+PROJECT_ROOT = os.path.dirname(SCRIPT_DIR)
+DB = os.path.join(PROJECT_ROOT, "angel.sqlite")
 REFRESH_SEC = 30
 # Audit started: 2026-07-05 19:21:19 UTC (when LLM was disabled)
 AUDIT_START_MS = 1783250479272
@@ -40,7 +42,7 @@ HTML = """<!DOCTYPE html>
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width,initial-scale=1.0,maximum-scale=1.0,user-scalable=no">
-<title>Charon Monitor</title>
+<title>Angel Monitor</title>
 <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.0/dist/chart.umd.min.js"></script>
 <style>
 *{margin:0;padding:0;box-sizing:border-box}
@@ -68,7 +70,7 @@ tr:hover{background:#1c2128}
 </style>
 </head>
 <body>
-<h1>🛶 Charon Audit Monitor</h1>
+<h1>🛶 Angel Audit Monitor</h1>
 <div class="stats" id="stats"></div>
 <div class="chart-box"><h2>PnL Timeline (since LLM off)</h2><canvas id="pnlChart"></canvas></div>
 <div class="chart-box"><h2>Route PnL (since LLM off)</h2><canvas id="routeChart"></canvas></div>

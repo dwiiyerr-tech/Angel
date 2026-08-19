@@ -1,9 +1,11 @@
 #!/usr/bin/env python3
 """Per-route backtest: find best filter for each route from enrichment data."""
 
-import sqlite3, json, sys
+import sqlite3, json, sys, os
 
-DB_PATH = '/home/ubuntu/projects/charon/charon.sqlite'
+SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
+PROJECT_ROOT = os.path.dirname(SCRIPT_DIR)
+DB_PATH = os.path.join(PROJECT_ROOT, 'angel.sqlite')
 
 def extract(row):
     cj = json.loads(row['candidate_json']) if row['candidate_json'] else {}

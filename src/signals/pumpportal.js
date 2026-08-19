@@ -51,10 +51,18 @@ function scheduleReconnect() {
   }, reconnectDelay);
 }
 
+let monitorRunning = false;
+
 function startMonitor() {
   if (monitorTimer) return;
-  monitorTimer = setInterval(() => {
-    checkBondingCurve().catch(err => console.log(`[pumpportal] monitor error: ${err.message}`));
+  monitorTimer = setInterval(async () => {
+    if (monitorRunning) return;
+    monitorRunning = true;
+    try {
+      await checkBondingCurve().catch(err => console.log(`[pumpportal] monitor error: ${err.message}`));
+    } finally {
+      monitorRunning = false;
+    }
   }, MONITOR_INTERVAL_MS);
 }
 

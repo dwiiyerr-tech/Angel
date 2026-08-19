@@ -113,7 +113,7 @@ function drawHeader(ctx, report) {
   ctx.textAlign = 'left';
   ctx.font = 'bold 22px sans-serif';
   ctx.fillStyle = TEXT;
-  ctx.fillText('CHARON DAILY PNL', 32, 50);
+  ctx.fillText('ANGEL DAILY PNL', 32, 50);
 
   // date pill on right
   ctx.font = '600 13px sans-serif';
@@ -392,7 +392,7 @@ function drawFooter(ctx, report) {
   ctx.textAlign = 'center';
   ctx.fillStyle = '#3f4660';
   ctx.font = 'bold 10px sans-serif';
-  ctx.fillText('CHARON', W / 2, H - 16);
+  ctx.fillText('ANGEL', W / 2, H - 16);
 }
 
 export async function generateDailyCard(report) {

@@ -1,17 +1,18 @@
 import { now, pruneSeen } from '../utils.js';
 import { numSetting, boolSetting } from '../db/settings.js';
 import { db } from '../db/connection.js';
-import { upsertCandidate, updateCandidateStatus, recentEligibleCandidates, candidateById } from '../db/candidates.js';
+import { upsertCandidate, updateCandidateStatus, updateCandidateSnapshot, recentEligibleCandidates, candidateById } from '../db/candidates.js';
 import { storeDecision, storeBatchDecision, logDecisionEvent, checkDecisionCache } from '../db/decisions.js';
 import { buildCandidate, filterCandidate, signalLabel } from './candidateBuilder.js';
 import { preScoreCandidate } from './preScorer.js';
 import { momentumFilter } from './momentumFilter.js';
 import { decideCandidateBatch } from './llm.js';
 import { activeStrategy } from '../db/settings.js';
-import { createDryRunPosition, createLivePosition, canOpenMorePositions, openPositionCount, tradingMode } from '../db/positions.js';
+import { calculatePositionSizeSol, createDryRunPosition, createLivePosition, canOpenMorePositions, openPositionCount, tradingMode, tryReservePositionSlot, decrementPendingPosition } from '../db/positions.js';
 import { sendBatchReveal, sendTelegram, sendPositionOpen, sendTradeIntent } from '../telegram/send.js';
 import { candidateSummary } from '../telegram/format.js';
 import { createTradeIntent } from '../db/intents.js';
+import { recordSignalProcessed } from '../health/deadMansSwitch.js';
 import { refreshCandidateForExecution } from '../execution/positions.js';
 import { executeLiveBuy } from '../execution/router.js';
 import { graduated } from '../signals/graduated.js';
@@ -20,12 +21,30 @@ import { setCandidateHandler } from '../signals/feeClaim.js';
 import { short } from '../format.js';
 import { escapeHtml } from '../format.js';
 
+// Track A: High-conviction routes that bypass PreScorer/ML/LLM for sub-second execution
+// User requested full pipeline (ML + LLM) for all routes, so this is empty.
+const TRACK_A_ROUTES = new Set([]);
+
 export const seenSignalCandidates = new Map();
+export const processingCandidates = new Set();
+export const executingMints = new Set();
 
 setDegenHandler(maybeProcessDegenCandidate);
 setCandidateHandler(processCandidateFromSignals);
 
 export async function processCandidateFromSignals(signals) {
+  recordSignalProcessed();
+  pruneSeen(seenSignalCandidates, 10 * 60 * 1000);
+  if (processingCandidates.has(signals.mint)) return;
+  processingCandidates.add(signals.mint);
+  try {
+    return await _processCandidateFromSignals(signals);
+  } finally {
+    processingCandidates.delete(signals.mint);
+  }
+}
+
+async function _processCandidateFromSignals(signals) {
   // Skip if max positions reached — don't waste enrichment/LLM calls
   if (!canOpenMorePositions()) {
     const max = numSetting('max_open_positions', 3);
@@ -38,7 +57,7 @@ export async function processCandidateFromSignals(signals) {
 
   // DUPLICATE CHECKS — all run BEFORE enrichment to save API calls
   try {
-    const recentMs = Date.now() - 86400000; // 24 hours
+    const recentMs = Date.now() - 2 * 3600000; // 2 hours
 
     // 1. Open position exists
     const openPos = db.prepare(
@@ -49,10 +68,10 @@ export async function processCandidateFromSignals(signals) {
       return;
     }
 
-    // 2. Recently closed position (<24h) — BUG #3 FIX: extend to 72h to prevent re-buy after SL
+    // 2. Recently closed position (<4h) — allow re-entries after 4h cooldown
     const closedPos = db.prepare(
       'SELECT id, exit_reason, closed_at_ms FROM dry_run_positions WHERE mint = ? AND status = ? AND closed_at_ms > ? ORDER BY closed_at_ms DESC LIMIT 1'
-    ).get(signals.mint, 'closed', Date.now() - 72 * 60 * 60 * 1000);
+    ).get(signals.mint, 'closed', Date.now() - 4 * 60 * 60 * 1000);
     if (closedPos) {
       const hoursAgo = ((Date.now() - closedPos.closed_at_ms) / 3600000).toFixed(1);
       console.log(`[agent] skipping ${signals.mint.slice(0, 8)}... — recently closed (${hoursAgo}h ago, exit: ${closedPos.exit_reason})`);
@@ -67,7 +86,7 @@ export async function processCandidateFromSignals(signals) {
         LIMIT 1
       `).get(signals.mint, recentMs);
       if (recentDecision) {
-        console.log(`[agent] skipping ${signals.mint.slice(0, 8)}... — LLM decision exists (<24h)`);
+        console.log(`[agent] skipping ${signals.mint.slice(0, 8)}... — LLM decision exists (<2h)`);
         return;
       }
     }
@@ -93,7 +112,7 @@ export async function processCandidateFromSignals(signals) {
 
   // FIX #1: Check decision cache BEFORE expensive buildCandidate() API calls
   // Lightweight check with just mint — full enrichment happens only if cache miss
-  const cachedDecision = checkDecisionCache(signals.mint);
+  const cachedDecision = checkDecisionCache(signals.mint, signals.mcap || null, signals.holders || null);
   if (cachedDecision) {
     const ageMin = ((now() - cachedDecision.cachedAt) / 60000).toFixed(1);
     console.log(`[cache-hit] ${signals.mint.slice(0, 8)}... — verdict ${cachedDecision.verdict} (cached ${ageMin}m ago, reason: ${cachedDecision.reason?.slice(0, 60) || 'n/a'})`);
@@ -121,41 +140,65 @@ export async function processCandidateFromSignals(signals) {
   }
 
   if (!candidate.filters.passed) {
-    console.log(`[candidate] filtered ${candidate.token.mint.slice(0, 8)}... ${candidate.filters.failures.join('; ')}`);
+    // filterCandidate already emits the complete rejection record.
     return;
   }
 
-  // Pre-score: rule-based check before LLM (saves LLM credits)
-  const preScore = preScoreCandidate(candidate);
-  if (!preScore.passed) {
-    console.log(`[prescore] filtered ${candidate.token.mint.slice(0, 8)}... score ${preScore.score}/${preScore.threshold} (${preScore.reasons.slice(0, 2).join('; ')})`);
-    return;
-  }
-  console.log(`[prescore] passed ${candidate.token.mint.slice(0, 8)}... score ${preScore.score}/${preScore.threshold}`);
-  
-  // FIX #2: Re-check filters BEFORE LLM call (prevent wasted LLM calls on stale data)
-  // This catches cases where market conditions changed between initial filter and LLM batch eval
-  filterCandidate(candidate);
-  if (!candidate.filters.passed) {
-    console.log(`[pre-llm-guard] filtered ${candidate.token.mint.slice(0, 8)}... ${candidate.filters.failures.join('; ')}`);
-    return;
-  }
+  // ── DUAL-TRACK PIPELINE ─────────────────────────────────────────────────
+  // Track A (pumpportal_graduated, trenches_completed): bypass PreScorer/ML/LLM
+  //   → pure Kaiser filter gate → direct BUY verdict → instant execution
+  // Track B (all other routes): full pipeline PreScorer → Momentum ML → LLM
+  const isTrackA = TRACK_A_ROUTES.has(signals.route);
 
-  // Momentum filter — ML-based prediction of runner vs sideways
-  const momentumThreshold = strat.momentum_threshold ?? 0.5;
-  const momentumResult = await momentumFilter(candidate, momentumThreshold);
-  if (!momentumResult.passed) {
-    candidate.filters.passed = false;
-    candidate.filters.failures.push(`momentum score ${momentumResult.score} < ${momentumThreshold}`);
+  if (!isTrackA) {
+    // ── Track B: Full analytical pipeline ──────────────────────────────────
+    // Pre-score: rule-based check before LLM (saves LLM credits)
+    const preScoreHardFloor = Number(strat.prescore_hard_floor ?? 35);
+    const preScore = preScoreCandidate(candidate, preScoreHardFloor);
+    candidate.filters.preScore = preScore.score;
+    candidate.filters.preScorePreferred = preScore.passed;
+    const preScoreVetoFloor = Number(strat.prescore_veto_floor ?? -50);
+    if (preScore.score <= preScoreVetoFloor) {
+      console.log(`[prescore] safety-veto ${candidate.token.mint.slice(0, 8)}... score ${preScore.score} <= ${preScoreVetoFloor} (${preScore.reasons.slice(0, 2).join('; ')})`);
+      candidate.filters.passed = false;
+      candidate.filters.failures.push(`prescore catastrophic veto: ${preScore.score} <= ${preScoreVetoFloor}`);
+      updateCandidateSnapshot(candidateId, candidate, 'filtered');
+      return;
+    }
+    console.log(`[prescore] ranked ${candidate.token.mint.slice(0, 8)}... score ${preScore.score} (preferred ${preScore.threshold}, veto ${preScoreVetoFloor})`);
+
+    // Momentum filter — ML-based prediction of runner vs sideways
+    // The current model is only weakly predictive, so use the configured
+    // threshold as a preference and veto only clearly weak momentum.
+    const momentumPreferred = Number(strat.momentum_threshold ?? 0.5);
+    const momentumVetoFloor = Number(strat.momentum_veto_floor ?? 0.1);
+    const momentumResult = await momentumFilter(candidate, momentumVetoFloor);
+    const isFreshRoute = ['pumpportal_graduated', 'pumpfun_pregrad'].includes(signals.route);
+    const mlUnavailable = Number(momentumResult.score) < 0;
+    const liveMlUnavailable = tradingMode() !== 'dry_run' && mlUnavailable;
+    const catastrophicMomentum = !isFreshRoute && !mlUnavailable && Number(momentumResult.score) < momentumVetoFloor;
+    if (liveMlUnavailable || catastrophicMomentum) {
+      candidate.filters.passed = false;
+      candidate.filters.failures.push(liveMlUnavailable
+        ? 'momentum unavailable for money mode'
+        : `momentum catastrophic veto ${momentumResult.score} < ${momentumVetoFloor}`);
+      candidate.filters.momentumScore = momentumResult.score;
+      console.log(`[momentum] safety-veto ${candidate.token.mint.slice(0, 8)}... score ${momentumResult.score}`);
+      updateCandidateSnapshot(candidateId, candidate, 'filtered');
+      return;
+    }
     candidate.filters.momentumScore = momentumResult.score;
-    console.log(`[momentum] filtered ${candidate.token.mint.slice(0, 8)}... score ${momentumResult.score} < ${momentumThreshold}`);
-    return;
+    candidate.filters.momentumPreferred = momentumResult.score < 0 || momentumResult.score >= momentumPreferred;
+  } else {
+    console.log(`[track-a] ⚡ ${candidate.token.mint.slice(0, 8)}... FAST-TRACK via ${signals.route} — bypassing PreScorer/ML/LLM`);
   }
-  candidate.filters.momentumScore = momentumResult.score;
+
+  updateCandidateSnapshot(candidateId, candidate);
 
   let rows, batchDecision, batchId;
 
-  if (!strat.use_llm) {
+  if (!strat.use_llm || isTrackA) {
+    // Track A / Rule-based: direct BUY verdict, no LLM latency
     const selfRow = candidateById(candidateId);
     rows = selfRow ? [selfRow] : [];
     batchId = null;
@@ -165,13 +208,16 @@ export async function processCandidateFromSignals(signals) {
       selected_candidate_id: candidateId,
       selected_mint: candidate.token.mint,
       selected_row: selfRow,
-      reason: `Strategy '${strat.id}' is rule-based (use_llm: false); filters passed.`,
+      reason: isTrackA
+        ? `⚡ Track A Direct: ${signals.route} — Kaiser filters passed, bypassed LLM/ML.`
+        : `Strategy '${strat.id}' is rule-based (use_llm: false); filters passed.`,
       risks: [],
       suggested_tp_percent: strat.tp_percent ?? numSetting('default_tp_percent', 50),
-      suggested_sl_percent: strat.sl_percent ?? numSetting('default_sl_percent', -25),
+      suggested_sl_percent: isTrackA ? -15 : (strat.sl_percent ?? numSetting('default_sl_percent', -25)),
       raw: null,
     };
   } else {
+    // Track B: LLM batch evaluation
     rows = recentEligibleCandidates(numSetting('llm_candidate_pick_count', 10));
     batchDecision = await decideCandidateBatch(rows, candidateId);
     batchId = storeBatchDecision(candidateId, rows, batchDecision);
@@ -202,7 +248,14 @@ export async function processCandidateFromSignals(signals) {
   if (batchId) await sendBatchReveal(batchId, rows, batchDecision, candidateId);
 
   // #6: Buy the LLM's selected candidate regardless of which candidate triggered the batch
-  if (selectedRow && boolSetting('agent_enabled', true) && batchDecision.verdict === 'BUY' && batchDecision.confidence >= numSetting('llm_min_confidence')) {
+  // FIX: Tighten confidence required during US Session (12:00 - 18:00 UTC)
+  const currentUTCHourExecute = new Date().getUTCHours();
+  const isUsSessionExecute = currentUTCHourExecute >= 12 && currentUTCHourExecute <= 18;
+  const requiredConfidence = isUsSessionExecute
+    ? Math.max(numSetting('llm_min_confidence'), 80) // Demand 80+ confidence in US session
+    : numSetting('llm_min_confidence');
+
+  if (selectedRow && boolSetting('agent_enabled', true) && batchDecision.verdict === 'BUY' && batchDecision.confidence >= requiredConfidence) {
     if (!canOpenMorePositions()) {
       const max = numSetting('max_open_positions', 3);
       console.log(`[agent] max open positions reached (${openPositionCount()}/${max}), skipping buy ${selectedRow.candidate.token.mint}`);
@@ -236,7 +289,7 @@ export async function processCandidateFromSignals(signals) {
         candidateSummary(selectedRow.candidate, batchDecision),
         '',
         `Error: ${escapeHtml(err.message)}`,
-      ].join('\n'));
+      ].join('\n')).catch(e => console.error(e));
     }
   } else {
     logDecisionEvent({
@@ -257,17 +310,29 @@ export async function processCandidateFromSignals(signals) {
 }
 
 export async function handleApprovedBuy(selectedRow, decision, batchId, rows = [], triggerCandidateId = null) {
-  const mode = tradingMode();
+  const mint = selectedRow.candidate.token.mint;
+  if (executingMints.has(mint)) return;
+
+  if (!tryReservePositionSlot()) {
+    const max = numSetting('max_open_positions', 3);
+    console.log(`[agent] max open positions reached (${openPositionCount()}/${max}) at start of handleApprovedBuy, aborting buy for ${mint}`);
+    return;
+  }
+
+  executingMints.add(mint);
+  try {
+    const mode = tradingMode();
   // Fire-and-forget refresh — start now, await later. Wrapped so a refresh failure
   // doesn't kill the trade — we just fall back to the unrefreshed row.
   const refreshPromise = refreshCandidateForExecution(selectedRow).catch(err => {
-    console.error('[handleApprovedBuy] refresh failed, using stale row:', err.message);
-    return { ...selectedRow, refreshError: err.message, candidate: { ...selectedRow.candidate, filters: selectedRow.candidate.filters || {} } };
+    console.error('[handleApprovedBuy] refresh failed, rejecting execution:', err.message);
+    return { ...selectedRow, refreshError: err.message, candidate: { ...selectedRow.candidate, filters: { passed: false, failures: ['refresh failed: ' + err.message] } } };
   });
   const freshSelectedRow = await refreshPromise;
   const executionRows = rows.map(row => row.id === freshSelectedRow.id ? freshSelectedRow : row);
   if (!freshSelectedRow.candidate.filters?.passed) {
-    updateCandidateStatus(freshSelectedRow.id, 'stale_rejected');
+    const failures = freshSelectedRow.candidate.filters?.failures || ['fresh execution guard failed'];
+    console.warn(`[fresh-check-rejected] ${mint} entry cancelled: ${failures.join('; ')}`);
     logDecisionEvent({
       batchId,
       triggerCandidateId,
@@ -275,31 +340,24 @@ export async function handleApprovedBuy(selectedRow, decision, batchId, rows = [
       rows: executionRows,
       decision,
       mode,
-      action: 'entry_rejected_fresh_filters',
-      guardrails: {
-        failures: freshSelectedRow.candidate.filters?.failures || [],
-        refreshedAtMs: freshSelectedRow.candidate.executionRefresh?.refreshedAtMs,
-      },
+      action: 'entry_rejected_stale',
+      guardrails: { failures },
+      execution: { rejectedBeforeEntry: true },
     });
-    await sendTelegram([
-      '🛑 <b>Execution rejected on fresh check</b>',
-      '',
-      candidateSummary(freshSelectedRow.candidate, decision),
-      '',
-      `Failures: ${escapeHtml((freshSelectedRow.candidate.filters?.failures || []).join('; ') || 'fresh execution guard failed')}`,
-    ].join('\n'));
     return;
   }
 
   if (mode === 'dry_run') {
     // FIX #3: Wrap position creation in try-catch to capture execution failures
-    let positionId, isNew, pastWinPnlSol, pastWinClosedAtMs;
+    
+    let positionId, isNew, pastWinPnlSol, pastWinClosedAtMs, blockedBy;
     try {
       const result = await createDryRunPosition(freshSelectedRow.id, freshSelectedRow.candidate, decision, `llm_batch_${batchId}`);
       positionId = result.id;
       isNew = result.isNew;
       pastWinPnlSol = result.pastWinPnlSol;
       pastWinClosedAtMs = result.pastWinClosedAtMs;
+      blockedBy = result.blockedBy;
     } catch (err) {
       console.error(`[orchestrator] createDryRunPosition failed for ${freshSelectedRow.candidate.token.mint}: ${err.message}`);
       logDecisionEvent({
@@ -348,7 +406,7 @@ export async function handleApprovedBuy(selectedRow, decision, batchId, rows = [
         `).get(freshSelectedRow.candidate.token.mint, pastWinClosedAtMs);
         
         if (pastPos) {
-          const holdDurationMin = ((pastPos.closed_at_ms - pastPos.opened_at_ms) / 60000).toFixed(1);
+          const holdDurationMin = pastPos.closed_at_ms && pastPos.opened_at_ms ? ((pastPos.closed_at_ms - pastPos.opened_at_ms) / 60000).toFixed(1) : 0;
           const currentMcap = freshSelectedRow.candidate.metrics?.marketCapUsd || 0;
           guardrails.pastWinExitReason = pastPos.exit_reason;
           guardrails.pastWinHoldDurationMin = Number(holdDurationMin);
@@ -367,13 +425,13 @@ export async function handleApprovedBuy(selectedRow, decision, batchId, rows = [
       rows: executionRows,
       decision,
       mode,
-      action: isNew ? 'dry_run_entry' : 'dry_run_blocked_past_win',
+      action: isNew ? 'dry_run_entry' : `dry_run_blocked_${blockedBy || 'duplicate'}`,
       guardrails,
       execution: { positionId, isNew },
     });
     if (isNew) {
       await sendPositionOpen(positionId);
-    } else {
+    } else if (pastWinClosedAtMs) {
       const daysAgo = Math.max(0, Math.floor((now() - (pastWinClosedAtMs || now())) / 86400000));
       await sendTelegram(`⏸️ Re-entry blocked: ${escapeHtml(freshSelectedRow.candidate.token.symbol)} won +${pastWinPnlSol ?? '?'} SOL ${daysAgo}d ago — guard prevented new position`);
     }
@@ -381,7 +439,12 @@ export async function handleApprovedBuy(selectedRow, decision, batchId, rows = [
   }
 
   if (mode === 'confirm') {
-    const intentId = createTradeIntent(freshSelectedRow.id, freshSelectedRow.candidate, decision, mode, 'pending_confirmation');
+    const approvedSizeSol = calculatePositionSizeSol(freshSelectedRow.candidate, decision, activeStrategy());
+    if (approvedSizeSol <= 0) {
+      console.warn(`[agent] confirm entry rejected: calculated size below economic minimum for ${mint}`);
+      return;
+    }
+    const intentId = createTradeIntent(freshSelectedRow.id, freshSelectedRow.candidate, decision, mode, 'pending_confirmation', 'buy', approvedSizeSol);
     logDecisionEvent({
       batchId,
       triggerCandidateId,
@@ -393,7 +456,7 @@ export async function handleApprovedBuy(selectedRow, decision, batchId, rows = [
       guardrails: { maxOpenPositions: numSetting('max_open_positions', 3), openPositions: openPositionCount() },
       execution: { intentId },
     });
-    await sendTradeIntent(intentId, freshSelectedRow.candidate, decision);
+    await sendTradeIntent(intentId, freshSelectedRow.candidate, decision, approvedSizeSol);
     return;
   }
 
@@ -418,8 +481,11 @@ export async function handleApprovedBuy(selectedRow, decision, batchId, rows = [
       candidateSummary(freshSelectedRow.candidate, decision),
       '',
       `Intent #${intentId} stored.`,
-      `Error: ${escapeHtml(err.message)}`,
-    ].join('\n'));
+    ].join('\n')).catch(e => console.error(e));
+  }
+  } finally {
+    decrementPendingPosition();
+    executingMints.delete(mint);
   }
 }
 

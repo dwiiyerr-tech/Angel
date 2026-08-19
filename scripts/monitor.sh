@@ -1,8 +1,10 @@
 #!/bin/bash
-# Charon Silent Monitor - Only outputs when problems detected
+# Angel Silent Monitor - Only outputs when problems detected
 # Designed for cron: silent = OK, output = alert
 
-DB="/home/ubuntu/projects/charon/charon.sqlite"
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+PROJECT_ROOT="$(dirname "$SCRIPT_DIR")"
+DB="$PROJECT_ROOT/angel.sqlite"
 NOW=$(date +%s)
 
 # Quick checks - exit silently if all OK
@@ -10,7 +12,7 @@ ISSUES=""
 
 # 1. Process alive?
 if ! pgrep -f "node index" > /dev/null; then
-    ISSUES="${ISSUES}❌ CRITICAL: Charon NOT running!\n"
+    ISSUES="${ISSUES}❌ CRITICAL: Angel NOT running!\n"
 fi
 
 # 2. Last trade within 6h?
@@ -40,7 +42,7 @@ fi
 
 # Output only if issues found
 if [ -n "$ISSUES" ]; then
-    echo "🚨 Charon Alert"
+    echo "🚨 Angel Alert"
     echo -e "$ISSUES"
     echo "Time: $(date '+%H:%M %Z')"
     exit 1

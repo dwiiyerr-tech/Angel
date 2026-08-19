@@ -1,6 +1,9 @@
 import axios from 'axios';
 import { now } from '../utils.js';
 
+const narrativeCache = new Map();
+const NARRATIVE_CACHE_MS = 30 * 60 * 1000;
+
 function extractTweetUrl(input) {
   const urls = [
     input?.twitter,
@@ -10,8 +13,35 @@ function extractTweetUrl(input) {
   const raw = urls.find(url => /(?:^|\/)status\/\d+/.test(url)) || '';
   if (!raw) return null;
   if (raw.startsWith('i/') || raw.startsWith('communities/')) return null;
-  if (raw.startsWith('http')) return raw.replace(/^https?:\/\/(www\.)?twitter\.com/i, 'https://x.com');
-  return `https://x.com/${raw.replace(/^@/, '')}`;
+  const normalized = raw.startsWith('http')
+    ? raw.replace(/^https?:\/\/(www\.)?twitter\.com/i, 'https://x.com')
+    : `https://x.com/${raw.replace(/^@/, '')}`;
+  try {
+    const parsed = new URL(normalized);
+    const statusMatch = parsed.pathname.match(/^\/([^/]+)\/status\/(\d+)/);
+    return statusMatch ? `https://x.com/${statusMatch[1]}/status/${statusMatch[2]}` : null;
+  } catch {
+    return null;
+  }
+}
+
+function extractTwitterProfile(input) {
+  const values = [input?.twitter, input?.twitter_username, input?.link?.twitter_username]
+    .filter(Boolean)
+    .map(String);
+  for (const raw of values) {
+    const normalized = raw.startsWith('http')
+      ? raw.replace(/^https?:\/\/(www\.)?twitter\.com/i, 'https://x.com')
+      : `https://x.com/${raw.replace(/^@/, '')}`;
+    try {
+      const parsed = new URL(normalized);
+      const username = parsed.pathname.split('/').filter(Boolean)[0];
+      if (username && !['i', 'home', 'search', 'explore', 'communities'].includes(username.toLowerCase())) {
+        return `https://x.com/${username}`;
+      }
+    } catch {}
+  }
+  return null;
 }
 
 function toFxTwitter(url) {
@@ -80,7 +110,16 @@ function viralityScore(metrics) {
 
 async function fetchTwitterNarrative(graduatedCoin, gmgn) {
   const url = extractTweetUrl(graduatedCoin) || extractTweetUrl(gmgn);
-  if (!url) return null;
+  if (!url) {
+    const profileUrl = extractTwitterProfile(graduatedCoin) || extractTwitterProfile(gmgn);
+    return profileUrl
+      ? { url: profileUrl, profileOnly: true, text: null, metrics: null, virality: null, dataQuality: { available: false, reason: 'profile_without_tweet' } }
+      : null;
+  }
+  const cached = narrativeCache.get(url);
+  if (cached && now() - cached.at < NARRATIVE_CACHE_MS) return cached.value;
+
+  let value = null;
   try {
     const apiUrl = toFxTwitterApi(url);
     const api = await axios.get(apiUrl, {
@@ -89,8 +128,14 @@ async function fetchTwitterNarrative(graduatedCoin, gmgn) {
     });
     const text = extractTweetTextFromFx(api.data);
     const metrics = extractTweetMetricsFromFx(api.data);
-    return { url, fxUrl: toFxTwitter(url), apiUrl, text, metrics, virality: viralityScore(metrics) };
+    value = { url, fxUrl: toFxTwitter(url), apiUrl, text, metrics, virality: viralityScore(metrics), dataQuality: { available: Boolean(text), fetchedAt: now() } };
+    narrativeCache.set(url, { at: now(), value });
+    return value;
   } catch (apiErr) {
+    if (apiErr.response?.status === 404) {
+      narrativeCache.set(url, { at: now(), value: null });
+      return null;
+    }
     console.log(`[twitter] api ${url} ${apiErr.response?.status || ''} ${apiErr.message}`);
   }
 
@@ -102,15 +147,19 @@ async function fetchTwitterNarrative(graduatedCoin, gmgn) {
     });
     const text = extractTweetTextFromFx(res.data);
     const metrics = extractTweetMetricsFromFx(res.data);
-    return { url, fxUrl, text, metrics, virality: viralityScore(metrics) };
+    value = { url, fxUrl, text, metrics, virality: viralityScore(metrics), dataQuality: { available: Boolean(text), fetchedAt: now() } };
+    narrativeCache.set(url, { at: now(), value });
+    return value;
   } catch (err) {
-    console.log(`[twitter] ${url} ${err.message}`);
-    return { url, fxUrl: toFxTwitter(url), text: null, error: err.message };
+    console.log(`[twitter] unavailable ${url}: ${err.code || err.message}`);
+    narrativeCache.set(url, { at: now(), value: null });
+    return null;
   }
 }
 
 export {
   extractTweetUrl,
+  extractTwitterProfile,
   toFxTwitter,
   toFxTwitterApi,
   decodeHtmlEntities,

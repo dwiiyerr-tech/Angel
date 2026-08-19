@@ -10,10 +10,11 @@ export function summarizeLearningWindow(windowMs) {
   const positions = db.prepare(`
     SELECT *
     FROM dry_run_positions
-    WHERE opened_at_ms >= ?
+    WHERE ((status = 'closed' AND COALESCE(closed_at_ms, opened_at_ms) >= ?)
+       OR (status != 'closed' AND opened_at_ms >= ?))
       AND COALESCE(execution_mode, 'dry_run') = 'dry_run'
     ORDER BY opened_at_ms ASC
-  `).all(cutoff);
+  `).all(cutoff, cutoff);
   const closed = positions.filter(position => position.status === 'closed');
   const winners = closed.filter(position => Number(position.pnl_percent || 0) > 0);
   const losers = closed.filter(position => Number(position.pnl_percent || 0) < 0);
@@ -22,7 +23,7 @@ export function summarizeLearningWindow(windowMs) {
   const byRoute = new Map();
   for (const position of closed) {
     const candidate = positionSnapshotCandidate(position);
-    const route = candidate.signals?.route || candidate.signals?.label || 'unknown';
+    const route = safeJson(position.snapshot_json, {})?.signalRoute || candidate.signals?.route || candidate.signals?.label || 'unknown';
     const row = byRoute.get(route) || { route, count: 0, wins: 0, losses: 0, pnlPercent: 0, pnlSol: 0 };
     row.count += 1;
     row.wins += Number(position.pnl_percent || 0) > 0 ? 1 : 0;
@@ -44,24 +45,36 @@ export function summarizeLearningWindow(windowMs) {
     GROUP BY action
     ORDER BY count DESC
   `).all(cutoff);
-  const best = [...closed].sort((a, b) => Number(b.pnl_percent || 0) - Number(a.pnl_percent || 0)).slice(0, 5).map(position => ({
-    mint: position.mint,
-    symbol: position.symbol,
-    pnlPercent: Number(position.pnl_percent || 0),
-    exitReason: position.exit_reason,
-    entryMcap: position.entry_mcap,
-    exitMcap: position.exit_mcap,
-    route: positionSnapshotCandidate(position).signals?.route || 'unknown',
-  }));
-  const worst = [...closed].sort((a, b) => Number(a.pnl_percent || 0) - Number(b.pnl_percent || 0)).slice(0, 5).map(position => ({
-    mint: position.mint,
-    symbol: position.symbol,
-    pnlPercent: Number(position.pnl_percent || 0),
-    exitReason: position.exit_reason,
-    entryMcap: position.entry_mcap,
-    exitMcap: position.exit_mcap,
-    route: positionSnapshotCandidate(position).signals?.route || 'unknown',
-  }));
+  const best = [...closed].sort((a, b) => Number(b.pnl_percent || 0) - Number(a.pnl_percent || 0)).slice(0, 10).map(position => {
+    const candidate = positionSnapshotCandidate(position);
+    return {
+      mint: position.mint,
+      symbol: position.symbol,
+      pnlPercent: Number(position.pnl_percent || 0),
+      exitReason: position.exit_reason,
+      entryMcap: position.entry_mcap,
+      exitMcap: position.exit_mcap,
+      botPct: candidate.jupiterAsset?.audit?.botHoldersPercentage,
+      smartMoney: candidate.gmgn?.smart_degen_count,
+      momentum: candidate.filters?.momentumScore ?? candidate.signals?.score,
+      route: safeJson(position.snapshot_json, {})?.signalRoute || candidate.signals?.route || 'unknown',
+    };
+  });
+  const worst = [...closed].sort((a, b) => Number(a.pnl_percent || 0) - Number(b.pnl_percent || 0)).slice(0, 10).map(position => {
+    const candidate = positionSnapshotCandidate(position);
+    return {
+      mint: position.mint,
+      symbol: position.symbol,
+      pnlPercent: Number(position.pnl_percent || 0),
+      exitReason: position.exit_reason,
+      entryMcap: position.entry_mcap,
+      exitMcap: position.exit_mcap,
+      botPct: candidate.jupiterAsset?.audit?.botHoldersPercentage,
+      smartMoney: candidate.gmgn?.smart_degen_count,
+      momentum: candidate.filters?.momentumScore ?? candidate.signals?.score,
+      route: safeJson(position.snapshot_json, {})?.signalRoute || candidate.signals?.route || 'unknown',
+    };
+  });
   return {
     windowMs,
     fromMs: cutoff,
