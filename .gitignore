@@ -33,3 +33,5 @@ backup_trenches_pause.js
 exports/
 backups/
 __pycache__/
+.agents/
+logs/
