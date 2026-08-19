@@ -1,8 +1,11 @@
-# Angel
+# 👼 Angel
 
-Angel began as a working fork of [Charon](https://github.com/yunus-0x/charon) by [@yunus-0x](https://github.com/yunus-0x). The original attribution is retained, while this repository now identifies and operates as Angel.
+![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)
+![Node.js](https://img.shields.io/badge/Node.js-20+-green.svg)
 
-Angel is a Telegram bot that screens Solana pump.fun tokens, runs them through strategy filters, optionally asks an LLM to pick entries, and trades via Jupiter. Three modes: `dry_run` (paper trading into SQLite), `confirm` (Telegram approve/reject buttons), and `live` (real swaps, real money, real regret potential).
+**Angel** adalah bot Telegram cerdas berbasis Node.js untuk memonitor, memfilter dengan Machine Learning, dan mengeksekusi trading token Solana pump.fun via Jupiter Exchange.
+
+Angel berawal sebagai fork dari [Charon](https://github.com/yunus-0x/charon) oleh [@yunus-0x](https://github.com/yunus-0x), dan kini telah berkembang menjadi bot mandiri dengan lapisan filter momentum ML, guard eksekusi ketat, dan cache keputusan LLM. Tiga mode utama yang didukung: `dry_run` (paper trading ke SQLite), `confirm` (tombol approve/reject via Telegram), dan `live` (swap asli).
 
 ## What changed in this fork
 
@@ -45,8 +48,8 @@ This fork now includes:
 ## Setup
 
 ```bash
-git clone https://github.com/kaiserern/Kaiser.charon.git
-cd Kaiser.charon
+git clone https://github.com/dwiiyerr-tech/Angel.git
+cd Angel
 npm install
 cp .env.example .env
 # fill in .env — at minimum: TELEGRAM_BOT_TOKEN, TELEGRAM_CHAT_ID,
@@ -88,3 +91,4 @@ Start with `TRADING_MODE=dry_run`. Watch it for a week. Dry-run now uses executa
 ## Credit
 
 Original project: [yunus-0x/charon](https://github.com/yunus-0x/charon). If you're looking for the upstream version, that's the one. This fork is my personal trading setup, shared as-is.
+\n## Contributing\n\nPlease see [CONTRIBUTING.md](CONTRIBUTING.md) for details on how to contribute to this project.\n\n## License\n\nThis project is licensed under the MIT License - see the [LICENSE](LICENSE) file for details.
