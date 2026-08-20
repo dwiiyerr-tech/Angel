@@ -95,14 +95,24 @@ export function effectivePositionSizeSol(strat, decision) {
 
 export { llmBuyMinConfidence, llmLowConfidenceCap };
 
-export function activeLessonsForPrompt(limit = 6) {
+export function activeLessonsForPrompt(routes = [], limit = 6) {
+  const routeList = Array.isArray(routes) ? routes : [routes];
   return db.prepare(`
-    SELECT lesson
+    SELECT id, scope, confidence, lesson, instruction
     FROM learning_lessons
-    WHERE status = 'active' AND approved_at_ms IS NOT NULL AND approved_at_ms >= ?
+    WHERE status = 'active' AND approved_at_ms IS NOT NULL
+      AND approved_at_ms >= ? AND (expires_at_ms IS NULL OR expires_at_ms > ?)
     ORDER BY id DESC
-    LIMIT ?
-  `).all(Date.now() - 30 * 24 * 60 * 60 * 1000, limit).map(row => row.lesson);
+  `).all(Date.now() - 30 * 24 * 60 * 60 * 1000, Date.now())
+    .filter(row => !row.scope || row.scope === 'global' || routeList.includes(row.scope))
+    .sort((a, b) => Number(b.scope !== 'global') - Number(a.scope !== 'global') || b.id - a.id)
+    .slice(0, limit).map(row => ({
+    id: row.id,
+    scope: row.scope || 'global',
+    confidence: row.confidence || 'low',
+    observation: row.lesson,
+    instruction: row.instruction || row.lesson,
+  }));
 }
 
 /**
@@ -236,6 +246,7 @@ export async function decideCandidateBatch(rows, triggerCandidateId) {
   const triggerRow = rows.find(item => item.id === triggerCandidateId);
   const route = triggerRow?.candidate?.signals?.route || '';
   const llmConfig = selectModelForRoute(route);
+  const promptLessons = activeLessonsForPrompt(rows.map(item => item.candidate?.signals?.route || ''));
   console.log(`[llm] model=${llmConfig.model} route=${route || 'none'}`);
 
   const tradeMemory = buildTradeMemory();
@@ -245,6 +256,10 @@ export async function decideCandidateBatch(rows, triggerCandidateId) {
     'Return strict JSON only — no markdown, no code fences, no explanation outside JSON.',
     'You will receive up to 10 candidates. Pick the best one to BUY, or PASS all.',
     tradeMemory ? `\n${tradeMemory}\n` : '',
+    'RECENT LESSONS are human-approved prompt guidance, not hard filters or permission to change settings.',
+    'Apply a route-scoped lesson only to matching routes. Treat low-confidence lessons as weak context.',
+    'When a lesson conflicts with fresh candidate evidence or a hard safety rule, follow the fresh evidence and safety rule.',
+    'Never infer causality beyond the sample counts and comparisons supplied in a lesson.',
     '',
     '== MICRO INTELLIGENCE ==',
     'Pay close attention to ML momentum score, velocity, and smart money presence.',
@@ -289,7 +304,7 @@ export async function decideCandidateBatch(rows, triggerCandidateId) {
     '  - Medium conviction: Confidence 60-79 (Half size)',
     '  - Low conviction: Confidence 40-59 (Quarter size)',
     'Apply strict Risk:Reward (R:R) logic to your suggested exits:',
-    '  - ALWAYS maintain at least a 1.5:1 or 2:1 R:R ratio (e.g., TP 50%, SL -25%).',
+    `  - ALWAYS maintain at least a ${numSetting('min_risk_reward_ratio', 1.5).toFixed(2)}:1 R:R ratio (TP / abs(SL)).`,
     '  - If a token is highly volatile, widen the SL (e.g. -40%) but you MUST increase TP (e.g. 100%) to justify the risk.',
     '  - Do not give tight SLs (-10%) to freshly graduated coins, they will instantly hit. Give them room to breathe (-30%) but aim for 60%+ TP.',
     'Be aggressive when the Macro or Micro allows it. Grow the portfolio by taking calculated risks.',
@@ -303,18 +318,19 @@ export async function decideCandidateBatch(rows, triggerCandidateId) {
   ].join('\n');
   const user = {
     task: 'Pick the best dry-run buy candidate from this recent batch, or choose none.',
-    recent_lessons: activeLessonsForPrompt(),
+    recent_lessons: promptLessons,
     output_schema: {
       verdict: 'BUY|WATCH|PASS',
       selected_candidate_id: 'integer candidate_id when verdict is BUY, otherwise null',
       selected_mint: 'mint string when verdict is BUY, otherwise null',
-      confidence: 'number 0-100',
+      confidence: 'calibrated 0-100 estimate that the selected BUY will close with positive PnL; use 0 for no BUY',
       thesis: ['short strings justifying the decision, e.g. Drawdown 92%, LP stable'],
       missing_confirmation: ['short strings of what is missing, e.g. Catalyst, Breakout'],
       reason: 'short string',
       risks: ['short strings'],
       suggested_tp_percent: 'positive number',
       suggested_sl_percent: 'negative number',
+      risk_reward_ratio: 'suggested_tp_percent / abs(suggested_sl_percent), must meet the configured minimum',
     },
     trigger_candidate_id: triggerCandidateId,
     candidates: [],  // placeholder, filled below
@@ -526,6 +542,7 @@ export async function decideCandidateBatch(rows, triggerCandidateId) {
     }
     const selectedRoute = row?.candidate?.signals?.route || '';
     const decision = normalizeDecision(parsed, '', selectedRoute);
+    decision.learning_lesson_ids = promptLessons.map(item => item.id);
     if (decision.verdict === 'BUY' && !row) {
       console.log(`[llm] BUY verdict but no matching row: selectedId=${selectedId}, selectedMint=${selectedMint}, rows=${rows.map(r=>r.id).join(',')}`);
     }

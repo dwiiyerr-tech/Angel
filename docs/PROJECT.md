@@ -9,9 +9,10 @@ The `angel` system is a modular Solana meme coin trading bot and analytics engin
 3. **Dynamic Enrichment**: (`src/enrichment/gmgn.js`, `jupiter.js`) - Metadata, asset info, and price enrichment with caching.
 4. **Execution Router & Jupiter Executor**: (`src/execution/router.js`, `src/liveExecutor.js`) - Trade routing, Jupiter Ultra API swap ordering, and slippage controls.
 5. **SQLite Database & Positions**: (`src/db/positions.js`, `schema.js`, `angel.sqlite`) - Position tracking, trade history, deduplication guards, and open position limits.
-6. **Learning & AutoApply Engine**: (`src/learning/autoApply.js`, `autoApplyLessons`) - Performance analysis and strategy parameter optimization.
+6. **Human-Approved Prompt Learning**: (`src/learning/lessons.js`, `summary.js`, `evaluation.js`) - Evidence-gated lesson generation, manual approval, prompt injection, and exposure evaluation without automatic mutations.
 7. **Telegram UI & Card Renderer**: (`src/telegram/`, `scripts/test_exit_card.mjs`) - Operator alerts, status reporting, and PNG exit card generation.
 8. **Analytics & Backtesting**: (`scripts/`, `verify_backtest.py`, `comprehensive_edge_backtest.py`, `dashboard.py`) - Split-half backtesting, metric reporting, and trade reconstruction.
+9. **Market Allocator & Risk Controls**: (`src/execution/marketAllocator.js`, `riskControls.js`) - GREEN/YELLOW/RED edge allocation with hysteresis, R-based sizing, profit protection, and loss-streak throttling. `second_wave_v2` is fail-closed until verified historical data is attached to a candidate.
 
 ---
 
@@ -23,7 +24,7 @@ The `angel` system is a modular Solana meme coin trading bot and analytics engin
 | 3 | M1-LINT | Fix `lint.cjs` whitelist missing global `fetch` symbol for `macroEngine.js:10` | M1 | Survey Test |
 | 4 | M2-C1 | Wire `JUPITER_SLIPPAGE_BPS` parameter into Jupiter swap URL and order payload in `src/liveExecutor.js` | M2 | Survey Features |
 | 5 | M2-C2 | Fix swap-before-dedup race in `src/execution/router.js` by checking `createLivePosition` before `executeJupiterSwap` | M2 | Survey Features |
-| 6 | M2-C3 | Require explicit confirmation/flag for `autoApplyLessons` strategy SQL table mutations in `src/learning/autoApply.js` & `src/app.js` | M2 | Survey Features |
+| 6 | M2-C3 | Retire automatic learning mutations; require explicit approval before a lesson can enter LLM prompt context | M2 | Survey Features |
 | 7 | M3-H1 | Fix TOCTOU race condition in `canOpenMorePositions()` with atomic position reservation locking in `src/db/positions.js` | M3 | Survey Features |
 | 8 | M3-H2 | Reconcile wallet token balance on Jupiter swap timeouts before logging `FAILED_ENTRY` | M3 | Survey Features |
 | 9 | M3-H3 | Add TTL / LRU eviction cap to global memory caches (`gmgnCache`, `jupiterAssetCache`) | M3 | Survey Features |
@@ -79,7 +80,7 @@ The `angel` system is a modular Solana meme coin trading bot and analytics engin
   - `pipeline/` — Signal scoring, candidate building, and Python ML integration
   - `signals/` — Signal provider listeners and filters
   - `enrichment/` — Token metadata and market data enrichers
-  - `learning/` — Automated lesson learning and strategy tuning
+- `learning/` — Human-approved prompt lessons, evaluation, and evidence reports
   - `telegram/` — Operator bot and UI handlers
 - `scripts/` — Operational, analytical, testing, and backtesting scripts
 - `models/` — Pre-trained Python ML model artifacts (`.pkl`, `.json`)

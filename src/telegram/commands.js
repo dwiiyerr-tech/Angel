@@ -27,9 +27,10 @@ import { refreshPosition } from '../execution/positions.js';
 import { executeLiveSell } from '../execution/router.js';
 import { handleCallback, editMenuMessage } from './callbacks.js';
 import { consumeNumericFilterInput } from './input.js';
-import { approveLesson, rejectLesson, runLearning, sendLessons } from '../learning/commands.js';
+import { approveLesson, rejectLesson, runLearning, sendLessons, sendLessonEvaluation } from '../learning/commands.js';
 import { fetchWalletPnl } from '../enrichment/wallets.js';
 import { sendDailyReport } from './dailyReport.js';
+import { commandName } from './commandName.js';
 import { runBackup, getBackupStatus } from '../db/backup.js';
 import { runLLMCalibration } from '../pipeline/llmCalibrator.js';
 import { setting } from '../db/settings.js';
@@ -111,7 +112,7 @@ export async function handleMessage(msg) {
     const mutations = db.prepare('SELECT * FROM parameter_mutation_history ORDER BY id DESC LIMIT 10').all();
     if (!mutations.length) return bot.sendMessage(chatId, 'No recent mutations.');
     const lines = mutations.map(m => {
-      const status = m.rolled_back ? '❌ ROLLED BACK' : '✅ ACTIVE';
+      const status = m.rolled_back ? '❌ ROLLED BACK' : '📜 LEGACY AUDIT';
       return `• ${m.param_key}: ${m.old_value} → ${m.new_value} [${status}]`;
     });
     return bot.sendMessage(chatId, `🧬 <b>Recent Mutations</b>\n\n${lines.join('\n')}`, { parse_mode: 'HTML' });
@@ -166,11 +167,13 @@ export async function handleMessage(msg) {
     setSetting('live_circuit_breaker_open', 'false');
     return bot.sendMessage(chatId, '✅ Circuit breaker reset in dry_run. Create and approve a fresh live snapshot before live/confirm execution.');
   }
-  if (text.startsWith('/learn')) {
-    const windowArg = text.split(/\s+/)[1] || '12h';
+  const command = commandName(text);
+  if (command === '/learn') {
+    const windowArg = text.split(/\s+/)[1] || '7d';
     return runLearning(chatId, windowArg);
   }
-  if (text.startsWith('/lessons')) return sendLessons(chatId);
+  if (command === '/lessons') return sendLessons(chatId);
+  if (command === '/lessoneval') return sendLessonEvaluation(chatId);
   if (text.startsWith('/executions')) {
     const rows = db.prepare(`
       SELECT id, mint, side, status, signature, error, updated_at_ms
@@ -359,13 +362,14 @@ export function setupTelegram() {
     { command: 'pnl', description: 'Show saved-wallet PnL' },
     { command: 'learn', description: 'Run manual learning report' },
     { command: 'lessons', description: 'Show active screening lessons' },
+    { command: 'lessoneval', description: 'Evaluate outcomes exposed to active lessons' },
     { command: 'setfilter', description: 'Set a filter value' },
     { command: 'walletadd', description: 'Save wallet for exposure/PnL' },
     { command: 'walletremove', description: 'Remove saved wallet' },
     { command: 'wallets', description: 'List saved wallets' },
     { command: 'backup', description: 'Create SQLite backup' },
     { command: 'status', description: 'Show system status and LLM calibration' },
-    { command: 'mutations', description: 'List recent mutations' },
+    { command: 'mutations', description: 'List legacy mutation audit records' },
     { command: 'livestatus', description: 'Show live configuration approval' },
     { command: 'liveapprove', description: 'Create/approve a live snapshot' },
     { command: 'executions', description: 'Show durable execution ledger' },

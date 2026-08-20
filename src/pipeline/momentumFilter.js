@@ -46,17 +46,3 @@ export async function momentumFilter(candidate, threshold = DEFAULT_THRESHOLD) {
     return { passed: !failClosed, score: -1, reason: err.message };
   }
 }
-
-/**
- * Synchronous fallback — always passes.
- */
-export function momentumScoreSync(candidate) {
-  return { passed: true, score: 1.0, reason: 'sync_fallback' };
-}
-
-/**
- * Get the current momentum threshold from strategy.
- */
-export function getMomentumThreshold(strat) {
-  return strat?.momentum_threshold ?? DEFAULT_THRESHOLD;
-}

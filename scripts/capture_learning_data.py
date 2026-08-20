@@ -115,17 +115,8 @@ def export_learning_data(conn):
         'learning_runs': export_table_data(conn, 'learning_runs'),
         'learning_lessons': export_table_data(conn, 'learning_lessons'),
         'decision_cache': export_table_data(conn, 'decision_cache'),
-        'learning_applied': [],  # This table doesn't exist yet
         'learning_summary': generate_summary(conn)
     }
-    
-    # Check if learning_applied table exists
-    try:
-        cursor = conn.execute("SELECT name FROM sqlite_master WHERE type='table' AND name='learning_applied'")
-        if cursor.fetchone():
-            learning_data['learning_applied'] = export_table_data(conn, 'learning_applied')
-    except:
-        pass
     
     return learning_data
 
@@ -137,7 +128,7 @@ def export_all_data(conn):
     all_data = {}
     
     for table in tables:
-        if table.startswith('sqlite_') or table == 'learning_applied':
+        if table.startswith('sqlite_'):
             continue
             
         try:

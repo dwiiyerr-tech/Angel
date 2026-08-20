@@ -6,7 +6,7 @@ export function learningReportText(runId, summary, lessons) {
     '🧠 <b>Angel Learning</b>',
     '',
     `Run: <b>#${runId}</b> · Window: <b>${formatWindow(summary.windowMs)}</b>`,
-    `Closed: ${summary.positions.closed}/${summary.positions.opened} · Win rate: ${fmtPct(summary.positions.winRate)}`,
+    `Closed: ${summary.positions.closed}/${summary.positions.observed ?? summary.positions.opened} observed · Win rate: ${fmtPct(summary.positions.winRate)}`,
     `Avg PnL: ${fmtPct(summary.positions.avgPnlPercent)} · Total: ${fmtSol(summary.positions.totalPnlSol)} SOL`,
     summary.positions.byRoute?.length ? `Best route: <b>${escapeHtml(summary.positions.byRoute[0].route)}</b> avg ${fmtPct(summary.positions.byRoute[0].avgPnlPercent)} (${summary.positions.byRoute[0].count})` : null,
     '',

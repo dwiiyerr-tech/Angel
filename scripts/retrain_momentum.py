@@ -9,7 +9,7 @@ from pathlib import Path
 
 import numpy as np
 from sklearn.ensemble import GradientBoostingClassifier
-from sklearn.metrics import accuracy_score, f1_score, precision_score, recall_score, roc_auc_score
+from sklearn.metrics import accuracy_score, average_precision_score, brier_score_loss, f1_score, precision_score, recall_score, roc_auc_score
 from sklearn.preprocessing import StandardScaler
 
 PROJECT_DIR = Path(__file__).resolve().parent.parent
@@ -28,6 +28,7 @@ MIN_NEW_TRADES = 10
 MIN_AUC_GAIN = 0.01
 MIN_ABSOLUTE_AUC = 0.55
 MIN_ABSOLUTE_F1 = 0.20
+SIMULATOR_VERSION = os.getenv("ANGEL_SIMULATOR_VERSION", "quote_sized_v3")
 
 FEATURE_COLUMNS = [
     "price_current", "price_1m", "price_5m", "price_1h", "price_velocity_5m",
@@ -50,8 +51,10 @@ def load_data():
                    COALESCE(closed_at_ms, opened_at_ms) AS outcome_at
             FROM dry_run_positions
             WHERE status = 'closed' AND pnl_percent IS NOT NULL
+              AND COALESCE(execution_mode, 'dry_run') = 'dry_run'
+              AND json_extract(snapshot_json, '$.simulatorVersion') = ?
             ORDER BY outcome_at ASC, id ASC
-        """).fetchall()
+        """, (SIMULATOR_VERSION,)).fetchall()
     samples = []
     for trade_id, pnl, raw, outcome_at in rows:
         try:
@@ -75,6 +78,8 @@ def metrics(model, scaler, x_test, y_test):
         "recall": float(recall_score(y_test, prediction, zero_division=0)),
         "f1": float(f1_score(y_test, prediction, zero_division=0)),
         "roc_auc": float(roc_auc_score(y_test, probability)),
+        "pr_auc": float(average_precision_score(y_test, probability)),
+        "brier": float(brier_score_loss(y_test, probability)),
     }
 
 
@@ -150,7 +155,10 @@ def main():
     if METADATA_PATH.exists():
         try:
             deployed_metadata = json.loads(METADATA_PATH.read_text())
-            incumbent_is_comparable = deployed_metadata.get("validation") == "chronological_80_20"
+            incumbent_is_comparable = (
+                deployed_metadata.get("validation") == "chronological_80_20"
+                and deployed_metadata.get("simulator_version") == SIMULATOR_VERSION
+            )
         except (OSError, json.JSONDecodeError):
             pass
     if artifacts_exist and incumbent_is_comparable:
@@ -188,6 +196,7 @@ def main():
         "train_count": len(train),
         "test_count": len(test),
         "validation": "chronological_80_20",
+        "simulator_version": SIMULATOR_VERSION,
         "challenger_metrics": challenger,
         "replaced_incumbent_metrics": incumbent,
     })

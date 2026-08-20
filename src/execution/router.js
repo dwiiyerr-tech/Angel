@@ -9,7 +9,7 @@ import {
 import { escapeHtml, fmtSol } from '../format.js';
 import { executeJupiterSwap, liveWalletBalanceLamports, fetchLiveTokenBalance } from '../liveExecutor.js';
 import { activeStrategy } from '../db/settings.js';
-import { calculatePositionSizeSol, createLivePosition, liveEntryBlockReason, openPositionCount, tradingMode, tryReservePositionSlot, decrementPendingPosition } from '../db/positions.js';
+import { calculatePositionSizeSol, createLivePosition, liveEntryBlockReason, openPositionCount, tradingMode, tryReservePositionSlot, decrementPendingPosition, riskRewardBlockReason, riskRewardRatio } from '../db/positions.js';
 import { claimExecutionOperation, updateExecutionOperation } from '../db/executionOperations.js';
 import { claimTradeIntent, TRADE_INTENT_TTL_MS } from '../db/intents.js';
 import { logDecisionEvent } from '../db/decisions.js';
@@ -21,6 +21,7 @@ import { updateCandidateStatus } from '../db/candidates.js';
 import { createTradeIntent } from '../db/intents.js';
 import { assertLiveConfigApproved } from '../db/liveConfig.js';
 import { pauseLiveEntries } from '../health/circuitBreaker.js';
+import { assertLossStreakAllowed } from './riskControls.js';
 
 const ENTRY_MAX_ATTEMPTS = 3;
 
@@ -63,7 +64,9 @@ export function assertSafeLiveDecision(decision, strat) {
   }
   if (!Number.isFinite(tp) || tp < 1 || tp > 500) throw new Error(`Unsafe take-profit value: ${tp}`);
   if (!Number.isFinite(sl) || sl >= 0 || sl < -50) throw new Error(`Unsafe stop-loss value: ${sl}`);
-  return { confidence, tp, sl };
+  const rrBlocked = riskRewardBlockReason(tp, sl);
+  if (rrBlocked) throw new Error(`Unsafe risk/reward: ${rrBlocked}`);
+  return { confidence, tp, sl, riskRewardRatio: riskRewardRatio(tp, sl) };
 }
 
 export async function executeLiveBuy(selectedRow, decision, batchId, rows = [], triggerCandidateId = null) {
@@ -81,6 +84,7 @@ export async function executeLiveBuy(selectedRow, decision, batchId, rows = [], 
     throw new Error(`Unsafe live position size: ${scaledSizeSol} SOL (cap ${LIVE_MAX_POSITION_SOL})`);
   }
   assertLiveRiskBudget(scaledSizeSol);
+  assertLossStreakAllowed('live');
   const claim = claimExecutionOperation({ mint: candidate.token.mint, side: 'buy', inputAmount: amountLamports });
   if (!claim.ok) throw new Error(`Live buy blocked: ${claim.reason}`);
   let balance;

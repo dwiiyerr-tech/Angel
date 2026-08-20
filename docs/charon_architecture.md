@@ -19,7 +19,7 @@
 5. **Macro & Regime Intelligence**: Real-time market weather (`MacroEngine` SOL/USDT trend & 6-hour win rate) and dynamic market cap band performance (`RegimeDetector`) are evaluated and injected into system memory.
 6. **LLM Chief Investment Officer (CIO) Decisioning**: Candidates reaching the LLM layer are processed via model-routed prompt templates, combining micro-metrics, macro weather, and active strategy lessons. Resilience is maintained through a multi-tier fallback hierarchy (Primary -> Zyloo -> OpenRouter) and optional Dual-LLM consensus verification.
 7. **Execution & State Management**: Approved trades pass fresh re-evaluation (`refreshCandidateForExecution`) and execute via `dry_run` position creation, `confirm` queue for Telegram operator review, or `live` execution (Jupiter Ultra Swap API & Solana VersionedTransaction RPC signing).
-8. **Closed-Loop Self-Tuning**: Closed position PnL performance triggers learning summarization, rule extraction, and automated parameter mutations (`autoApplyLessons`) into SQLite `settings` and `strategies` tables, forming a complete self-healing feedback loop.
+8. **Human-Approved Prompt Learning**: Closed dry-run outcomes produce evidence-gated lesson candidates. Only operator-approved, unexpired lessons are injected into later LLM prompts; learning never mutates code, settings, strategies, or models.
 
 ---
 
@@ -89,14 +89,14 @@ graph TD
         TBL_CAND["candidates<br/>Ingested Candidate Snapshots"] :::dbFill
         TBL_DEC["llm_decisions<br/>Decision History & Confidence Logs"] :::dbFill
         TBL_SETT["settings & strategies<br/>Dynamic Runtime Config & Multi-Strategy Config"] :::dbFill
-        TBL_LEARN["learning_lessons & learning_applied<br/>Active Lessons & Mutation History"] :::dbFill
+        TBL_LEARN["learning_runs & learning_lessons<br/>Evidence, Approval & Prompt Guidance"] :::dbFill
         TBL_INTENT["trade_intents<br/>Operator Trade Approval Queue"] :::dbFill
     end
 
-    subgraph Subsystem_8 ["Subsystem 8: Auto-Learn & Self-Tuning Engine"]
+    subgraph Subsystem_8 ["Subsystem 8: Human-Approved Prompt Learning"]
         LEARN_SUM["Learning Summarizer<br/>(summarizeLearningWindow)"] :::learnFill
         LESSON_GEN["Lesson Generator<br/>(generateLessons)"] :::learnFill
-        AUTO_APPLY["Auto-Learn Mutator<br/>(autoApplyLessons - Dynamic DB Mutator)"] :::learnFill
+        AUTO_APPLY["Human Approval & Exposure Audit<br/>(no automatic mutations)"] :::learnFill
     end
 
     subgraph Subsystem_9 ["Subsystem 9: Telegram UI & Exit Card Renderer"]
@@ -162,14 +162,12 @@ graph TD
     JUP_EXECUTOR -->|Sign VersionedTransaction| SOL_RPC
     JUP_EXECUTOR -->|Record Live Position| TBL_POS
 
-    %% Auto-Learn Closed-Loop Feedback %%
-    TBL_POS -.->|Sample 12h Closed Positions| LEARN_SUM
+    %% Human-approved prompt-learning feedback %%
+    TBL_POS -.->|Version-compatible 7d outcomes| LEARN_SUM
     LEARN_SUM --> LESSON_GEN
     LESSON_GEN --> TBL_LEARN
-    TBL_LEARN -->|Trigger AutoApply every 6h| AUTO_APPLY
-    AUTO_APPLY -->|Mutate Dynamic Settings & Strategies SQL| TBL_SETT
-    TBL_SETT -.->|Dynamic Parameter Override| CB
-    TBL_SETT -.->|Dynamic Parameter Override| ORCH
+    TBL_LEARN -->|Candidate lesson| AUTO_APPLY
+    AUTO_APPLY -.->|Approved, scoped, unexpired prompt context| ORCH
 
     %% Telegram UI & Visuals Feedback %%
     EXEC_ROUTER -->|Send Open Alert| TG_SEND
@@ -193,7 +191,7 @@ graph TD
 | **5** | **LLM Integration & Decision Consensus Engine** | `src/pipeline/llm.js`<br>`src/pipeline/predict_momentum.py` | Formats candidate batches into compact JSON prompts, injects regime memory & macro weather, routes queries to route-specific models, executes multi-provider fallback hierarchy (Primary -> Zyloo -> OpenRouter) and dual LLM consensus, and normalizes decision output (`BUY`, `WATCH`, `PASS`, confidence, risk list, suggested TP/SL). | `ENABLE_LLM`<br>`LLM_API_KEY`<br>`LLM_BASE_URL`<br>`LLM_MODEL`<br>`LLM_MODEL_CHEAP`<br>`LLM_FALLBACK_BASE_URL`<br>`LLM_FALLBACK_API_KEY`<br>`LLM_FALLBACK_MODEL`<br>`LLM_OPENROUTER_API_KEY`<br>`LLM_OPENROUTER_MODEL`<br>`LLM_TIMEOUT_MS`<br>`llm_min_confidence` | `axios`<br>`src/db/decisions.js`<br>`src/signals/trending.js`<br>`src/db/settings.js` |
 | **6** | **Execution Router & Jupiter Executor** | `src/execution/router.js`<br>`src/liveExecutor.js`<br>`src/execution/positions.js` | Trade routing across `dry_run`, `confirm`, and `live` modes. SOL reserve checks (`LIVE_MIN_SOL_RESERVE_LAMPORTS`), retry loop (up to 3 attempts), Jupiter Ultra / Swap API ordering and VersionedTransaction signing via `@solana/web3.js`, balance reconciliation on timeout, and `FAILED_ENTRY` position auditing. | `SOLANA_PRIVATE_KEY`<br>`SOLANA_RPC_URL`<br>`JUPITER_API_KEY`<br>`JUPITER_SWAP_BASE_URL`<br>`JUPITER_SLIPPAGE_BPS`<br>`LIVE_MIN_SOL_RESERVE_LAMPORTS` | `@solana/web3.js`<br>`bs58`<br>`axios`<br>`src/db/positions.js`<br>`src/db/intents.js`<br>`src/telegram/send.js` |
 | **7** | **SQLite Database Schema & State Locks** | `src/db/positions.js`<br>`src/db/connection.js`<br>`src/db/candidates.js`<br>`src/db/decisions.js`<br>`src/db/intents.js`<br>`src/db/settings.js` | SQLite WAL database management (`charon.sqlite` across 19 tables/indexes), position state machine ('open', 'closed', 'pending'), pending position counter, risk-adjusted & source-weighted sizing, regime multipliers, 24h closed position re-entry dedup, 7-day past-win block guard, and atomic position limit checks (`openPositionCount()` + `canOpenMorePositions()`). | `DB_PATH`<br>`max_open_positions`<br>`dry_run_buy_sol`<br>Default strategies ('sniper', 'dip_buy', 'smart_money', 'degen') | `better-sqlite3`<br>`src/config.js`<br>`src/utils.js`<br>`src/pipeline/llm.js` |
-| **8** | **Auto-Learn & Self-Tuning Engine** | `src/learning/autoApply.js`<br>`src/learning/lessons.js`<br>`src/learning/summary.js`<br>`src/learning/report.js`<br>`src/learning/commands.js`<br>`scripts/auto_learn.mjs` | Automated trade history performance analysis, rule extraction from active lessons (<7 days recency), type validation & recency gating (30 closed position minimum), 24h idempotency enforcement per strategy/parameter, automatic mutation of `settings` and `strategies` SQL tables, and audit logging in `learning_applied`. | 30 closed position minimum, 7-day recency cutoff, 24h action cooldown, 0.7 minConfidence threshold | `better-sqlite3`<br>`src/db/connection.js`<br>`src/utils.js` |
+| **8** | **Human-Approved Prompt Learning** | `src/learning/lessons.js`<br>`src/learning/summary.js`<br>`src/learning/evaluation.js`<br>`src/learning/commands.js`<br>`scripts/auto_learn.mjs` | Produces structured, route-scoped lessons from version-compatible dry-run evidence. Candidates require at least 50 trades, explicit operator approval, expire after 30 days, and are attributed as prompt exposure for later review. No automatic parameter or code mutation exists. | 50 compatible trades, 7-day window, manual approval, 30-day expiry | `better-sqlite3`<br>`src/db/connection.js`<br>`src/pipeline/llm.js` |
 | **9** | **Telegram UI & Exit Card Renderer** | `src/telegram/bot.js`<br>`src/telegram/callbacks.js`<br>`src/telegram/commands.js`<br>`src/telegram/dailyReport.js`<br>`src/telegram/format.js`<br>`src/telegram/input.js`<br>`src/telegram/menus.js`<br>`src/telegram/report.js`<br>`src/telegram/send.js`<br>`src/visuals/exitCard.js`<br>`scripts/test_exit_card.mjs` | Operator notifications, command handling (`/start`, `/status`, `/positions`, `/settings`, `/report`, `/learning`), inline keyboard interactive menus (trade confirmation callbacks, parameter updates), HTML message formatting, and server-side PNG exit card rendering (800x420 canvas graphics for trade closure PNL visual cards). | `TELEGRAM_BOT_TOKEN`<br>`TELEGRAM_CHAT_ID` | `node-telegram-bot-api`<br>`canvas`<br>`src/db/settings.js`<br>`src/db/positions.js` |
 
 ---
@@ -327,7 +325,7 @@ The database module (`src/db/connection.js`) initializes `charon.sqlite` using `
 4. **`dry_run_positions`**: Main position state table (`id`, `symbol`, `mint`, `status`, `size_sol`, `entry_mcap`, `exit_mcap`, `pnl_sol`, `pnl_percent`, `exit_reason`, `execution_mode`, `opened_at_ms`, `closed_at_ms`).
 5. **`dry_run_trades`**: Transaction execution ledger linked to positions.
 6. **`llm_decisions`**: Historical record of LLM prompts, model responses, confidence ratings, and decision verdicts.
-7. **`learning_lessons` & `learning_applied`**: Active self-tuning lessons and audit trail of applied parameter modifications.
+7. **`learning_runs` & `learning_lessons`**: Evidence summaries, structured lesson candidates, approval state, scope, confidence, and expiry metadata.
 8. **`trade_intents`**: Pending queue for operator trade confirmation callbacks.
 9. **`saved_wallets`**: Tracked smart wallet address repository.
 
@@ -338,9 +336,9 @@ The database module (`src/db/connection.js`) initializes `charon.sqlite` using `
 
 ---
 
-## 11. Subsystem 8: Auto-Learn & Self-Tuning Engine
+## 11. Subsystem 8: Human-Approved Prompt Learning
 
-The **Auto-Learn Engine** (`src/learning/autoApply.js` & `scripts/auto_learn.mjs`) provides closed-loop self-tuning capabilities.
+The learning engine creates advisory prompt lessons from compatible dry-run outcomes. It cannot modify runtime configuration, strategy parameters, code, or model artifacts.
 
 ```
 +---------------------+      +---------------------+      +---------------------+
@@ -350,18 +348,18 @@ The **Auto-Learn Engine** (`src/learning/autoApply.js` & `scripts/auto_learn.mjs
                                                                      |
                                                                      v
 +---------------------+      +---------------------+      +---------------------+
-| Dynamic Settings &  | <--- | Auto-Learn Mutator  | <--- |   Recency & Count   |
-| Strategies SQL DB   |      |   (autoApply.js)    |      |  Gating Validation  |
+| Future LLM Prompts  | <--- | Human Approval      | <--- | Quality & Count     |
+| (scoped guidance)   |      | + 30-day expiry     |      | Gating Validation  |
 +---------------------+      +---------------------+      +---------------------+
 ```
 
-- **Execution Interval**: `runPeriodicLearning` runs every 6 hours via `src/app.js`.
+- **Execution Interval**: `runPeriodicLearning` runs weekly via `src/app.js`.
 - **Gating Rules**:
-  - **Minimum Closed Positions**: Requires >= 30 closed positions in DB.
-  - **Lesson Recency Gate**: Filters lessons created within the last 7 days (`created_at_ms >= Date.now() - 7 * 86400 * 1000`).
-  - **24-Hour Idempotency Gate**: Checks `learning_applied` table to ensure a specific parameter/strategy combination has not been mutated within the last 24 hours.
-  - **Confidence Floor**: Requires lesson confidence score >= 0.7.
-- **Database Mutation Target**: Mutates `settings` table (`INSERT INTO settings ... ON CONFLICT DO UPDATE`) and `strategies` JSON configuration (`config_json`). Adjusts `default_sl_percent`, `default_tp_percent`, `llm_min_confidence`, `min_liquidity_usd`, `max_mcap_usd`.
+  - **Minimum Closed Positions**: Requires >= 50 version-compatible closed positions.
+  - **Data Quality Gate**: Requires complete trade ledger, valid outcomes, and bounded quote fallback rate.
+  - **Human Approval Gate**: Candidate lessons do not enter prompts until `/lessonapprove`.
+  - **Expiry Gate**: Approved lessons expire after 30 days.
+- **Attribution**: Decisions record exposed lesson IDs; `/lessoneval` reports correlation only, not causal impact.
 
 ---
 

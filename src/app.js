@@ -181,7 +181,8 @@ export async function startAngel() {
       const summary = summarizeLearningWindow(LEARNING_WINDOW_MS);
       const { lessons, raw } = await generateLessons(summary);
       const runId = storeLearningRun(LEARNING_WINDOW_MS, summary, lessons, raw);
-      const eligible = Number(summary.positions.closed || 0) >= 50;
+      const eligible = Number(summary.positions.closed || 0) >= 50
+        && summary.dataQuality?.learningEligible === true;
       console.log(`[learn] advisory run #${runId}: ${lessons.length} ${eligible ? 'candidate' : 'insufficient'} lessons stored; no configuration changes`);
       await sendTelegram(`🧠 <b>LLM Learning (advisory only)</b>\n\nRun #${runId}: ${lessons.length} lessons stored as ${eligible ? 'candidates awaiting /lessonapprove' : 'insufficient evidence'}.\nNo settings, strategies, code, or models were changed.`);
     } catch (err) {
@@ -214,6 +215,10 @@ export async function startAngel() {
   }, 60 * 60 * 1000);
 
   // ── Database Backup ───────────────────────────────────────────────
+  // Create a fresh backup at startup so health does not report a stale
+  // snapshot for the first four hours after a restart.
+  void runBackup().then(() => console.log('[backup] startup SQLite backup created'))
+    .catch(err => console.error(`[backup] startup backup failed: ${err.message}`));
   setInterval(nonOverlapping('database backup', async () => {
     try {
       await runBackup();

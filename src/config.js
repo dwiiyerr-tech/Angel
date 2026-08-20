@@ -22,6 +22,15 @@ export const SOLANA_RPC_URL = process.env.SOLANA_RPC_URL || `https://mainnet.hel
 export const SOLANA_WS_URL = process.env.SOLANA_WS_URL || `wss://mainnet.helius-rpc.com/?api-key=${HELIUS_API_KEY}`;
 export const JUPITER_SWAP_BASE_URL = process.env.JUPITER_SWAP_BASE_URL || 'https://api.jup.ag/swap/v2';
 export const JUPITER_SLIPPAGE_BPS = Number(process.env.JUPITER_SLIPPAGE_BPS || 300);
+export const MIN_RISK_REWARD_RATIO = Number(process.env.MIN_RISK_REWARD_RATIO || 1.5);
+export const JITO_ENABLED = process.env.JITO_ENABLED === 'true';
+export const JITO_BLOCK_ENGINE_URL = process.env.JITO_BLOCK_ENGINE_URL || 'https://mainnet.block-engine.jito.wtf';
+export const JITO_BUNDLE_ONLY = process.env.JITO_BUNDLE_ONLY === 'true';
+export const LOSS_STREAK_SIZE_CUT_AFTER = Number(process.env.LOSS_STREAK_SIZE_CUT_AFTER || 2);
+export const LOSS_STREAK_SIZE_MULTIPLIER = Number(process.env.LOSS_STREAK_SIZE_MULTIPLIER || 0.5);
+export const LOSS_STREAK_PAUSE_AFTER = Number(process.env.LOSS_STREAK_PAUSE_AFTER || 3);
+export const LOSS_STREAK_PAUSE_MS = Number(process.env.LOSS_STREAK_PAUSE_MS || 30 * 60 * 1000);
+export const RISK_PER_TRADE_SOL = Number(process.env.RISK_PER_TRADE_SOL || 0.02);
 export const LIVE_MIN_SOL_RESERVE_LAMPORTS = Math.floor(Number(process.env.LIVE_MIN_SOL_RESERVE || 0.02) * 1_000_000_000);
 export const LIVE_MAX_POSITION_SOL = Number(process.env.LIVE_MAX_POSITION_SOL || 0.1);
 export const LIVE_MAX_WALLET_FRACTION = Number(process.env.LIVE_MAX_WALLET_FRACTION || 0.1);
@@ -50,6 +59,10 @@ export const TRENDING_LOOKBACK_MS = Number(process.env.TRENDING_LOOKBACK_MS || 1
 export const SMART_MONEY_LOOKBACK_MS = Number(process.env.SMART_MONEY_LOOKBACK_MS || 30 * 60 * 1000);
 export const GMGN_CACHE_TTL_MS = Number(process.env.GMGN_CACHE_TTL_MS || 5 * 60 * 1000);
 export const POSITION_CHECK_MS = Number(process.env.POSITION_CHECK_MS || 10_000);
+// Expected transaction overhead used only for dry-run accounting. Live mode
+// records the fee reported by the confirmed Solana transaction instead.
+export const DRY_RUN_NETWORK_FEE_SOL = Number(process.env.DRY_RUN_NETWORK_FEE_SOL || 0.000005);
+export const DRY_RUN_PRIORITY_FEE_SOL = Number(process.env.DRY_RUN_PRIORITY_FEE_SOL || 0);
 // Reduced from 60s — tokenrouter MiniMax-M3 normal response is 1-8s; 25s cap = hard upper bound on slow model hangs. LLM call was the biggest single delay in buy pipeline.
 export const LLM_TIMEOUT_MS = Number(process.env.LLM_TIMEOUT_MS || 25_000);
 export const ENABLE_LLM = process.env.ENABLE_LLM !== 'false';

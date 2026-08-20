@@ -173,10 +173,11 @@ export async function refreshPosition(position, { autoExit = true, jupiterPnl = 
   // Quote-first (2026-07-24): dry_run exit decisions use executable Jupiter quote (live pool
   // reserves) as primary price — datapi mark is stale by design. Mark = fallback on 429/backoff.
   const useQuote = position.execution_mode !== 'live' && numSetting('exit_quote_enabled', 1);
-  const [asset, qp, liveExitQuote] = await Promise.all([
+  const drySizedQuote = position.execution_mode !== 'live' && position.token_amount_raw;
+  const [asset, qp, executableExitQuote] = await Promise.all([
     fetchJupiterAsset(position.mint, { useCache: false, ttlMs: 3000 }),
-    useQuote ? fetchTokenSpotViaQuote(position.mint) : Promise.resolve(null),
-    position.execution_mode === 'live' && position.token_amount_raw
+    useQuote && !drySizedQuote ? fetchTokenSpotViaQuote(position.mint) : Promise.resolve(null),
+    position.token_amount_raw && (position.execution_mode === 'live' || drySizedQuote)
       ? fetchTokenExitQuote(position.mint, position.token_amount_raw)
       : Promise.resolve(null),
   ]);
@@ -189,8 +190,8 @@ export async function refreshPosition(position, { autoExit = true, jupiterPnl = 
   // Guard 1 DISABLED (2026-07-17): can't distinguish crash vs stale data — single source (Jupiter) is unreliable
   let price = firstPositiveNumber(quotePrice, jupiterPrice || null, position.high_water_price, position.entry_price);
   let mcap = firstPositiveNumber(quoteMcap, jupiterMcap, position.high_water_mcap, position.entry_mcap);
-  if (position.execution_mode === 'live' && liveExitQuote && Number(position.size_sol) > 0) {
-    const liquidationRatio = liveExitQuote.outSol / Number(position.size_sol);
+  if (executableExitQuote && Number(position.size_sol) > 0) {
+    const liquidationRatio = executableExitQuote.outSol / Number(position.size_sol);
     if (Number(position.entry_mcap) > 0) mcap = Number(position.entry_mcap) * liquidationRatio;
     if (Number(position.entry_price) > 0) price = Number(position.entry_price) * liquidationRatio;
   }
@@ -203,9 +204,9 @@ export async function refreshPosition(position, { autoExit = true, jupiterPnl = 
   let pnlPercent = (Number(mcap) / Number(position.entry_mcap) - 1) * 100;
   const markPnlPercent = pnlPercent;
   let pnlSol = Number(position.size_sol) * pnlPercent / 100;
-  if (liveExitQuote && Number(position.size_sol) > 0) {
-    pnlSol = liveExitQuote.outSol - Number(position.size_sol);
-    pnlPercent = (liveExitQuote.outSol / Number(position.size_sol) - 1) * 100;
+  if (executableExitQuote && Number(position.size_sol) > 0) {
+    pnlSol = executableExitQuote.outSol - Number(position.size_sol);
+    pnlPercent = (executableExitQuote.outSol / Number(position.size_sol) - 1) * 100;
   } else if (jupiterPnl && Number.isFinite(Number(jupiterPnl.totalPnlPercentageNative))) {
     pnlPercent = Number(jupiterPnl.totalPnlPercentageNative);
     pnlSol = Number.isFinite(Number(jupiterPnl.totalPnlNative)) ? Number(jupiterPnl.totalPnlNative) : pnlSol;
@@ -273,6 +274,21 @@ export async function refreshPosition(position, { autoExit = true, jupiterPnl = 
     trailDropPercent: trailDrop,
     trailPercent: effectiveTrailPct,
   });
+  const expectedDryExitFeeSol = Math.max(0, numSetting('dry_run_network_fee_sol', 0.000005))
+    + Math.max(0, numSetting('dry_run_priority_fee_sol', 0));
+
+  async function settleDryPartial(rawAmount, soldCostSol, fallbackPnlPercent) {
+    const quote = rawAmount ? await fetchTokenExitQuote(position.mint, String(rawAmount)) : null;
+    const quotedOutSol = Number(quote?.outSol);
+    const drySlippage = Math.max(0, numSetting('dry_run_slippage_percent', 0)) / 100;
+    const slippageAdjustedOutSol = Number.isFinite(quotedOutSol) && quotedOutSol >= 0
+      ? quotedOutSol * Math.max(0, 1 - drySlippage)
+      : null;
+    const grossPnl = Number.isFinite(slippageAdjustedOutSol)
+      ? slippageAdjustedOutSol - soldCostSol
+      : soldCostSol * fallbackPnlPercent / 100;
+    return { pnlSol: grossPnl - expectedDryExitFeeSol, feeSol: expectedDryExitFeeSol };
+  }
 
   // === P4: Break-Even Stop ===
   // Once trade reaches +15% profit, move stop to breakeven (+0.5%) to prevent gave-back-gains
@@ -297,7 +313,8 @@ export async function refreshPosition(position, { autoExit = true, jupiterPnl = 
   //   Peak 75-100% → Kunci profit minimal +25% (runner confirmed, amankan)
   //   Peak 100%+   → Kunci profit minimal +35% (moonshot, kunci sepertiga)
   //
-  // Jika trailing sudah armed, profit lock tidak aktif (trailing yang mengambil alih).
+  // Profit lock remains active after trailing arms; otherwise a large winner
+  // could be handed back to the market while the runner is still open.
 
   let profitLockFloor = null;
   if (peakPnl >= 100) profitLockFloor = 35;
@@ -307,15 +324,15 @@ export async function refreshPosition(position, { autoExit = true, jupiterPnl = 
   else if (peakPnl >= 15) profitLockFloor = 2;
 
   const profitLockArmed = profitLockFloor !== null;
-  const profitLockHit = profitLockArmed && !trailingArmed && pnlPercent <= profitLockFloor && pnlPercent > 0;
+  const profitLockHit = profitLockArmed && pnlPercent <= profitLockFloor;
 
   let exitReason = null;
   let closed = false;
 
   // Standard exit checks (Highest Priority)
-  if (trailingHit) exitReason = 'TRAILING_TP';
+  if (profitLockHit) exitReason = 'PROFIT_LOCK';
+  else if (trailingHit) exitReason = 'TRAILING_TP';
   else if (slHit) exitReason = 'SL';
-  else if (profitLockHit) exitReason = 'PROFIT_LOCK';
   else if (breakEvenHit) exitReason = 'BREAK_EVEN';
   else if (tpHit && !position.trailing_enabled) exitReason = 'TP';
 
@@ -364,7 +381,12 @@ export async function refreshPosition(position, { autoExit = true, jupiterPnl = 
   // === P1: Default Partial TP Cascade ===
   // If strategy doesn't define partial_tp, apply default cascade: sell 50% at +15%
   const defaultPartialTp = numSetting('default_partial_tp_enabled', 1);
-  const defaultPartialTpAt = numSetting('default_partial_tp_at_percent', 20);
+  const riskUnitPercent = Math.abs(Number(position.sl_percent || 0));
+  const tp1RMultiple = Math.max(0.5, numSetting('tp1_r_multiple', 1));
+  const defaultPartialTpAt = Math.max(
+    numSetting('default_partial_tp_at_percent', 20),
+    riskUnitPercent * tp1RMultiple,
+  );
   const defaultPartialTpSell = numSetting('default_partial_tp_sell_percent', 25);
   if (!exitReason && defaultPartialTp && !strat?.partial_tp && !position.partial_tp_done && Number(position.partial_tp_retry_after_ms || 0) <= now() && pnlPercent >= defaultPartialTpAt) {
     console.log(`[position] ${position.id} DEFAULT partial TP at ${pnlPercent.toFixed(1)}% (sell ${defaultPartialTpSell}%)`);
@@ -380,8 +402,9 @@ export async function refreshPosition(position, { autoExit = true, jupiterPnl = 
           const soldCostSol = position.size_sol * (defaultPartialTpSell / 100);
           const newSizeSol = position.size_sol - soldCostSol;
           const receivedSol = Number(sell.outputAmount || 0) / 1_000_000_000;
-          const realizedDelta = receivedSol > 0 ? receivedSol - soldCostSol : 0;
-          db.prepare('UPDATE dry_run_positions SET partial_tp_done = 1, token_amount_raw = ?, size_sol = ?, realized_pnl_sol = coalesce(realized_pnl_sol, 0) + ?, realized_cost_sol = coalesce(realized_cost_sol, 0) + ? WHERE id = ?').run(remaining.toString(), newSizeSol, realizedDelta, soldCostSol, position.id);
+          const feeSol = Number(position.execution_mode === 'live' ? sell.feeSol : 0);
+          const realizedDelta = receivedSol > 0 ? receivedSol - soldCostSol - feeSol : -feeSol;
+          db.prepare('UPDATE dry_run_positions SET partial_tp_done = 1, token_amount_raw = ?, size_sol = ?, realized_pnl_sol = coalesce(realized_pnl_sol, 0) + ?, realized_cost_sol = coalesce(realized_cost_sol, 0) + ?, realized_fee_sol = coalesce(realized_fee_sol, 0) + ? WHERE id = ?').run(remaining.toString(), newSizeSol, realizedDelta, soldCostSol, feeSol, position.id);
           db.prepare(`
             INSERT INTO dry_run_trades (position_id, mint, side, at_ms, price, mcap, size_sol, token_amount_est, reason, payload_json)
             VALUES (?, ?, 'sell', ?, ?, ?, ?, ?, 'PARTIAL_TP_DEFAULT', ?)
@@ -398,23 +421,30 @@ export async function refreshPosition(position, { autoExit = true, jupiterPnl = 
         }
       }
     } else {
-      const sellAmount = (position.token_amount_est * defaultPartialTpSell) / 100;
-      const remainingAmount = position.token_amount_est - sellAmount;
+      const rawAmount = position.token_amount_raw ? BigInt(position.token_amount_raw) : null;
+      const sellAmountRaw = rawAmount ? (rawAmount * BigInt(defaultPartialTpSell)) / 100n : null;
+      const sellAmount = rawAmount ? Number(sellAmountRaw) : (position.token_amount_est * defaultPartialTpSell) / 100;
+      const remainingAmount = position.token_amount_est == null ? null : position.token_amount_est - sellAmount;
+      const remainingRaw = rawAmount ? rawAmount - sellAmountRaw : null;
       const soldCostSol = position.size_sol * (defaultPartialTpSell / 100);
       const newSizeSol = position.size_sol - soldCostSol;
-      const realizedDelta = soldCostSol * pnlPercent / 100;
-      db.prepare('UPDATE dry_run_positions SET partial_tp_done = 1, token_amount_est = ?, size_sol = ?, realized_pnl_sol = coalesce(realized_pnl_sol, 0) + ?, realized_cost_sol = coalesce(realized_cost_sol, 0) + ? WHERE id = ?').run(remainingAmount, newSizeSol, realizedDelta, soldCostSol, position.id);
+      const partial = await settleDryPartial(sellAmountRaw, soldCostSol, pnlPercent);
+      db.prepare('UPDATE dry_run_positions SET partial_tp_done = 1, token_amount_est = ?, token_amount_raw = coalesce(?, token_amount_raw), size_sol = ?, realized_pnl_sol = coalesce(realized_pnl_sol, 0) + ?, realized_cost_sol = coalesce(realized_cost_sol, 0) + ?, realized_fee_sol = coalesce(realized_fee_sol, 0) + ? WHERE id = ?').run(remainingAmount, remainingRaw?.toString() || null, newSizeSol, partial.pnlSol, soldCostSol, partial.feeSol, position.id);
       db.prepare(`
         INSERT INTO dry_run_trades (position_id, mint, side, at_ms, price, mcap, size_sol, token_amount_est, reason, payload_json)
         VALUES (?, ?, 'sell', ?, ?, ?, ?, ?, 'PARTIAL_TP_DEFAULT', ?)
       `).run(position.id, position.mint, now(), price, mcap,
         position.size_sol * (defaultPartialTpSell / 100), sellAmount,
-        json({ pnlPercent, partialSellPercent: defaultPartialTpSell, remainingAmount }));
+        json({ pnlPercent, partialSellPercent: defaultPartialTpSell, remainingAmount, remainingRaw: remainingRaw?.toString() || null, partial }));
     }
   }
 
   // Partial TP check
-  if (!exitReason && strat?.partial_tp && !position.partial_tp_done && Number(position.partial_tp_retry_after_ms || 0) <= now() && pnlPercent >= strat.partial_tp_at_percent) {
+  const strategyPartialAt = Math.max(
+    Number(strat?.partial_tp_at_percent || 0),
+    riskUnitPercent * tp1RMultiple,
+  );
+  if (!exitReason && strat?.partial_tp && !position.partial_tp_done && Number(position.partial_tp_retry_after_ms || 0) <= now() && pnlPercent >= strategyPartialAt) {
     console.log(`[position] ${position.id} partial TP at ${pnlPercent.toFixed(1)}% (${strat.partial_tp_sell_percent}% sell)`);
     if (position.execution_mode === 'live' && position.token_amount_raw) {
       try {
@@ -426,8 +456,9 @@ export async function refreshPosition(position, { autoExit = true, jupiterPnl = 
           const soldCostSol = position.size_sol * (strat.partial_tp_sell_percent / 100);
           const newSizeSol = position.size_sol - soldCostSol;
           const receivedSol = Number(sell.outputAmount || 0) / 1_000_000_000;
-          const realizedDelta = receivedSol > 0 ? receivedSol - soldCostSol : 0;
-          db.prepare('UPDATE dry_run_positions SET partial_tp_done = 1, token_amount_raw = ?, size_sol = ?, realized_pnl_sol = coalesce(realized_pnl_sol, 0) + ?, realized_cost_sol = coalesce(realized_cost_sol, 0) + ? WHERE id = ?').run(remaining.toString(), newSizeSol, realizedDelta, soldCostSol, position.id);
+          const feeSol = Number(position.execution_mode === 'live' ? sell.feeSol : 0);
+          const realizedDelta = receivedSol > 0 ? receivedSol - soldCostSol - feeSol : -feeSol;
+          db.prepare('UPDATE dry_run_positions SET partial_tp_done = 1, token_amount_raw = ?, size_sol = ?, realized_pnl_sol = coalesce(realized_pnl_sol, 0) + ?, realized_cost_sol = coalesce(realized_cost_sol, 0) + ?, realized_fee_sol = coalesce(realized_fee_sol, 0) + ? WHERE id = ?').run(remaining.toString(), newSizeSol, realizedDelta, soldCostSol, feeSol, position.id);
           db.prepare(`
             INSERT INTO dry_run_trades (position_id, mint, side, at_ms, price, mcap, size_sol, token_amount_est, reason, payload_json)
             VALUES (?, ?, 'sell', ?, ?, ?, ?, ?, 'PARTIAL_TP', ?)
@@ -445,18 +476,21 @@ export async function refreshPosition(position, { autoExit = true, jupiterPnl = 
         }
       }
     } else {
-      const sellAmount = (position.token_amount_est * strat.partial_tp_sell_percent) / 100;
-      const remainingAmount = position.token_amount_est - sellAmount;
+      const rawAmount = position.token_amount_raw ? BigInt(position.token_amount_raw) : null;
+      const sellAmountRaw = rawAmount ? (rawAmount * BigInt(strat.partial_tp_sell_percent)) / 100n : null;
+      const sellAmount = rawAmount ? Number(sellAmountRaw) : (position.token_amount_est * strat.partial_tp_sell_percent) / 100;
+      const remainingAmount = position.token_amount_est == null ? null : position.token_amount_est - sellAmount;
+      const remainingRaw = rawAmount ? rawAmount - sellAmountRaw : null;
       const soldCostSol = position.size_sol * (strat.partial_tp_sell_percent / 100);
       const newSizeSol = position.size_sol - soldCostSol;
-      const realizedDelta = soldCostSol * pnlPercent / 100;
-      db.prepare('UPDATE dry_run_positions SET partial_tp_done = 1, token_amount_est = ?, size_sol = ?, realized_pnl_sol = coalesce(realized_pnl_sol, 0) + ?, realized_cost_sol = coalesce(realized_cost_sol, 0) + ? WHERE id = ?').run(remainingAmount, newSizeSol, realizedDelta, soldCostSol, position.id);
+      const partial = await settleDryPartial(sellAmountRaw, soldCostSol, pnlPercent);
+      db.prepare('UPDATE dry_run_positions SET partial_tp_done = 1, token_amount_est = ?, token_amount_raw = coalesce(?, token_amount_raw), size_sol = ?, realized_pnl_sol = coalesce(realized_pnl_sol, 0) + ?, realized_cost_sol = coalesce(realized_cost_sol, 0) + ?, realized_fee_sol = coalesce(realized_fee_sol, 0) + ? WHERE id = ?').run(remainingAmount, remainingRaw?.toString() || null, newSizeSol, partial.pnlSol, soldCostSol, partial.feeSol, position.id);
       db.prepare(`
         INSERT INTO dry_run_trades (position_id, mint, side, at_ms, price, mcap, size_sol, token_amount_est, reason, payload_json)
         VALUES (?, ?, 'sell', ?, ?, ?, ?, ?, 'PARTIAL_TP', ?)
       `).run(position.id, position.mint, now(), price, mcap,
         position.size_sol * (strat.partial_tp_sell_percent / 100), sellAmount,
-        json({ pnlPercent, partialSellPercent: strat.partial_tp_sell_percent, remainingAmount }));
+        json({ pnlPercent, partialSellPercent: strat.partial_tp_sell_percent, remainingAmount, remainingRaw: remainingRaw?.toString() || null, partial }));
     }
   }
 
@@ -483,8 +517,11 @@ export async function refreshPosition(position, { autoExit = true, jupiterPnl = 
     const receivedLamports = Number(sell.outputAmount || 0);
     const receivedSol = receivedLamports > 0 ? receivedLamports / 1_000_000_000 : null;
     if (receivedSol != null) {
-      finalPnlSol = Number(position.realized_pnl_sol || 0) + receivedSol - Number(position.size_sol);
-      const originalCost = Number(position.realized_cost_sol || 0) + Number(position.size_sol);
+      const exitFeeSol = Number(sell.feeSol || 0);
+      finalPnlSol = Number(position.realized_pnl_sol || 0) + receivedSol - Number(position.size_sol) - Number(position.entry_fee_sol || 0) - exitFeeSol;
+      const originalCost = Number(position.realized_cost_sol || 0) + Number(position.size_sol)
+        + Number(position.entry_fee_sol || 0) + Number(position.realized_fee_sol || 0)
+        + exitFeeSol;
       finalPnlPercent = originalCost > 0 ? finalPnlSol / originalCost * 100 : pnlPercent;
     }
     db.prepare(`
@@ -493,6 +530,7 @@ export async function refreshPosition(position, { autoExit = true, jupiterPnl = 
           pnl_percent = ?, pnl_sol = ?, exit_signature = ?
       WHERE id = ?
     `).run(now(), price, mcap, exitReason, finalPnlPercent, finalPnlSol, sell.signature, position.id);
+    db.prepare('UPDATE dry_run_positions SET exit_fee_sol = ? WHERE id = ?').run(Number(sell.feeSol || 0), position.id);
     db.prepare(`
       INSERT INTO dry_run_trades (position_id, mint, side, at_ms, price, mcap, size_sol, token_amount_est, reason, payload_json)
       VALUES (?, ?, 'sell', ?, ?, ?, ?, ?, ?, ?)
@@ -505,14 +543,19 @@ export async function refreshPosition(position, { autoExit = true, jupiterPnl = 
     const dryExitMcap = quotePrice ? Number(position.entry_mcap) * (quotePrice / Number(position.entry_price)) : mcap;
     const dryPnlPercent = (Number(exitMcap) / Number(position.entry_mcap) - 1) * 100;
     const dryPnlSol = Number(position.size_sol) * dryPnlPercent / 100;
-    finalPnlSol = Number(position.realized_pnl_sol || 0) + dryPnlSol;
-    const originalCost = Number(position.realized_cost_sol || 0) + Number(position.size_sol);
+    const dryExitFeeSol = Math.max(0, numSetting('dry_run_network_fee_sol', 0.000005))
+      + Math.max(0, numSetting('dry_run_priority_fee_sol', 0));
+    finalPnlSol = Number(position.realized_pnl_sol || 0) + dryPnlSol
+      - Number(position.entry_fee_sol || 0) - dryExitFeeSol;
+    const originalCost = Number(position.realized_cost_sol || 0) + Number(position.size_sol)
+      + Number(position.entry_fee_sol || 0) + Number(position.realized_fee_sol || 0)
+      + dryExitFeeSol;
     finalPnlPercent = originalCost > 0 ? finalPnlSol / originalCost * 100 : dryPnlPercent;
     db.prepare(`
       UPDATE dry_run_positions
-      SET status = 'closed', closed_at_ms = ?, exit_price = ?, exit_mcap = ?, exit_reason = ?, pnl_percent = ?, pnl_sol = ?
+      SET status = 'closed', closed_at_ms = ?, exit_price = ?, exit_mcap = ?, exit_reason = ?, pnl_percent = ?, pnl_sol = ?, exit_fee_sol = ?
       WHERE id = ?
-    `).run(now(), dryExitPrice, dryExitMcap, exitReason, finalPnlPercent, finalPnlSol, position.id);
+    `).run(now(), dryExitPrice, dryExitMcap, exitReason, finalPnlPercent, finalPnlSol, dryExitFeeSol, position.id);
     db.prepare(`
       INSERT INTO dry_run_trades (position_id, mint, side, at_ms, price, mcap, size_sol, token_amount_est, reason, payload_json)
       VALUES (?, ?, 'sell', ?, ?, ?, ?, ?, ?, ?)

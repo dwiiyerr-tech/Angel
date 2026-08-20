@@ -323,6 +323,38 @@ async function fetchTokenSpotViaQuote(mint) {
   }
 }
 
+async function fetchDryRunEntryQuote(mint, sizeSol, decimals, referencePriceUsd, referenceMcapUsd) {
+  if (quoteBackoffActive() || !Number.isFinite(Number(sizeSol)) || Number(sizeSol) <= 0) return null;
+  if (!Number.isInteger(Number(decimals)) || Number(decimals) < 0) return null;
+  try {
+    const inputLamports = Math.round(Number(sizeSol) * 1_000_000_000);
+    const url = new URL('https://lite-api.jup.ag/swap/v1/quote');
+    url.searchParams.set('inputMint', WSOL_MINT);
+    url.searchParams.set('outputMint', mint);
+    url.searchParams.set('amount', String(inputLamports));
+    url.searchParams.set('slippageBps', String(JUPITER_SLIPPAGE_BPS));
+    const [solUsd, quoteRes] = await Promise.all([
+      fetchSolUsdPriceCached(),
+      axios.get(url.toString(), { timeout: 10_000, headers: JSON_HEADERS }),
+    ]);
+    const outputAmountRaw = String(quoteRes.data?.outAmount || '');
+    if (!/^\d+$/.test(outputAmountRaw) || BigInt(outputAmountRaw) <= 0n) return null;
+    const tokenAmount = Number(outputAmountRaw) / (10 ** Number(decimals));
+    if (!Number.isFinite(tokenAmount) || tokenAmount <= 0 || !Number.isFinite(solUsd) || solUsd <= 0) return null;
+    const effectivePriceUsd = Number(sizeSol) * solUsd / tokenAmount;
+    const referencePrice = Number(referencePriceUsd);
+    const referenceMcap = Number(referenceMcapUsd);
+    const effectiveMcapUsd = referencePrice > 0 && referenceMcap > 0
+      ? referenceMcap * (effectivePriceUsd / referencePrice)
+      : null;
+    return { inputLamports, outputAmountRaw, tokenAmount, solUsd, effectivePriceUsd, effectiveMcapUsd };
+  } catch (err) {
+    setQuoteBackoff(err);
+    if (err.response?.status !== 429) console.log(`[entry-quote] ${mint.slice(0, 8)}... ${err.response?.status || ''} ${err.message}`);
+    return null;
+  }
+}
+
 async function fetchTokenExitQuote(mint, rawAmount) {
   if (quoteBackoffActive() || !rawAmount || BigInt(rawAmount) <= 0n) return null;
   try {
@@ -370,6 +402,7 @@ export {
   fetchJupiterChartContext,
   fetchJupiterWalletPnl,
   fetchTokenSpotViaQuote,
+  fetchDryRunEntryQuote,
   fetchTokenExitQuote,
   jupiterAssetBackoffActive,
   setJupiterAssetBackoff,

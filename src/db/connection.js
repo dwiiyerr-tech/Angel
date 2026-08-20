@@ -309,6 +309,9 @@ export function initDb() {
   ensureColumn('dry_run_positions', 'exit_signature', 'TEXT');
   ensureColumn('dry_run_positions', 'token_amount_raw', 'TEXT');
   ensureColumn('dry_run_positions', 'strategy_id', "TEXT DEFAULT 'sniper'");
+  ensureColumn('dry_run_positions', 'entry_fee_sol', 'REAL DEFAULT 0');
+  ensureColumn('dry_run_positions', 'exit_fee_sol', 'REAL DEFAULT 0');
+  ensureColumn('dry_run_positions', 'realized_fee_sol', 'REAL DEFAULT 0');
   ensureColumn('dry_run_positions', 'partial_tp_done', 'INTEGER DEFAULT 0');
   ensureColumn('dry_run_positions', 'partial_tp_retry_after_ms', 'INTEGER DEFAULT 0');
   ensureColumn('dry_run_positions', 'realized_pnl_sol', 'REAL DEFAULT 0');
@@ -321,13 +324,18 @@ export function initDb() {
   ensureColumn('trade_dna', 'token_address', 'TEXT');
   ensureColumn('parameter_mutation_history', 'rollback_checked_at_ms', 'INTEGER');
   ensureColumn('learning_lessons', 'approved_at_ms', 'INTEGER');
+  ensureColumn('learning_lessons', 'scope', "TEXT DEFAULT 'global'");
+  ensureColumn('learning_lessons', 'instruction', 'TEXT');
+  ensureColumn('learning_lessons', 'confidence', "TEXT DEFAULT 'low'");
+  ensureColumn('learning_lessons', 'expires_at_ms', 'INTEGER');
+  ensureColumn('llm_decisions', 'learning_lesson_ids_json', "TEXT DEFAULT '[]'");
+  ensureColumn('llm_batches', 'learning_lesson_ids_json', "TEXT DEFAULT '[]'");
   // Lessons created before the human-approval workflow must never silently
   // become trusted LLM behavior guidance.
   db.prepare("UPDATE learning_lessons SET status = 'archived' WHERE status = 'active' AND approved_at_ms IS NULL").run();
 
   const defaults = {
     agent_enabled: 'true',
-    learning_auto_apply_enabled: 'false',
     live_circuit_breaker_open: 'false',
     trading_mode: process.env.TRADING_MODE || 'dry_run',
     llm_candidate_pick_count: process.env.LLM_CANDIDATE_PICK_COUNT || '10',
@@ -340,11 +348,23 @@ export function initDb() {
     min_opportunity_size_multiplier: process.env.MIN_OPPORTUNITY_SIZE_MULTIPLIER || '0.35',
     default_tp_percent: '50',
     default_sl_percent: '-25',
+    min_risk_reward_ratio: process.env.MIN_RISK_REWARD_RATIO || '1.5',
+    loss_streak_size_cut_after: process.env.LOSS_STREAK_SIZE_CUT_AFTER || '2',
+    loss_streak_size_multiplier: process.env.LOSS_STREAK_SIZE_MULTIPLIER || '0.5',
+    loss_streak_pause_after: process.env.LOSS_STREAK_PAUSE_AFTER || '3',
+    loss_streak_pause_ms: process.env.LOSS_STREAK_PAUSE_MS || String(30 * 60 * 1000),
+    market_allocator_mode: 'green',
+    market_allocator_size_multiplier: '1',
+    market_allocator_pending_mode: '',
+    market_allocator_pending_count: '0',
+    market_allocator_changed_at_ms: '0',
     default_trailing_enabled: 'true',
     default_trailing_percent: '20',
     default_partial_tp_enabled: '1',
     default_partial_tp_at_percent: '20',
     default_partial_tp_sell_percent: '25',
+    tp1_r_multiple: process.env.TP1_R_MULTIPLE || '1',
+    risk_per_trade_sol: process.env.RISK_PER_TRADE_SOL || '0.02',
     min_fee_claim_sol: process.env.MIN_FEE_CLAIM_SOL || '2',
     min_mcap_usd: process.env.MIN_MCAP_USD || '0',
     min_holders: process.env.MIN_HOLDERS || '168',
@@ -372,6 +392,7 @@ export function initDb() {
   };
   const insert = db.prepare('INSERT OR IGNORE INTO settings (key, value) VALUES (?, ?)');
   for (const [key, value] of Object.entries(defaults)) insert.run(key, value);
+  db.prepare("DELETE FROM settings WHERE key = 'learning_auto_apply_enabled'").run();
 
   // Seed default strategies
   const stratInsert = db.prepare('INSERT OR IGNORE INTO strategies (id, name, enabled, config_json, created_at_ms) VALUES (?, ?, ?, ?, ?)');

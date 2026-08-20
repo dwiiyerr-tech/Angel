@@ -20,6 +20,8 @@ import { setDegenHandler } from '../signals/trending.js';
 import { setCandidateHandler } from '../signals/feeClaim.js';
 import { short } from '../format.js';
 import { escapeHtml } from '../format.js';
+import { fetchDryRunEntryQuote } from '../enrichment/jupiter.js';
+import { evaluateMarketAllocator, allocationAllowsCandidate } from '../execution/marketAllocator.js';
 
 // Track A: High-conviction routes that bypass PreScorer/ML/LLM for sub-second execution
 // User requested full pipeline (ML + LLM) for all routes, so this is empty.
@@ -251,9 +253,11 @@ async function _processCandidateFromSignals(signals) {
   // FIX: Tighten confidence required during US Session (12:00 - 18:00 UTC)
   const currentUTCHourExecute = new Date().getUTCHours();
   const isUsSessionExecute = currentUTCHourExecute >= 12 && currentUTCHourExecute <= 18;
+  const configuredConfidence = numSetting('llm_min_confidence');
+  const sessionConfidenceFloor = 60;
   const requiredConfidence = isUsSessionExecute
-    ? Math.max(numSetting('llm_min_confidence'), 80) // Demand 80+ confidence in US session
-    : numSetting('llm_min_confidence');
+    ? Math.max(configuredConfidence, sessionConfidenceFloor)
+    : configuredConfidence;
 
   if (selectedRow && boolSetting('agent_enabled', true) && batchDecision.verdict === 'BUY' && batchDecision.confidence >= requiredConfidence) {
     if (!canOpenMorePositions()) {
@@ -301,7 +305,7 @@ async function _processCandidateFromSignals(signals) {
       action: selectedRow ? 'entry_not_approved' : 'no_candidate_selected',
       guardrails: {
         agentEnabled: boolSetting('agent_enabled', true),
-        confidenceThreshold: numSetting('llm_min_confidence'),
+        confidenceThreshold: requiredConfidence,
         openPositions: openPositionCount(),
         maxOpenPositions: numSetting('max_open_positions', 3),
       },
@@ -312,6 +316,18 @@ async function _processCandidateFromSignals(signals) {
 export async function handleApprovedBuy(selectedRow, decision, batchId, rows = [], triggerCandidateId = null) {
   const mint = selectedRow.candidate.token.mint;
   if (executingMints.has(mint)) return;
+
+  const allocation = evaluateMarketAllocator();
+  if (!allocationAllowsCandidate(selectedRow.candidate, allocation)) {
+    console.log(`[allocator] blocked ${mint.slice(0, 8)}... family=${selectedRow.candidate.signals?.strategyFamily || 'edge1'} mode=${allocation.mode}`);
+    logDecisionEvent({
+      batchId, triggerCandidateId, selectedRow, rows, decision,
+      action: 'entry_blocked_market_allocator',
+      guardrails: { allocator: allocation },
+      execution: { rejectedBeforeEntry: true },
+    });
+    return;
+  }
 
   if (!tryReservePositionSlot()) {
     const max = numSetting('max_open_positions', 3);
@@ -352,7 +368,15 @@ export async function handleApprovedBuy(selectedRow, decision, batchId, rows = [
     
     let positionId, isNew, pastWinPnlSol, pastWinClosedAtMs, blockedBy;
     try {
-      const result = await createDryRunPosition(freshSelectedRow.id, freshSelectedRow.candidate, decision, `llm_batch_${batchId}`);
+      const drySizeSol = calculatePositionSizeSol(freshSelectedRow.candidate, decision);
+      const entryQuote = await fetchDryRunEntryQuote(
+        freshSelectedRow.candidate.token.mint,
+        drySizeSol,
+        freshSelectedRow.candidate.jupiterAsset?.decimals,
+        freshSelectedRow.candidate.metrics?.priceUsd,
+        freshSelectedRow.candidate.metrics?.marketCapUsd,
+      );
+      const result = await createDryRunPosition(freshSelectedRow.id, freshSelectedRow.candidate, decision, `llm_batch_${batchId}`, entryQuote);
       positionId = result.id;
       isNew = result.isNew;
       pastWinPnlSol = result.pastWinPnlSol;

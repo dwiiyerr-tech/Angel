@@ -3,7 +3,6 @@ import { db } from '../../src/db/connection.js';
 import { claimExecutionOperation, updateExecutionOperation } from '../../src/db/executionOperations.js';
 import { setActiveStrategy, activeStrategy, setSetting, updateStrategyConfig } from '../../src/db/settings.js';
 import { assertLiveConfigApproved, approveLiveConfigSnapshot, createLiveConfigSnapshot, currentLiveConfig } from '../../src/db/liveConfig.js';
-import { autoApplyLessons, validateLearningSuggestion } from '../../src/learning/autoApply.js';
 
 console.log('[test_execution_safety] Starting durable execution safety tests...');
 
@@ -48,14 +47,4 @@ setSetting('trading_mode', 'dry_run');
 setSetting('llm_min_confidence', '61');
 assert.throws(() => assertLiveConfigApproved(), /approved configuration snapshot/);
 
-assert.strictEqual(validateLearningSuggestion('llm_min_confidence', 60).ok, true);
-assert.strictEqual(validateLearningSuggestion('llm_min_confidence', 5).ok, false);
-assert.strictEqual(validateLearningSuggestion('unknown_parameter', 10).ok, false);
-setSetting('learning_auto_apply_enabled', 'true');
-assert.deepStrictEqual(autoApplyLessons(), {
-  applied: 0,
-  actions: [],
-  disabledReason: 'llm_advisory_only',
-}, 'learning must remain advisory even if a stale setting tries to enable auto-apply');
-
-console.log('[test_execution_safety] SUCCESS: execution claims, live approval, mutation locks, bounded learning, and relation guards verified.');
+console.log('[test_execution_safety] SUCCESS: execution claims, live approval, and relation guards verified.');

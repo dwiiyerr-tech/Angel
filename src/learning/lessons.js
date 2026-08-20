@@ -4,29 +4,36 @@ import { now, json, stripThinking, strictJsonFromText } from '../utils.js';
 import { fmtPct } from '../format.js';
 import { db } from '../db/connection.js';
 
-export function fallbackLessons(summary) {
+function fallbackLessons(summary) {
   const lessons = [];
   const bestRoute = summary.positions.byRoute?.[0];
   const worstRoute = [...(summary.positions.byRoute || [])].sort((a, b) => a.pnlPercent - b.pnlPercent)[0];
   if (bestRoute && bestRoute.count >= 2 && bestRoute.pnlPercent > 0) {
     lessons.push({
-      lesson: `Prefer ${bestRoute.route} when other filters are clean; it led the window with ${fmtPct(bestRoute.avgPnlPercent)} avg PnL across ${bestRoute.count} closed dry-runs.`,
+      scope: bestRoute.route,
+      lesson: `Route ${bestRoute.route} outperformed in this evidence window.`,
+      instruction: `Prefer ${bestRoute.route} only when the candidate also passes liquidity, concentration, and fresh-entry checks.`,
+      confidence: bestRoute.count >= 30 ? 'medium' : 'low',
       evidence: { ...bestRoute, recommended_actions: [] },
     });
   }
   if (worstRoute && worstRoute.count >= 2 && worstRoute.pnlPercent < 0) {
     lessons.push({
-      lesson: `Be stricter on ${worstRoute.route}; it underperformed with ${fmtPct(worstRoute.avgPnlPercent)} avg PnL across ${worstRoute.count} closed dry-runs.`,
+      scope: worstRoute.route,
+      lesson: `Route ${worstRoute.route} underperformed in this evidence window.`,
+      instruction: `Require corroborating liquidity, buyer-flow, and concentration evidence before BUY on ${worstRoute.route}; otherwise downgrade to WATCH.`,
+      confidence: worstRoute.count >= 30 ? 'medium' : 'low',
       evidence: { ...worstRoute, recommended_actions: [] },
     });
   }
   const slCount = summary.positions.worst?.filter(row => row.exitReason === 'SL').length || 0;
   if (slCount >= 2) {
     lessons.push({
-      lesson: `Recent worst exits clustered around SL; require stronger fresh pre-entry mcap/liquidity confirmation before accepting late entries.`,
-      evidence: { slWorstCount: slCount, worst: summary.positions.worst, recommended_actions: [
-        { target: 'settings', key: 'min_liquidity_usd', new_value: '8000' },
-      ] },
+      scope: 'global',
+      lesson: 'Recent worst exits clustered around stop-loss exits.',
+      instruction: 'Require stronger fresh liquidity and entry-quality confirmation when several independent risk signals indicate a late entry.',
+      confidence: slCount >= 5 ? 'medium' : 'low',
+      evidence: { slWorstCount: slCount, worst: summary.positions.worst, recommended_actions: [] },
     });
   }
   // Performance-based auto-adjustments
@@ -34,24 +41,28 @@ export function fallbackLessons(summary) {
   const avgPnl = summary.positions.avgPnlPercent || 0;
   if (winRate < 35 && summary.positions.closed >= 10) {
     lessons.push({
-      lesson: `Win rate ${winRate.toFixed(1)}% is below target 35%; tighten LLM confidence threshold and widen stop loss to reduce false entries and premature exits.`,
-      evidence: { winRate, avgPnl, closed: summary.positions.closed, recommended_actions: [
-        { target: 'settings', key: 'llm_min_confidence', new_value: '35' },
-        { target: 'settings', key: 'default_sl_percent', new_value: '-15' },
-      ] },
+      scope: 'global',
+      lesson: `Observed win rate was ${winRate.toFixed(1)}% across ${summary.positions.closed} version-compatible trades.`,
+      instruction: 'Do not treat LLM confidence alone as BUY evidence; require independent liquidity, holder-quality, and buyer-flow confirmation.',
+      confidence: summary.positions.closed >= 50 ? 'medium' : 'low',
+      evidence: { winRate, avgPnl, closed: summary.positions.closed, recommended_actions: [] },
     });
   }
   if (avgPnl < -5 && summary.positions.closed >= 10) {
     lessons.push({
-      lesson: `Average PnL ${avgPnl.toFixed(1)}% is deeply negative; increase minimum liquidity filter and tighten entry criteria.`,
-      evidence: { avgPnl, closed: summary.positions.closed, recommended_actions: [
-        { target: 'settings', key: 'min_liquidity_usd', new_value: '10000' },
-      ] },
+      scope: 'global',
+      lesson: `Observed average PnL was ${avgPnl.toFixed(1)}% across ${summary.positions.closed} version-compatible trades.`,
+      instruction: 'Downgrade marginal setups to WATCH when downside evidence is stronger than the independent upside signals.',
+      confidence: summary.positions.closed >= 50 ? 'medium' : 'low',
+      evidence: { avgPnl, closed: summary.positions.closed, recommended_actions: [] },
     });
   }
   if (!lessons.length) {
     lessons.push({
-      lesson: 'Not enough closed dry-run evidence yet; keep collecting decisions before changing filters aggressively.',
+      scope: 'global',
+      lesson: 'There is not enough version-compatible evidence to infer a reliable trading pattern.',
+      instruction: 'Do not alter selection behavior from this lesson; continue collecting outcomes.',
+      confidence: 'low',
       evidence: { closed: summary.positions.closed, recommended_actions: [] },
     });
   }
@@ -83,9 +94,11 @@ export async function generateLessons(summary) {
           content: JSON.stringify({
             task: 'Perform a deep dive analysis on this trading window. Produce up to 6 detailed lessons uncovering hidden patterns.',
             output_schema: {
-              lessons: [{ 
-                lesson: 'Detailed, nuanced, and deeply analytical rule explaining WHY a pattern exists', 
-                evidence: 'Specific statistical supporting data and correlation metrics',
+              lessons: [{
+                scope: 'global or exact signal route',
+                lesson: 'Factual pattern supported by the supplied statistics',
+                instruction: 'Specific prompt guidance: when it applies and when to BUY/WATCH/PASS',
+                evidence: 'Specific supplied sample counts, win rate, PnL, and feature comparison',
                 confidence: 'low | medium | high'
               }],
             },
@@ -98,9 +111,16 @@ export async function generateLessons(summary) {
       headers: { authorization: `Bearer ${LLM_API_KEY}`, 'content-type': 'application/json' },
     });
     const parsed = strictJsonFromText(res.data?.choices?.[0]?.message?.content || '');
+    const allowedScopes = new Set(['global', ...(summary.positions?.byRoute || []).map(row => String(row.route))]);
+    const evidenceTrades = Number(summary.positions?.closed || 0);
     const lessons = Array.isArray(parsed.lessons)
       ? parsed.lessons.filter(item => item && typeof item === 'object').map(item => ({
+          scope: allowedScopes.has(String(item.scope)) ? String(item.scope) : 'global',
           lesson: String(item.lesson || '').slice(0, 500),
+          instruction: String(item.instruction || item.lesson || '').slice(0, 700),
+          confidence: evidenceTrades < 50 ? 'low'
+            : evidenceTrades < 100 && item.confidence === 'high' ? 'medium'
+              : ['low', 'medium', 'high'].includes(String(item.confidence)) ? String(item.confidence) : 'low',
           evidence: { data: item.evidence, recommended_actions: Array.isArray(item.recommended_actions) ? item.recommended_actions : [] },
         })).filter(item => item.lesson)
       : [];
@@ -117,12 +137,17 @@ export function storeLearningRun(windowMs, summary, lessons, raw) {
     VALUES (?, ?, ?, ?, ?)
   `).run(now(), windowMs, json(summary), json(lessons), json(raw));
   const runId = Number(result.lastInsertRowid);
-  const eligible = windowMs >= 7 * 24 * 60 * 60 * 1000 && Number(summary?.positions?.closed || 0) >= 50;
+  const eligible = windowMs >= 7 * 24 * 60 * 60 * 1000
+    && Number(summary?.positions?.closed || 0) >= 50
+    && summary?.dataQuality?.learningEligible === true;
   const lessonStatus = eligible ? 'candidate' : 'insufficient';
   const insert = db.prepare(`
-    INSERT INTO learning_lessons (run_id, created_at_ms, status, lesson, evidence_json)
-    VALUES (?, ?, ?, ?, ?)
+    INSERT INTO learning_lessons (run_id, created_at_ms, status, lesson, evidence_json, scope, instruction, confidence, expires_at_ms)
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
   `);
-  for (const item of lessons) insert.run(runId, now(), lessonStatus, item.lesson, json(item.evidence || {}));
+  for (const item of lessons) insert.run(
+    runId, now(), lessonStatus, item.lesson, json(item.evidence || {}),
+    item.scope || 'global', item.instruction || item.lesson, item.confidence || 'low', null,
+  );
   return runId;
 }

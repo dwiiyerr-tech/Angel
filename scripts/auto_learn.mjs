@@ -2,11 +2,11 @@
 /**
  * Angel Auto-Learn Manager (headless)
  * Run advisory learning: summarize dry-runs → LLM lessons → store. Never mutates configuration.
- * Usage: node scripts/auto_learn.mjs [window]  (default 24h)
+ * Usage: node scripts/auto_learn.mjs [window]  (default 7d)
  */
 import { parseWindowMs } from '../src/utils.js';
 
-const windowArg = process.argv[2] || '24h';
+const windowArg = process.argv[2] || '7d';
 
 const { summarizeLearningWindow } = await import('../src/learning/summary.js');
 const { generateLessons, storeLearningRun } = await import('../src/learning/lessons.js');

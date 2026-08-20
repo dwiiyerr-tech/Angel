@@ -4,8 +4,8 @@ import { numSetting } from './settings.js';
 
 export function storeDecision(candidateId, candidate, decision) {
   const result = db.prepare(`
-    INSERT INTO llm_decisions (candidate_id, mint, created_at_ms, verdict, confidence, reason, risks_json, raw_json)
-    VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+    INSERT INTO llm_decisions (candidate_id, mint, created_at_ms, verdict, confidence, reason, risks_json, raw_json, learning_lesson_ids_json)
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
   `).run(
     candidateId,
     candidate.token.mint,
@@ -15,6 +15,7 @@ export function storeDecision(candidateId, candidate, decision) {
     decision.reason || null,
     json(decision.risks || []),
     json(decision),
+    json(decision.learning_lesson_ids || []),
   );
   
   // FIX #1: Cache WATCH/PASS decisions to prevent redundant LLM calls
@@ -45,8 +46,8 @@ export function storeDecision(candidateId, candidate, decision) {
 export function storeBatchDecision(triggerCandidateId, rows, batchDecision) {
   const selectedRow = batchDecision.selected_row;
   const result = db.prepare(`
-    INSERT INTO llm_batches (created_at_ms, trigger_candidate_id, selected_candidate_id, selected_mint, verdict, confidence, reason, risks_json, raw_json, candidate_ids_json)
-    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+    INSERT INTO llm_batches (created_at_ms, trigger_candidate_id, selected_candidate_id, selected_mint, verdict, confidence, reason, risks_json, raw_json, candidate_ids_json, learning_lesson_ids_json)
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
   `).run(
     now(),
     triggerCandidateId,
@@ -58,6 +59,7 @@ export function storeBatchDecision(triggerCandidateId, rows, batchDecision) {
     json(batchDecision.risks || []),
     json(batchDecision),
     json(rows.map(row => row.id)),
+    json(batchDecision.learning_lesson_ids || []),
   );
   return Number(result.lastInsertRowid);
 }

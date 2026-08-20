@@ -5,6 +5,9 @@ import {
   JUPITER_API_KEY,
   JUPITER_SLIPPAGE_BPS,
   JUPITER_SWAP_BASE_URL,
+  JITO_BLOCK_ENGINE_URL,
+  JITO_BUNDLE_ONLY,
+  JITO_ENABLED,
   JSON_HEADERS,
   SOLANA_PRIVATE_KEY,
   SOLANA_RPC_URL,
@@ -141,13 +144,42 @@ async function jupiterExecute(order, signedTransaction) {
   }
 }
 
+async function jitoSendTransaction(signedTransaction) {
+  const endpoint = `${JITO_BLOCK_ENGINE_URL.replace(/\/$/, '')}/api/v1/transactions`;
+  const url = new URL(endpoint);
+  if (JITO_BUNDLE_ONLY) url.searchParams.set('bundleOnly', 'true');
+  try {
+    const res = await axios.post(url.toString(), {
+      jsonrpc: '2.0',
+      id: 1,
+      method: 'sendTransaction',
+      params: [signedTransaction, { encoding: 'base64' }],
+    }, {
+      timeout: 20_000,
+      headers: { 'content-type': 'application/json' },
+    });
+    if (res.data?.error) throw new Error(`Jito sendTransaction failed: ${res.data.error.message || JSON.stringify(res.data.error)}`);
+    if (!res.data?.result) throw new Error('Jito returned no transaction signature.');
+    return { signature: res.data.result, mevProtected: true, jito: true };
+  } catch (error) {
+    error.swapOutcomeUnknown = true;
+    error.swapStage = 'jito_sendTransaction';
+    throw error;
+  }
+}
+
 export async function executeJupiterSwap({ inputMint, outputMint, amount }) {
   const order = await jupiterOrder({ inputMint, outputMint, amount });
   const transaction = orderTransactionBase64(order);
   if (!transaction) throw new Error('Jupiter order did not include a transaction.');
   const signed = signTransaction(transaction);
   await simulateAndValidateTransaction(signed.tx, { inputMint, amount });
-  const executed = await jupiterExecute(order, signed.base64);
+  // Jito's block-engine sendTransaction is an optional MEV-protected broadcast.
+  // It is fail-closed when enabled: do not silently fall back to a public RPC
+  // after submission, which could create an ambiguous duplicate execution.
+  const executed = JITO_ENABLED
+    ? await jitoSendTransaction(signed.base64)
+    : await jupiterExecute(order, signed.base64);
   if (executed?.status && executed.status !== 'Success') {
     throw new Error(`Jupiter execute failed: ${executed.error || executed.code || executed.status}`);
   }
@@ -173,6 +205,23 @@ export async function executeJupiterSwap({ inputMint, outputMint, amount }) {
     error.swapRequestId = order.requestId || null;
     throw error;
   }
+  let feeLamports = null;
+  for (let attempt = 0; attempt < 3 && feeLamports == null; attempt += 1) {
+    try {
+      const confirmed = await solanaConnection.getTransaction(signature, {
+        commitment: 'confirmed',
+        maxSupportedTransactionVersion: 0,
+      });
+      feeLamports = Number.isFinite(Number(confirmed?.meta?.fee)) ? Number(confirmed.meta.fee) : null;
+    } catch (feeError) {
+      if (attempt === 2) {
+        console.warn(`[live] fee lookup failed for ${signature.slice(0, 10)}...: ${feeError.message}`);
+      }
+    }
+    if (feeLamports == null && attempt < 2) {
+      await new Promise((resolve) => setTimeout(resolve, 500));
+    }
+  }
   return {
     order,
     executed,
@@ -180,5 +229,7 @@ export async function executeJupiterSwap({ inputMint, outputMint, amount }) {
     inputAmount: String(amount),
     // Never treat a pre-trade quote as the amount actually received.
     outputAmount: String(executed?.outputAmountResult || executed?.totalOutputAmount || ''),
+    feeLamports,
+    feeSol: feeLamports == null ? 0 : feeLamports / 1_000_000_000,
   };
 }

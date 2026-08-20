@@ -1,7 +1,22 @@
 import { db } from './connection.js';
+import { DRY_RUN_SIMULATOR_VERSION } from '../learning/simulatorVersion.js';
 import { now, json } from '../utils.js';
 import { numSetting, boolSetting, setting, activeStrategy, slippageAdjustedMcap } from './settings.js';
+import { DRY_RUN_NETWORK_FEE_SOL, DRY_RUN_PRIORITY_FEE_SOL, RISK_PER_TRADE_SOL } from '../config.js';
 import { effectivePositionSizeSol } from '../pipeline/llm.js';
+import { riskControlState } from '../execution/riskControls.js';
+
+export function riskRewardRatio(tpPercent, slPercent) {
+  const tp = Number(tpPercent);
+  const sl = Math.abs(Number(slPercent));
+  return Number.isFinite(tp) && Number.isFinite(sl) && sl > 0 ? tp / sl : 0;
+}
+
+export function riskRewardBlockReason(tpPercent, slPercent) {
+  const minimum = Math.max(1, numSetting('min_risk_reward_ratio', 1.5));
+  const ratio = riskRewardRatio(tpPercent, slPercent);
+  return ratio >= minimum ? null : `risk/reward ${ratio.toFixed(2)} < ${minimum.toFixed(2)}`;
+}
 
 export function openPositions() {
   return db.prepare('SELECT * FROM dry_run_positions WHERE status = ? ORDER BY opened_at_ms DESC').all('open');
@@ -93,7 +108,15 @@ export function positionSizeBreakdown(candidate, decision, strat = activeStrateg
   // Regime learning is advisory only. It must not mutate money sizing outside
   // the reviewed learning/approval pipeline.
   const regimeMultiplier = 1;
-  const rawSizeSol = Math.max(0, baseAfterConfidence * riskMultiplier * sourceWeight * sessionMultiplier);
+  const lossRisk = riskControlState(setting('trading_mode', 'dry_run'));
+  const unconstrainedSizeSol = Math.max(0, baseAfterConfidence * riskMultiplier * sourceWeight * sessionMultiplier * lossRisk.sizeMultiplier);
+  const stopDistanceFraction = Math.abs(Number(decision?.suggested_sl_percent ?? strat?.sl_percent ?? numSetting('default_sl_percent', -25))) / 100;
+  const riskBudgetSol = Math.max(0, numSetting('risk_per_trade_sol', RISK_PER_TRADE_SOL));
+  const riskCappedSizeSol = riskBudgetSol > 0 && stopDistanceFraction > 0
+    ? riskBudgetSol / stopDistanceFraction
+    : unconstrainedSizeSol;
+  const allocatorMultiplier = Math.max(0, Math.min(1, numSetting('market_allocator_size_multiplier', 1)));
+  const rawSizeSol = Math.min(unconstrainedSizeSol * allocatorMultiplier, riskCappedSizeSol);
   const minimumEconomicSol = Math.max(0, numSetting('min_executable_position_sol', 0.001));
   const executable = rawSizeSol >= minimumEconomicSol;
   return {
@@ -101,7 +124,8 @@ export function positionSizeBreakdown(candidate, decision, strat = activeStrateg
     minimumOpportunityWeight, sourceWeight,
     sessionMultiplier, regimeMultiplier, rawSizeSol,
     finalSizeSol: executable ? rawSizeSol : 0,
-    minimumEconomicSol, executable,
+    minimumEconomicSol, executable, unconstrainedSizeSol, riskBudgetSol, stopDistanceFraction,
+    lossStreak: lossRisk.streak, lossStreakMultiplier: lossRisk.sizeMultiplier, allocatorMultiplier,
   };
 }
 
@@ -109,7 +133,7 @@ export function calculatePositionSizeSol(candidate, decision, strat = activeStra
   return positionSizeBreakdown(candidate, decision, strat).finalSizeSol;
 }
 
-export function createDryRunPosition(candidateId, candidate, decision, reason = 'llm_buy') {
+export function createDryRunPosition(candidateId, candidate, decision, reason = 'llm_buy', entryQuote = null) {
   const strat = activeStrategy();
   const sizing = positionSizeBreakdown(candidate, decision, strat);
   if (!sizing.executable) {
@@ -119,13 +143,18 @@ export function createDryRunPosition(candidateId, candidate, decision, reason = 
   const finalSize = sizing.finalSizeSol;
   console.log(`[position] sizing ${JSON.stringify(sizing)}`);
 
-  const entryPrice = Number(candidate.metrics.priceUsd || 0) || null;
+  const entryPrice = Number(entryQuote?.effectivePriceUsd || candidate.metrics.priceUsd || 0) || null;
   let entryMcap = Number(candidate.metrics.marketCapUsd || candidate.metrics.graduatedMarketCapUsd || 0) || null;
+  if (Number(entryQuote?.effectiveMcapUsd) > 0) entryMcap = Number(entryQuote.effectiveMcapUsd);
   entryMcap = slippageAdjustedMcap(entryMcap, 'entry');
   const tp = Number(decision.suggested_tp_percent || strat.tp_percent || numSetting('default_tp_percent', 50));
   const sl = Number(decision.suggested_sl_percent || strat.sl_percent || numSetting('default_sl_percent', -25));
+  const rrBlocked = riskRewardBlockReason(tp, sl);
+  if (rrBlocked) return { id: null, isNew: false, blockedBy: rrBlocked, riskRewardRatio: riskRewardRatio(tp, sl) };
   const trailingEnabled = (strat.trailing_enabled ?? boolSetting('default_trailing_enabled', true)) ? 1 : 0;
   const trailingPercent = strat.trailing_percent ?? numSetting('default_trailing_percent', 20);
+  const entryFeeSol = Math.max(0, numSetting('dry_run_network_fee_sol', DRY_RUN_NETWORK_FEE_SOL))
+    + Math.max(0, numSetting('dry_run_priority_fee_sol', DRY_RUN_PRIORITY_FEE_SOL));
 
   return db.transaction(() => {
     const existing = db.prepare(`
@@ -167,8 +196,8 @@ export function createDryRunPosition(candidateId, candidate, decision, reason = 
       INSERT INTO dry_run_positions (
         candidate_id, mint, symbol, status, opened_at_ms, size_sol, entry_price, entry_mcap,
         token_amount_est, high_water_price, high_water_mcap, tp_percent, sl_percent,
-        trailing_enabled, trailing_percent, trailing_armed, llm_decision_id, strategy_id, snapshot_json
-      ) VALUES (?, ?, ?, 'open', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0, ?, ?, ?)
+        trailing_enabled, trailing_percent, trailing_armed, llm_decision_id, strategy_id, entry_fee_sol, snapshot_json
+      ) VALUES (?, ?, ?, 'open', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0, ?, ?, ?, ?)
     `).run(
       candidateId,
       candidate.token.mint,
@@ -177,7 +206,7 @@ export function createDryRunPosition(candidateId, candidate, decision, reason = 
       finalSize,
       entryPrice,
       entryMcap,
-      null,
+      Number(entryQuote?.tokenAmount) > 0 ? Number(entryQuote.tokenAmount) : null,
       entryPrice,
       entryMcap,
       tp,
@@ -186,13 +215,24 @@ export function createDryRunPosition(candidateId, candidate, decision, reason = 
       trailingPercent,
       decision.id || null,
       strat.id,
-      json({ candidate, decision, reason, strategy: strat.id, sizing, llmConfidence: decision.confidence ?? null, signalRoute: candidate.signals?.route ?? null }),
+      entryFeeSol,
+      json({
+        candidate, decision, reason, strategy: strat.id, sizing, entryQuote,
+        strategyFamily: candidate.signals?.strategyFamily || candidate.strategyFamily || 'edge1',
+        simulatorVersion: DRY_RUN_SIMULATOR_VERSION,
+        entryQuoteMode: entryQuote ? 'position_sized' : 'fallback_mark',
+        llmConfidence: decision.confidence ?? null,
+        signalRoute: candidate.signals?.route ?? null,
+      }),
     );
     const positionId = Number(result.lastInsertRowid);
+    if (entryQuote?.outputAmountRaw) {
+      db.prepare('UPDATE dry_run_positions SET token_amount_raw = ? WHERE id = ?').run(String(entryQuote.outputAmountRaw), positionId);
+    }
     db.prepare(`
       INSERT INTO dry_run_trades (position_id, mint, side, at_ms, price, mcap, size_sol, token_amount_est, reason, payload_json)
       VALUES (?, ?, 'buy', ?, ?, ?, ?, ?, ?, ?)
-    `).run(positionId, candidate.token.mint, now(), entryPrice, entryMcap, finalSize, null, reason, json({ candidateId, decision }));
+    `).run(positionId, candidate.token.mint, now(), entryPrice, entryMcap, finalSize, entryQuote?.tokenAmount || null, reason, json({ candidateId, decision, entryQuote }));
     db.prepare(`
       INSERT INTO tp_sl_rules (position_id, tp_percent, sl_percent, trailing_enabled, trailing_percent, updated_at_ms)
       VALUES (?, ?, ?, ?, ?, ?)
@@ -254,8 +294,8 @@ export function createLivePosition(candidateId, candidate, decision, swap, reaso
         candidate_id, mint, symbol, status, opened_at_ms, size_sol, entry_price, entry_mcap,
         token_amount_est, high_water_price, high_water_mcap, tp_percent, sl_percent,
         trailing_enabled, trailing_percent, trailing_armed, llm_decision_id,
-        execution_mode, entry_signature, token_amount_raw, strategy_id, snapshot_json
-      ) VALUES (?, ?, ?, 'open', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0, ?, 'live', ?, ?, ?, ?)
+        execution_mode, entry_signature, token_amount_raw, strategy_id, entry_fee_sol, snapshot_json
+      ) VALUES (?, ?, ?, 'open', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0, ?, 'live', ?, ?, ?, ?, ?)
     `).run(
       candidateId,
       candidate.token.mint,
@@ -275,7 +315,8 @@ export function createLivePosition(candidateId, candidate, decision, swap, reaso
       swap.signature,
       swap.outputAmount || null,
       strat.id,
-      json({ candidate, decision, reason, swap, strategy: strat.id }),
+      Number(swap.feeSol || 0),
+      json({ candidate, decision, reason, swap, strategy: strat.id, strategyFamily: candidate.signals?.strategyFamily || candidate.strategyFamily || 'edge1' }),
     );
     const positionId = Number(result.lastInsertRowid);
     db.prepare(`

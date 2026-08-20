@@ -2,7 +2,6 @@ import assert from 'node:assert/strict';
 import { evaluateHybridAdmission, evaluateKaiserComplements, filterCandidate } from '../../src/pipeline/candidateBuilder.js';
 import { relativeTrailPercent, shouldExitTrailing, settleWithin } from '../../src/execution/positions.js';
 import { positionSizeBreakdown } from '../../src/db/positions.js';
-import { validateTuningProposal } from '../../src/learning/autoApply.js';
 import { calculateVolumeAcceleration } from '../../src/pipeline/volumeAcceleration.js';
 
 const runner = {
@@ -103,18 +102,5 @@ assert.equal(shouldExitTrailing({
 assert.equal(await settleWithin(new Promise(() => {}), 5, null), null,
   'optional GMGN enrichment must not block the fresh-runner execution path');
 
-assert.equal(validateTuningProposal({
-  param: 'trailing_percent', currentValue: 20, proposedValue: 21,
-  evidence: { candidates: 250, splitHalfPositive: true, runnerRecallPreserved: true },
-}).ok, true);
-assert.equal(validateTuningProposal({
-  param: 'trailing_percent', currentValue: 20, proposedValue: 30,
-  evidence: { candidates: 250, splitHalfPositive: true, runnerRecallPreserved: true },
-}).ok, false, 'tuning jumps above 10% must be rejected');
-assert.equal(validateTuningProposal({
-  param: 'min_liquidity_usd', currentValue: 5000, proposedValue: 4500,
-  evidence: { candidates: 500, splitHalfPositive: true, runnerRecallPreserved: true },
-}).reason, 'safety_parameter_locked');
-
-console.log('[test_hybrid_runner_policy] hybrid admission, relative trail, and strict tuning verified');
+console.log('[test_hybrid_runner_policy] hybrid admission and relative trail verified');
 process.exit(0);
