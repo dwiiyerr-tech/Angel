@@ -7,16 +7,16 @@ const ROLLING_TRADES = 20;
 const SWITCH_CONFIRMATIONS = 3;
 const MIN_MODE_HOLD_MS = 30 * 60 * 1000;
 
-function recentEdgeTrades() {
+function recentFamilyTrades(family) {
   return db.prepare(`
     SELECT pnl_percent, pnl_sol, closed_at_ms, snapshot_json
     FROM dry_run_positions
     WHERE status = 'closed'
       AND COALESCE(execution_mode, 'dry_run') = 'dry_run'
-      AND COALESCE(json_extract(snapshot_json, '$.strategyFamily'), 'edge1') = 'edge1'
+      AND COALESCE(json_extract(snapshot_json, '$.strategyFamily'), 'edge1') = ?
     ORDER BY closed_at_ms DESC, id DESC
     LIMIT ?
-  `).all(ROLLING_TRADES);
+  `).all(family, ROLLING_TRADES);
 }
 
 function lossStreak(rows) {
@@ -28,13 +28,26 @@ function lossStreak(rows) {
   return streak;
 }
 
+function familyHealth(rows) {
+  if (!rows.length) return { healthy: true, trades: 0, avgPnlPercent: null, lossStreak: 0 };
+  const avgPnlPercent = rows.reduce((sum, row) => sum + Number(row.pnl_percent || 0), 0) / rows.length;
+  const streak = lossStreak(rows);
+  return {
+    healthy: !(streak >= 3 || (rows.length >= 10 && avgPnlPercent <= -5)),
+    trades: rows.length,
+    avgPnlPercent,
+    lossStreak: streak,
+  };
+}
+
 function modeFromSetting() {
   const value = setting('market_allocator_mode', 'green');
   return ['green', 'yellow', 'red'].includes(value) ? value : 'green';
 }
 
 export function evaluateMarketAllocator({ force = false } = {}) {
-  const rows = recentEdgeTrades();
+  const rows = recentFamilyTrades(EDGE1_FAMILY);
+  const secondWaveHealth = familyHealth(recentFamilyTrades(SECOND_WAVE_FAMILY));
   const pnl = rows.reduce((sum, row) => sum + Number(row.pnl_sol || 0), 0);
   const avgPnl = rows.length ? rows.reduce((sum, row) => sum + Number(row.pnl_percent || 0), 0) / rows.length : null;
   const wins = rows.filter(row => Number(row.pnl_percent) > 0).length;
@@ -67,9 +80,9 @@ export function evaluateMarketAllocator({ force = false } = {}) {
     mode: next,
     desired,
     edgeFamily: next === 'red' ? null : EDGE1_FAMILY,
-    secondWaveEnabled: next !== 'green',
+    secondWaveEnabled: next !== 'green' && secondWaveHealth.healthy,
     edge1SizeMultiplier: next === 'yellow' ? 0.5 : next === 'red' ? 0 : 1,
-    observations: { trades: rows.length, wins, losses, pnlSol: pnl, avgPnlPercent: avgPnl, expectancyPercent: expectancy, lossStreak: streak },
+    observations: { trades: rows.length, wins, losses, pnlSol: pnl, avgPnlPercent: avgPnl, expectancyPercent: expectancy, lossStreak: streak, secondWaveHealth },
     transition: { pending, pendingCount: nextPending, confirmationsRequired: SWITCH_CONFIRMATIONS, minModeHoldMs: MIN_MODE_HOLD_MS },
   };
 }

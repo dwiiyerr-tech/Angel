@@ -356,7 +356,38 @@ export async function handleApprovedBuy(selectedRow, decision, batchId, rows = [
     console.error('[handleApprovedBuy] refresh failed, rejecting execution:', err.message);
     return { ...selectedRow, refreshError: err.message, candidate: { ...selectedRow.candidate, filters: { passed: false, failures: ['refresh failed: ' + err.message] } } };
   });
-  const freshSelectedRow = await refreshPromise;
+  let freshSelectedRow = await refreshPromise;
+  const refreshedFamily = freshSelectedRow.candidate?.signals?.strategyFamily
+    || freshSelectedRow.candidate?.strategyFamily || 'edge1';
+  if (refreshedFamily === 'second_wave_v2') {
+    const refreshedAssessment = assessSecondWave(freshSelectedRow.candidate);
+    freshSelectedRow = {
+      ...freshSelectedRow,
+      candidate: {
+        ...freshSelectedRow.candidate,
+        secondWave: refreshedAssessment,
+        signals: { ...freshSelectedRow.candidate.signals, strategyFamily: 'second_wave_v2' },
+      },
+    };
+    if (!refreshedAssessment.eligible) {
+      const failures = refreshedAssessment.hardFailures.length
+        ? refreshedAssessment.hardFailures
+        : ['second-wave revalidation failed'];
+      updateCandidateSnapshot(freshSelectedRow.id, freshSelectedRow.candidate, 'filtered');
+      console.warn(`[second-wave-revalidation] ${mint} entry cancelled: ${failures.join('; ')}`);
+      logDecisionEvent({
+        batchId,
+        triggerCandidateId,
+        selectedRow: freshSelectedRow,
+        rows,
+        decision,
+        action: 'second_wave_revalidation_failed',
+        guardrails: { failures, refreshedAtMs: Date.now() },
+        execution: { rejectedBeforeEntry: true },
+      });
+      return;
+    }
+  }
   const executionRows = rows.map(row => row.id === freshSelectedRow.id ? freshSelectedRow : row);
   if (!freshSelectedRow.candidate.filters?.passed) {
     const failures = freshSelectedRow.candidate.filters?.failures || ['fresh execution guard failed'];

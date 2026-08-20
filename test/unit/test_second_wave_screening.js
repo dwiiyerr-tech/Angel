@@ -26,4 +26,18 @@ assert.equal(result.family, 'second_wave_v2');
 assert.equal(result.eligible, true);
 assert.ok(result.score >= 8);
 assert.equal(assessSecondWave({ ...candidate, metrics: { ...candidate.metrics, liquidityUsd: 10_000 } }).eligible, false);
+assert.equal(assessSecondWave({
+  ...candidate,
+  chart: {
+    ...candidate.chart,
+    windows: candidate.chart.windows.map(row => row.label === 'ath_context_24h_5m'
+      ? { ...row, recentVolumeVsPrior: 1.2 }
+      : row),
+  },
+}).eligible, false, 'volume must dry up before entry');
+assert.equal(assessSecondWave({
+  ...candidate,
+  metrics: { ...candidate.metrics, trendingSmartDegenCount: 0 },
+  savedWalletExposure: null,
+}).eligible, false, 'smart-money flow must be verified');
 console.log('[test_second_wave_screening] hard gates and score verified');

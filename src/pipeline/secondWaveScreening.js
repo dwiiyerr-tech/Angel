@@ -52,6 +52,7 @@ export function assessSecondWave(candidate) {
   if (chart.priorHigh == null || chart.current == null || chart.priorHigh / Math.max(chart.current, Number.EPSILON) < 2) failures.push('no meaningful prior expansion');
   if (!chart.baseHealthy && !chart.reclaim) failures.push('no verified base, higher-low, or reclaim');
   if (chart.volumeDryUp == null || chart.recentVolumeVsPrior == null) failures.push('volume sequence unknown');
+  else if (!chart.volumeDryUp) failures.push('volume did not dry up before base/reclaim');
   if (audit?.mintAuthorityDisabled !== true) failures.push('mint authority not verified disabled');
   if (audit?.freezeAuthorityDisabled !== true) failures.push('freeze authority not verified disabled');
   if (finite(audit?.topHoldersPercentage) == null || Number(audit.topHoldersPercentage) > 45) failures.push('top-holder concentration unsafe');
@@ -62,13 +63,16 @@ export function assessSecondWave(candidate) {
   if (dexBuys == null || dexSells == null) failures.push('DEX buy/sell activity unknown');
   else if (dexBuys <= 0) failures.push('no meaningful DEX buys');
   if (candidate?.dataQuality?.jupiterAsset?.available === false) failures.push('market safety data unavailable');
+  const flowVerified = finite(candidate?.metrics?.trendingSmartDegenCount) >= 2
+    || finite(candidate?.savedWalletExposure?.holderCount) >= 2;
+  if (!flowVerified) failures.push('smart-money flow not verified');
 
   const dimensions = {
     priorRun: chart.priorHigh > 0 && chart.current > 0 && chart.priorHigh / chart.current >= 2 ? 2 : 0,
     drawdown: chart.drawdownPercent >= 50 && chart.drawdownPercent <= 85 ? 2 : 0,
     structure: chart.baseHealthy || chart.reclaim ? 2 : chart.structureVerified ? 1 : 0,
     volume: chart.volumeDryUp && (chart.reclaim || chart.baseHealthy) ? 2 : chart.volumeDryUp ? 1 : 0,
-    flow: finite(candidate?.metrics?.trendingSmartDegenCount) >= 2 || finite(candidate?.savedWalletExposure?.holderCount) >= 2 ? 2 : 0,
+    flow: flowVerified ? 2 : 0,
     safety: buyTax != null && sellTax != null && buyTax <= 5 && sellTax <= 5 && honeypot === false
       && audit?.mintAuthorityDisabled === true && audit?.freezeAuthorityDisabled === true
       && finite(audit?.topHoldersPercentage) != null && Number(audit.topHoldersPercentage) <= 45 ? 2 : 0,
