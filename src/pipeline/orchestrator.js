@@ -22,7 +22,7 @@ import { short } from '../format.js';
 import { escapeHtml } from '../format.js';
 import { fetchDryRunEntryQuote } from '../enrichment/jupiter.js';
 import { evaluateMarketAllocator, allocationAllowsCandidate } from '../execution/marketAllocator.js';
-import { attachSecondWaveAssessment } from './secondWaveScreening.js';
+import { assessSecondWave, attachSecondWaveAssessment } from './secondWaveScreening.js';
 
 // Track A: High-conviction routes that bypass PreScorer/ML/LLM for sub-second execution
 // User requested full pipeline (ML + LLM) for all routes, so this is empty.
@@ -123,12 +123,16 @@ async function _processCandidateFromSignals(signals) {
   }
 
   let candidate = await buildCandidate(signals);
-  if (signals.strategyFamily === 'second_wave_v2' || signals.secondWave === true) {
-    candidate = attachSecondWaveAssessment(candidate);
-    if (!candidate.secondWave.eligible) {
-      console.log(`[second-wave] rejected ${candidate.token.mint.slice(0, 8)}...: ${candidate.secondWave.hardFailures.join('; ')}`);
+  const allocationAtBuild = evaluateMarketAllocator();
+  const requestedSecondWave = signals.strategyFamily === 'second_wave_v2' || signals.secondWave === true;
+  const defensiveSecondWave = allocationAtBuild.secondWaveEnabled && !requestedSecondWave;
+  if (requestedSecondWave || defensiveSecondWave) {
+    const assessment = assessSecondWave(candidate);
+    if (!assessment.eligible && (requestedSecondWave || allocationAtBuild.mode === 'red')) {
+      console.log(`[second-wave] rejected ${candidate.token.mint.slice(0, 8)}...: ${assessment.hardFailures.join('; ')}`);
       return;
     }
+    if (assessment.eligible) candidate = attachSecondWaveAssessment(candidate);
   }
   const signature = signals.signature || null;
   const candidateId = upsertCandidate(candidate, signature);
