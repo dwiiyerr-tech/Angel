@@ -5,6 +5,7 @@ const EDGE1_FAMILY = 'edge1';
 const ROLLING_TRADES = 20;
 const SWITCH_CONFIRMATIONS = 3;
 const MIN_MODE_HOLD_MS = 30 * 60 * 1000;
+const RED_RECOVERY_SIZE_MULTIPLIER = 0.25;
 
 function recentEdgeTrades() {
   return db.prepare(`
@@ -59,14 +60,17 @@ export function evaluateMarketAllocator({ force = false } = {}) {
     setSetting('market_allocator_mode', next);
     setSetting('market_allocator_changed_at_ms', Date.now());
   }
-  setSetting('market_allocator_size_multiplier', next === 'yellow' ? 0.5 : next === 'red' ? 0 : 1);
+  setSetting('market_allocator_size_multiplier', next === 'yellow' ? 0.5 : next === 'red' ? RED_RECOVERY_SIZE_MULTIPLIER : 1);
   setSetting('market_allocator_pending_mode', next === current ? desired : '');
   setSetting('market_allocator_pending_count', nextPending);
   return {
     mode: next,
     desired,
-    edgeFamily: next === 'red' ? null : EDGE1_FAMILY,
-    edge1SizeMultiplier: next === 'yellow' ? 0.5 : next === 'red' ? 0 : 1,
+    // Edge-1 is the only active family. In red, pause-sized entries would
+    // deadlock recovery because no new closed trades could improve the metric.
+    // Keep screening alive with a quarter-size recovery mode instead.
+    edgeFamily: EDGE1_FAMILY,
+    edge1SizeMultiplier: next === 'yellow' ? 0.5 : next === 'red' ? RED_RECOVERY_SIZE_MULTIPLIER : 1,
     observations: { trades: rows.length, wins, losses, pnlSol: pnl, avgPnlPercent: avgPnl, expectancyPercent: expectancy, lossStreak: streak },
     transition: { pending, pendingCount: nextPending, confirmationsRequired: SWITCH_CONFIRMATIONS, minModeHoldMs: MIN_MODE_HOLD_MS },
   };
