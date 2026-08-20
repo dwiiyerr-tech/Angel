@@ -10,7 +10,8 @@ const candidate = {
   metrics: { marketCapUsd: 500_000, liquidityUsd: 40_000, trendingSmartDegenCount: 3 },
   jupiterAsset: {
     firstPool: { createdAt: new Date(Date.now() - 48 * 60 * 60 * 1000).toISOString() },
-    audit: { mintAuthorityDisabled: true, freezeAuthorityDisabled: true, topHoldersPercentage: 20 },
+    audit: { mintAuthorityDisabled: true, freezeAuthorityDisabled: true, topHoldersPercentage: 20, buyTax: 0, sellTax: 0, honeypot: false },
+    stats5m: { numBuys: 20, numSells: 10 },
   },
   chart: {
     currentNative: 50,

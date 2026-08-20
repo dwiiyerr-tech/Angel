@@ -851,6 +851,8 @@ export async function buildCandidate({ mint, fee = null, signature = null, gradu
       trendingSwaps: Number(trendingToken?.swaps ?? trenchesEntry?.swaps ?? 0),
       trendingHotLevel: Number(trendingToken?.hot_level ?? trenchesEntry?.hot_level ?? 0),
       trendingSmartDegenCount: Number(trendingToken?.smart_degen_count ?? trenchesEntry?.smart_degen_count ?? 0),
+      dexBuys5m: nullableNumber(jupiterAsset?.stats5m?.numBuys ?? jupiterAsset?.stats5m?.buys),
+      dexSells5m: nullableNumber(jupiterAsset?.stats5m?.numSells ?? jupiterAsset?.stats5m?.sells),
       pregradRssrSol: Number(pregradToken?.real_sol_reserves_sol ?? 0),
       pregradRssrPctToGrad: Number(pregradToken?.rssr_pct_to_grad ?? 0),
       pregradReplyCount: Number(pregradToken?.reply_count ?? 0),
