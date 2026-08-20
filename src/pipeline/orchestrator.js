@@ -1,5 +1,5 @@
 import { now, pruneSeen } from '../utils.js';
-import { numSetting, boolSetting } from '../db/settings.js';
+import { numSetting, boolSetting, setting } from '../db/settings.js';
 import { db } from '../db/connection.js';
 import { upsertCandidate, updateCandidateStatus, updateCandidateSnapshot, recentEligibleCandidates, candidateById } from '../db/candidates.js';
 import { storeDecision, storeBatchDecision, logDecisionEvent, checkDecisionCache } from '../db/decisions.js';
@@ -56,6 +56,13 @@ async function _processCandidateFromSignals(signals) {
 
   // Load strategy early — needed for duplicate checks below
   const strat = activeStrategy();
+  const blockedRoutes = (() => {
+    try { return JSON.parse(setting('blocked_routes', '[]')); } catch { return []; }
+  })();
+  if (blockedRoutes.some(route => String(signals.route || '').includes(route))) {
+    console.log(`[agent] blocked route ${signals.route} for ${signals.mint.slice(0, 8)}...`);
+    return;
+  }
 
   // DUPLICATE CHECKS — all run BEFORE enrichment to save API calls
   try {

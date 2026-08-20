@@ -340,7 +340,10 @@ export function initDb() {
     trading_mode: process.env.TRADING_MODE || 'dry_run',
     llm_candidate_pick_count: process.env.LLM_CANDIDATE_PICK_COUNT || '10',
     llm_candidate_max_age_ms: process.env.LLM_CANDIDATE_MAX_AGE_MS || String(2 * 60 * 1000),
-    llm_min_confidence: '20',
+    // Historical calibration: confidence 75 was only ~26% win-rate; require
+    // the stronger evidence band and keep historically losing trend routes out.
+    llm_min_confidence: process.env.LLM_MIN_CONFIDENCE || '78',
+    blocked_routes: process.env.BLOCKED_ROUTES || '["trending","graduated_trending"]',
     sideways_timeout_minutes: '10',
     max_open_positions: process.env.MAX_OPEN_POSITIONS || '3',
     dry_run_buy_sol: '0.1',
