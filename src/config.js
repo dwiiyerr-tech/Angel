@@ -58,7 +58,9 @@ export const TRENDING_POLL_MS = Number(process.env.TRENDING_POLL_MS || 60_000);
 export const TRENDING_LOOKBACK_MS = Number(process.env.TRENDING_LOOKBACK_MS || 10 * 60 * 1000);
 export const SMART_MONEY_LOOKBACK_MS = Number(process.env.SMART_MONEY_LOOKBACK_MS || 30 * 60 * 1000);
 export const GMGN_CACHE_TTL_MS = Number(process.env.GMGN_CACHE_TTL_MS || 5 * 60 * 1000);
-export const POSITION_CHECK_MS = Number(process.env.POSITION_CHECK_MS || 10_000);
+// Position monitoring must not run faster than 2s; faster polling amplifies
+// provider 429s and can starve entry/exit quote requests.
+export const POSITION_CHECK_MS = Math.max(2_000, Number(process.env.POSITION_CHECK_MS || 10_000));
 // Expected transaction overhead used only for dry-run accounting. Live mode
 // records the fee reported by the confirmed Solana transaction instead.
 export const DRY_RUN_NETWORK_FEE_SOL = Number(process.env.DRY_RUN_NETWORK_FEE_SOL || 0.000005);

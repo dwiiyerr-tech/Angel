@@ -1,7 +1,7 @@
 import axios from 'axios';
 import { WSOL_MINT, JSON_HEADERS, JUPITER_SLIPPAGE_BPS } from '../config.js';
 import { now } from '../utils.js';
-import { rateLimiter } from './rateLimiter.js';
+import { rateLimiter, REQUEST_PRIORITY } from './rateLimiter.js';
 
 class SimpleLRUCache {
   constructor(maxSize = 500) {
@@ -130,7 +130,7 @@ async function fetchJupiterAsset(mint, { useCache = true, ttlMs = 20_000 } = {})
     const res = await rateLimiter.schedule(() => axios.get(url.toString(), {
       timeout: 10_000,
       headers: JSON_HEADERS,
-    }), 'jup_api');
+    }), 'jupiter', REQUEST_PRIORITY.ENRICHMENT);
     const rows = Array.isArray(res.data) ? res.data : [];
     const data = rows.find(row => row?.id === mint) || rows[0] || null;
     jupiterAssetCache.set(mint, { at: now(), data });
@@ -149,7 +149,7 @@ async function fetchSolUsdPrice() {
     const res = await rateLimiter.schedule(() => axios.get(`https://lite-api.jup.ag/price/v3?ids=${WSOL_MINT}`, {
       timeout: 5000,
       headers: JSON_HEADERS,
-    }), 'jup_price');
+    }), 'jupiter', REQUEST_PRIORITY.ENRICHMENT);
     const price = Number(res.data?.[WSOL_MINT]?.usdPrice);
     return Number.isFinite(price) && price > 0 ? price : null;
   } catch (err) {
@@ -170,7 +170,7 @@ async function fetchJupiterHolders(mint) {
     const res = await rateLimiter.schedule(() => axios.get(`https://datapi.jup.ag/v1/holders/${mint}`, {
       timeout: 10_000,
       headers: JSON_HEADERS,
-    }), 'jup_data');
+    }), 'jupiter', REQUEST_PRIORITY.ENRICHMENT);
     const holders = Array.isArray(res.data?.holders) ? res.data.holders : [];
     const supply = Number(res.data?.totalSupply ?? res.data?.supply ?? 0);
     const mapped = holders.map((holder, index) => {
@@ -263,7 +263,7 @@ async function fetchJupiterChartWindow(mint, interval, candles, label) {
   const res = await rateLimiter.schedule(() => axios.get(url.toString(), {
     timeout: 10_000,
     headers: JSON_HEADERS,
-  }), 'jup_data');
+  }), 'jupiter', REQUEST_PRIORITY.ENRICHMENT);
   return summarizeCandles(label, Array.isArray(res.data?.candles) ? res.data.candles : []);
 }
 
@@ -322,7 +322,7 @@ async function fetchTokenSpotViaQuote(mint) {
     url.searchParams.set('slippageBps', '100');
     const [solUsd, quoteRes] = await Promise.all([
       fetchSolUsdPriceCached(),
-      axios.get(url.toString(), { timeout: 10_000, headers: JSON_HEADERS }),
+      rateLimiter.schedule(() => axios.get(url.toString(), { timeout: 10_000, headers: JSON_HEADERS }), 'jupiter', REQUEST_PRIORITY.MONITOR),
     ]);
     const outAmount = quoteRes.data?.outAmount;
     if (!outAmount) return null;
@@ -348,7 +348,7 @@ async function fetchDryRunEntryQuote(mint, sizeSol, decimals, referencePriceUsd,
     url.searchParams.set('slippageBps', String(JUPITER_SLIPPAGE_BPS));
     const [solUsd, quoteRes] = await Promise.all([
       fetchSolUsdPriceCached(),
-      axios.get(url.toString(), { timeout: 10_000, headers: JSON_HEADERS }),
+      rateLimiter.schedule(() => axios.get(url.toString(), { timeout: 10_000, headers: JSON_HEADERS }), 'jupiter', REQUEST_PRIORITY.ENTRY_EXIT),
     ]);
     const outputAmountRaw = String(quoteRes.data?.outAmount || '');
     if (!/^\d+$/.test(outputAmountRaw) || BigInt(outputAmountRaw) <= 0n) return null;
@@ -376,7 +376,7 @@ async function fetchTokenExitQuote(mint, rawAmount) {
     url.searchParams.set('outputMint', WSOL_MINT);
     url.searchParams.set('amount', String(rawAmount));
     url.searchParams.set('slippageBps', String(JUPITER_SLIPPAGE_BPS));
-    const quoteRes = await axios.get(url.toString(), { timeout: 10_000, headers: JSON_HEADERS });
+    const quoteRes = await rateLimiter.schedule(() => axios.get(url.toString(), { timeout: 10_000, headers: JSON_HEADERS }), 'jupiter', REQUEST_PRIORITY.ENTRY_EXIT);
     const outLamports = Number(quoteRes.data?.outAmount);
     return Number.isFinite(outLamports) && outLamports >= 0
       ? { outLamports, outSol: outLamports / 1_000_000_000 }

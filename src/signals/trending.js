@@ -5,7 +5,7 @@ import { numSetting, boolSetting, setting } from '../db/settings.js';
 import { db } from '../db/connection.js';
 import { gmgnBackoffActive, setGmgnBackoff, gmgnFetch, normalizedTrendingRows } from '../enrichment/gmgn.js';
 import { normalizeJupiterTrendingRow } from '../enrichment/jupiter.js';
-import { rateLimiter } from '../enrichment/rateLimiter.js';
+import { rateLimiter, REQUEST_PRIORITY } from '../enrichment/rateLimiter.js';
 import { observeVolumeAcceleration } from '../pipeline/volumeAcceleration.js';
 
 export const trending = new Map();
@@ -79,7 +79,7 @@ export async function fetchJupiterTrendingRows(interval, limit) {
   const res = await rateLimiter.schedule(() => axios.get(url.toString(), {
     timeout: 10_000,
     headers: { ...JSON_HEADERS, 'x-api-key': JUPITER_API_KEY },
-  }), 'jup_data');
+  }), 'jupiter', REQUEST_PRIORITY.ENRICHMENT);
   const rows = Array.isArray(res.data) ? res.data : [];
   return rows.map((row, index) => normalizeJupiterTrendingRow(row, window, index + 1));
 }

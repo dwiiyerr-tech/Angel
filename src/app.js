@@ -18,8 +18,22 @@ import { startLLMCalibrator } from './pipeline/llmCalibrator.js';
 import axios from 'axios';
 import { ensureSafeStartupMode } from './db/liveConfig.js';
 import { pauseLiveEntries } from './health/circuitBreaker.js';
+import { recordHttpBlock } from './enrichment/httpEvents.js';
 
 setDefaultResultOrder('ipv4first');
+axios.interceptors.response.use(
+  response => response,
+  error => {
+    recordHttpBlock({
+      provider: 'axios',
+      method: error?.config?.method?.toUpperCase() || 'GET',
+      url: error?.config?.url,
+      status: error?.response?.status,
+      source: 'axios-interceptor',
+    });
+    return Promise.reject(error);
+  },
+);
 validateConfig();
 
 function nonOverlapping(name, fn) {

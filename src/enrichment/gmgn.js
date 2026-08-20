@@ -2,6 +2,7 @@ import { randomUUID } from 'node:crypto';
 import { GMGN_API_KEY, GMGN_CACHE_TTL_MS, GMGN_ENABLED, JSON_HEADERS } from '../config.js';
 import { now, sleep } from '../utils.js';
 import { numSetting, setting } from '../db/settings.js';
+import { recordHttpBlock } from './httpEvents.js';
 
 const gmgnCache = new Map();
 let lastGmgnRequestAt = 0;
@@ -90,6 +91,7 @@ async function gmgnFetch(pathname, { method = 'GET', params = {}, body = null } 
       }
       if (res.ok) return payload;
       const message = gmgnErrorText(res.status, payload, `GMGN ${pathname} ${res.status}`);
+      recordHttpBlock({ provider: 'gmgn', method, url: url.toString(), status: res.status, source: 'gmgn-fetch' });
       const rateLimited = res.status === 429 || /rate limit|temporarily banned/i.test(String(message));
       if (rateLimited && attempt < maxRetries) {
         const retryAfter = Number(res.headers.get('retry-after'));

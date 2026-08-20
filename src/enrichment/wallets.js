@@ -1,5 +1,6 @@
 import { db } from '../db/connection.js';
 import { now } from '../utils.js';
+import { recordHttpBlock } from './httpEvents.js';
 
 export function savedWallets() {
   return db.prepare('SELECT * FROM saved_wallets ORDER BY label').all();
@@ -23,6 +24,7 @@ export async function fetchWalletPnl(address) {
   try {
     const url = `https://datapi.jup.ag/v1/pnl?addresses=${encodeURIComponent(address)}&includeClosed=false`;
     const res = await fetch(url, { headers: { 'Accept': 'application/json' }, signal: AbortSignal.timeout(10000) });
+    recordHttpBlock({ provider: 'jupiter', method: 'GET', url, status: res.status, source: 'wallet-pnl-fetch' });
     if (!res.ok) return null;
     const data = await res.json();
     const d = data?.[address] ?? data?.data?.[address] ?? data;
