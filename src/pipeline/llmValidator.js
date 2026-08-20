@@ -13,11 +13,6 @@ const LLMResponseSchema = z.object({
   risks: z.array(z.string()).max(10).optional(),
   suggested_tp_percent: z.number().min(0).max(1000).optional(),
   suggested_sl_percent: z.number().min(-100).max(0).optional(),
-  score: z.number().min(0).max(12).optional(),
-  invalidation: z.string().max(500).optional(),
-  entry: z.string().max(500).optional(),
-  tp1: z.string().max(500).optional(),
-  tp2: z.string().max(500).optional(),
 });
 
 export function validateLLMResponse(raw) {

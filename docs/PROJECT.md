@@ -12,7 +12,7 @@ The `angel` system is a modular Solana meme coin trading bot and analytics engin
 6. **Human-Approved Prompt Learning**: (`src/learning/lessons.js`, `summary.js`, `evaluation.js`) - Evidence-gated lesson generation, manual approval, prompt injection, and exposure evaluation without automatic mutations.
 7. **Telegram UI & Card Renderer**: (`src/telegram/`, `scripts/test_exit_card.mjs`) - Operator alerts, status reporting, and PNG exit card generation.
 8. **Analytics & Backtesting**: (`scripts/`, `verify_backtest.py`, `comprehensive_edge_backtest.py`, `dashboard.py`) - Split-half backtesting, metric reporting, and trade reconstruction.
-9. **Market Allocator & Risk Controls**: (`src/execution/marketAllocator.js`, `riskControls.js`) - GREEN/YELLOW/RED edge allocation with hysteresis, R-based sizing, profit protection, and loss-streak throttling. `second_wave_v2` is fail-closed until verified historical data is attached to a candidate.
+9. **Market Allocator & Risk Controls**: (`src/execution/marketAllocator.js`, `riskControls.js`) - GREEN/YELLOW/RED Edge-1 allocation with hysteresis, R-based sizing, profit protection, and loss-streak throttling.
 
 ---
 

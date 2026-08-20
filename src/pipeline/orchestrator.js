@@ -22,7 +22,6 @@ import { short } from '../format.js';
 import { escapeHtml } from '../format.js';
 import { fetchDryRunEntryQuote } from '../enrichment/jupiter.js';
 import { evaluateMarketAllocator, allocationAllowsCandidate } from '../execution/marketAllocator.js';
-import { assessSecondWave, attachSecondWaveAssessment } from './secondWaveScreening.js';
 
 // Track A: High-conviction routes that bypass PreScorer/ML/LLM for sub-second execution
 // User requested full pipeline (ML + LLM) for all routes, so this is empty.
@@ -123,17 +122,6 @@ async function _processCandidateFromSignals(signals) {
   }
 
   let candidate = await buildCandidate(signals);
-  const allocationAtBuild = evaluateMarketAllocator();
-  const requestedSecondWave = signals.strategyFamily === 'second_wave_v2' || signals.secondWave === true;
-  const defensiveSecondWave = allocationAtBuild.secondWaveEnabled && !requestedSecondWave;
-  if (requestedSecondWave || defensiveSecondWave) {
-    const assessment = assessSecondWave(candidate);
-    if (!assessment.eligible && (requestedSecondWave || allocationAtBuild.mode === 'red')) {
-      console.log(`[second-wave] rejected ${candidate.token.mint.slice(0, 8)}...: ${assessment.hardFailures.join('; ')}`);
-      return;
-    }
-    if (assessment.eligible) candidate = attachSecondWaveAssessment(candidate);
-  }
   const signature = signals.signature || null;
   const candidateId = upsertCandidate(candidate, signature);
 
@@ -356,38 +344,7 @@ export async function handleApprovedBuy(selectedRow, decision, batchId, rows = [
     console.error('[handleApprovedBuy] refresh failed, rejecting execution:', err.message);
     return { ...selectedRow, refreshError: err.message, candidate: { ...selectedRow.candidate, filters: { passed: false, failures: ['refresh failed: ' + err.message] } } };
   });
-  let freshSelectedRow = await refreshPromise;
-  const refreshedFamily = freshSelectedRow.candidate?.signals?.strategyFamily
-    || freshSelectedRow.candidate?.strategyFamily || 'edge1';
-  if (refreshedFamily === 'second_wave_v2') {
-    const refreshedAssessment = assessSecondWave(freshSelectedRow.candidate);
-    freshSelectedRow = {
-      ...freshSelectedRow,
-      candidate: {
-        ...freshSelectedRow.candidate,
-        secondWave: refreshedAssessment,
-        signals: { ...freshSelectedRow.candidate.signals, strategyFamily: 'second_wave_v2' },
-      },
-    };
-    if (!refreshedAssessment.eligible) {
-      const failures = refreshedAssessment.hardFailures.length
-        ? refreshedAssessment.hardFailures
-        : ['second-wave revalidation failed'];
-      updateCandidateSnapshot(freshSelectedRow.id, freshSelectedRow.candidate, 'filtered');
-      console.warn(`[second-wave-revalidation] ${mint} entry cancelled: ${failures.join('; ')}`);
-      logDecisionEvent({
-        batchId,
-        triggerCandidateId,
-        selectedRow: freshSelectedRow,
-        rows,
-        decision,
-        action: 'second_wave_revalidation_failed',
-        guardrails: { failures, refreshedAtMs: Date.now() },
-        execution: { rejectedBeforeEntry: true },
-      });
-      return;
-    }
-  }
+  const freshSelectedRow = await refreshPromise;
   const executionRows = rows.map(row => row.id === freshSelectedRow.id ? freshSelectedRow : row);
   if (!freshSelectedRow.candidate.filters?.passed) {
     const failures = freshSelectedRow.candidate.filters?.failures || ['fresh execution guard failed'];
