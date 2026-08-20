@@ -1,4 +1,4 @@
-import { now, json } from '../utils.js';
+import { now, json, safeJson } from '../utils.js';
 import { numSetting, boolSetting, setting, strategyById, slippageAdjustedMcap } from '../db/settings.js';
 import { db } from '../db/connection.js';
 import { firstPositiveNumber, marketCapFromGmgn, tokenPriceFromGmgn, computeAtrPercent, dynamicStopLossPercent } from '../utils.js';
@@ -338,6 +338,9 @@ export async function refreshPosition(position, { autoExit = true, jupiterPnl = 
 
   // Max hold time check — tiered by entry mcap
   const strat = strategyById(position.strategy_id);
+  const positionSnapshot = safeJson(position.snapshot_json, {});
+  const strategyFamily = positionSnapshot?.strategyFamily || positionSnapshot?.candidate?.signals?.strategyFamily || 'edge1';
+  const isSecondWave = strategyFamily === 'second_wave_v2';
   const entryMcap = Number(position.entry_mcap) || 0;
   const isMicrocap = entryMcap > 0 && entryMcap < 15000;
   const isHighcap = entryMcap >= 60000;
@@ -345,31 +348,39 @@ export async function refreshPosition(position, { autoExit = true, jupiterPnl = 
   // === P5: Time-Based Exit Tightening ===
   // Pump.fun tokens peak within 3-8 min. Progressively tighten after 10 min.
   const ageMinutes = (now() - position.opened_at_ms) / 60000;
-  const timeTightenEnabled = numSetting('time_tighten_enabled', 1);
-  if (!exitReason && timeTightenEnabled && ageMinutes > 10) {
+  const timeTightenEnabled = isSecondWave
+    ? boolSetting('second_wave_time_tighten_enabled', true)
+    : numSetting('time_tighten_enabled', 1);
+  const tightenStartMinutes = isSecondWave ? 30 : 10;
+  if (!exitReason && timeTightenEnabled && ageMinutes > tightenStartMinutes) {
     let timeTightenSl;
-    if (ageMinutes > 20) {
-      // After 20 min: close if less than +5%
+    if (ageMinutes > (isSecondWave ? 90 : 20)) {
+      // Edge 1 tightens after 20m; Second-Wave gets a longer base/reclaim window.
       if (pnlPercent < 5) {
-        exitReason = 'TIME_TIGHTEN_20M';
+        exitReason = isSecondWave ? 'TIME_TIGHTEN_90M_SECOND_WAVE' : 'TIME_TIGHTEN_20M';
       }
-    } else if (ageMinutes > 15) {
+    } else if (ageMinutes > (isSecondWave ? 60 : 15)) {
       // After 15 min: tighten SL to -3%
       timeTightenSl = -3;
-      if (pnlPercent <= timeTightenSl) exitReason = 'TIME_TIGHTEN_15M';
+      if (pnlPercent <= timeTightenSl) exitReason = isSecondWave ? 'TIME_TIGHTEN_60M_SECOND_WAVE' : 'TIME_TIGHTEN_15M';
     } else {
       // After 10 min: tighten SL to -6% or break-even if profitable
       timeTightenSl = peakPnl > 0 ? 0 : -6;
-      if (pnlPercent <= timeTightenSl) exitReason = 'TIME_TIGHTEN_10M';
+      if (pnlPercent <= timeTightenSl) exitReason = isSecondWave ? 'TIME_TIGHTEN_30M_SECOND_WAVE' : 'TIME_TIGHTEN_10M';
     }
   }
-  if (!exitReason && effectiveMaxHold > 0 && (now() - position.opened_at_ms) >= effectiveMaxHold) {
+  const configuredMaxHold = isSecondWave
+    ? numSetting('second_wave_max_hold_ms', 90 * 60 * 1000)
+    : effectiveMaxHold;
+  if (!exitReason && configuredMaxHold > 0 && (now() - position.opened_at_ms) >= configuredMaxHold) {
     exitReason = 'MAX_HOLD';
   }
 
   // Sideways timeout: if open too long with negligible PnL, exit to free up capital.
   if (!exitReason) {
-    const sidewaysMinutes = Number(strat?.sideways_timeout_minutes ?? numSetting('sideways_timeout_minutes', 0));
+    const sidewaysMinutes = isSecondWave
+      ? numSetting('second_wave_sideways_timeout_minutes', 30)
+      : Number(strat?.sideways_timeout_minutes ?? numSetting('sideways_timeout_minutes', 0));
     if (sidewaysMinutes > 0) {
       const ageSeconds = (now() - position.opened_at_ms) / 1000;
       if (ageSeconds > sidewaysMinutes * 60 && Math.abs(pnlPercent) < 2) {
