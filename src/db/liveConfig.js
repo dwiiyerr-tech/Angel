@@ -15,6 +15,7 @@ export const LIVE_SETTING_KEYS = new Set([
   'tp1_r_multiple',
   'risk_per_trade_sol',
   'second_wave_max_hold_ms', 'second_wave_sideways_timeout_minutes', 'second_wave_time_tighten_enabled',
+  'min_second_wave_score',
   'dual_llm_consensus', 'enable_regime_awareness', 'exit_quote_enabled',
   'filter_max_bot_holders_pct', 'flow_hard_net_buyer_ratio', 'flow_hard_price_change_pct',
   'llm_candidate_max_age_ms', 'llm_candidate_pick_count', 'llm_low_confidence_cap',

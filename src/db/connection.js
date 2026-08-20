@@ -368,6 +368,7 @@ export function initDb() {
     second_wave_max_hold_ms: process.env.SECOND_WAVE_MAX_HOLD_MS || String(90 * 60 * 1000),
     second_wave_sideways_timeout_minutes: process.env.SECOND_WAVE_SIDEWAYS_TIMEOUT_MINUTES || '30',
     second_wave_time_tighten_enabled: process.env.SECOND_WAVE_TIME_TIGHTEN_ENABLED || 'true',
+    min_second_wave_score: process.env.MIN_SECOND_WAVE_SCORE || '8',
     min_fee_claim_sol: process.env.MIN_FEE_CLAIM_SOL || '2',
     min_mcap_usd: process.env.MIN_MCAP_USD || '0',
     min_holders: process.env.MIN_HOLDERS || '168',

@@ -6,6 +6,7 @@ import { db } from '../db/connection.js';
 import { storeSignalEvent } from '../signals/trending.js';
 import { validateLLMResponse } from './llmValidator.js';
 import { buildTradeMemory } from './tradeMemory.js';
+import { secondWaveSystemPrompt } from './secondWavePrompt.js';
 
 // Read from DB setting (configurable per-strategy), fallback to 70 for backward compat
 import { activeStrategy } from '../db/settings.js';
@@ -250,6 +251,7 @@ export async function decideCandidateBatch(rows, triggerCandidateId) {
   console.log(`[llm] model=${llmConfig.model} route=${route || 'none'}`);
 
   const tradeMemory = buildTradeMemory();
+  const secondWaveMode = rows.some(row => row.candidate?.signals?.strategyFamily === 'second_wave_v2');
 
   const system = [
     'You are Angel, a Solana meme coin entry screener operating in dry-run mode.',
@@ -315,6 +317,7 @@ export async function decideCandidateBatch(rows, triggerCandidateId) {
     '2. Fake Hype (Wash trading volume + KOL posts + Community taking over narrative)',
     '3. Distribution (Insiders slowly sell through multiple generated wallets)',
     'If you detect this exact flow, REJECT immediately with verdict PASS.',
+    secondWaveMode ? secondWaveSystemPrompt(numSetting('min_second_wave_score', 8)) : '',
   ].join('\n');
   const user = {
     task: 'Pick the best dry-run buy candidate from this recent batch, or choose none.',
