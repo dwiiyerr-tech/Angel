@@ -351,6 +351,7 @@ export function initDb() {
     min_opportunity_size_multiplier: process.env.MIN_OPPORTUNITY_SIZE_MULTIPLIER || '0.35',
     default_tp_percent: '50',
     default_sl_percent: '-25',
+    max_entry_sl_percent: process.env.MAX_ENTRY_SL_PERCENT || '20',
     min_risk_reward_ratio: process.env.MIN_RISK_REWARD_RATIO || '1.5',
     loss_streak_size_cut_after: process.env.LOSS_STREAK_SIZE_CUT_AFTER || '2',
     loss_streak_size_multiplier: process.env.LOSS_STREAK_SIZE_MULTIPLIER || '0.5',

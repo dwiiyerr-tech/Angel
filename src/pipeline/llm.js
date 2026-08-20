@@ -64,7 +64,9 @@ export function normalizeDecision(parsed, fallbackReason = '', route = '') {
   }
   // trenches_completed penalty removed — historically profitable route (Lesson #1)
   const rawTp = parsePercent(parsed?.suggested_tp_percent);
-  const rawSl = parsePercent(parsed?.suggested_sl_percent);
+  const requestedSl = parsePercent(parsed?.suggested_sl_percent);
+  const maxEntrySl = Math.max(1, numSetting('max_entry_sl_percent', 20));
+  const rawSl = Number.isFinite(requestedSl) ? Math.max(-maxEntrySl, requestedSl) : requestedSl;
 
   return {
     verdict,
