@@ -334,6 +334,11 @@ export async function decideCandidateBatch(rows, triggerCandidateId) {
       suggested_tp_percent: 'positive number',
       suggested_sl_percent: 'negative number',
       risk_reward_ratio: 'suggested_tp_percent / abs(suggested_sl_percent), must meet the configured minimum',
+      score: secondWaveMode ? 'Second-Wave score 0-12' : 'optional',
+      invalidation: secondWaveMode ? 'observable base/support failure' : 'optional',
+      entry: secondWaveMode ? 'base dip or reclaim zone' : 'optional',
+      tp1: secondWaveMode ? 'first resistance / partial profit level' : 'optional',
+      tp2: secondWaveMode ? 'prior runner high or extension' : 'optional',
     },
     trigger_candidate_id: triggerCandidateId,
     candidates: [],  // placeholder, filled below

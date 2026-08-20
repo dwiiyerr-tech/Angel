@@ -84,7 +84,7 @@ export function assessSecondWave(candidate) {
     score,
     minScore: MIN_SCORE,
     hardFailures: failures,
-    safetyVerified: failures.every(failure => !failure.includes('authority') && !failure.includes('holder') && !failure.includes('safety')),
+    safetyVerified: failures.every(failure => !/authority|holder|safety|tax|honeypot|DEX|market safety/i.test(failure)),
     dataQuality: failures.length === 0 ? 'verified' : 'insufficient',
     dimensions,
     metrics: { mcap, liquidity, ageMs: age, ...chart },
