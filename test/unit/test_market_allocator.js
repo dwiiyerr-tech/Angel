@@ -7,7 +7,7 @@ assert.equal(allocationAllowsCandidate({ signals: { route: 'trending' } }, {
 assert.equal(allocationAllowsCandidate({ signals: { strategyFamily: 'edge1' } }, {
   mode: 'yellow', edgeFamily: 'edge1',
 }), true);
-assert.equal(allocationAllowsCandidate({ signals: { strategyFamily: 'second_wave_v2' } }, {
+assert.equal(allocationAllowsCandidate({ signals: { strategyFamily: 'legacy' } }, {
   mode: 'green', edgeFamily: 'edge1',
 }), false);
 
