@@ -3,10 +3,14 @@ import { numSetting } from '../db/settings.js';
 
 function modeClause(executionMode) {
   if (!executionMode) return '';
-  // `confirm` still executes real-money swaps after human approval, so all
-  // money modes must share the live loss history instead of paper-trade PnL.
+  // `confirm` still executes real-money swaps after human approval, so it
+  // shares live history. `shadow_live` is intentionally isolated so its
+  // simulated losses exercise the same pause/sizing policy without polluting
+  // either ordinary dry-run learning or real-money live risk history.
   const normalizedMode = executionMode === 'confirm' ? 'live' : executionMode;
-  return `AND COALESCE(execution_mode, 'dry_run') = '${normalizedMode === 'live' ? 'live' : 'dry_run'}'`;
+  if (normalizedMode === 'live') return "AND COALESCE(execution_mode, 'dry_run') = 'live'";
+  if (normalizedMode === 'shadow_live') return "AND COALESCE(execution_mode, 'dry_run') = 'shadow_live'";
+  return "AND COALESCE(execution_mode, 'dry_run') = 'dry_run'";
 }
 
 export function recentLossStreak(executionMode = null) {
@@ -36,9 +40,6 @@ export function riskControlState(executionMode = null, atMs = Date.now()) {
   const paused = Boolean(pausedUntilMs && atMs < pausedUntilMs);
   return {
     streak,
-    // A paused money mode must calculate to a zero-sized entry. This keeps
-    // confirmation intents fail-closed even if the loss streak changes after
-    // the intent was created but before the user confirms it.
     sizeMultiplier: paused
       ? 0
       : streak >= cutAfter

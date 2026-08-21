@@ -36,6 +36,27 @@ import { runLLMCalibration } from '../pipeline/llmCalibrator.js';
 import { setting } from '../db/settings.js';
 import { approveLiveConfigSnapshot, approvedLiveConfig, createLiveConfigSnapshot, liveConfigChecksum } from '../db/liveConfig.js';
 
+const SIMULATION_SETTING_VALUES = new Set(['dry_run', 'simulation', 'shadow_live']);
+
+function isSimulationSetting() {
+  return SIMULATION_SETTING_VALUES.has(setting('trading_mode', 'dry_run'));
+}
+
+function publicTradingMode() {
+  const raw = setting('trading_mode', 'dry_run');
+  if (SIMULATION_SETTING_VALUES.has(raw)) return 'SIMULATION';
+  if (raw === 'confirm') return 'CONFIRM';
+  if (raw === 'live') return 'LIVE';
+  return 'SIMULATION';
+}
+
+function publicTradingModeIcon() {
+  const mode = publicTradingMode();
+  if (mode === 'LIVE') return '🔴';
+  if (mode === 'CONFIRM') return '🟠';
+  return '🟢';
+}
+
 export async function handleMessage(msg) {
   const text = (msg.text || '').trim();
   const chatId = msg.chat.id;
@@ -99,14 +120,33 @@ export async function handleMessage(msg) {
   }
   if (text.startsWith('/status')) {
     const backup = getBackupStatus();
-    const mode = setting('trading_mode') || 'dry_run';
+    const mode = publicTradingMode();
+    const modeIcon = publicTradingModeIcon();
     const macro = setting('current_macro_state') || 'UNKNOWN';
+    const strat = activeStrategy();
+    const unresolved = db.prepare("SELECT count(*) AS count FROM execution_operations WHERE status IN ('pending', 'outcome_unknown')").get().count;
+    const circuitOpen = setting('live_circuit_breaker_open', 'false') === 'true';
     let cal = 'No calibration data';
     try {
       cal = await runLLMCalibration() || cal;
     } catch (e) {}
-    
-    return bot.sendMessage(chatId, `🤖 <b>System Status</b>\n\nMode: ${mode}\nMacro: ${macro}\n\n<b>LLM Calibration:</b>\n${cal}\n\n<b>Backup:</b>\nLast: ${backup.last_backup || 'None'} (${backup.size_mb}MB)`, { parse_mode: 'HTML' });
+
+    return bot.sendMessage(chatId, [
+      '👼 <b>ANGEL SYSTEM STATUS</b>',
+      '',
+      `${modeIcon} Mode: <b>${mode}</b>`,
+      `🤖 Agent: <b>${boolSetting('agent_enabled', true) ? 'ON' : 'OFF'}</b>`,
+      `🎯 Strategy: <b>${escapeHtml(strat.name)}</b>`,
+      `🌐 Macro: <b>${escapeHtml(macro)}</b>`,
+      `🛡️ Circuit breaker: <b>${circuitOpen ? 'OPEN' : 'CLOSED'}</b>`,
+      `⚠️ Unresolved executions: <b>${unresolved}</b>`,
+      '',
+      '<b>LLM Calibration</b>',
+      cal,
+      '',
+      '<b>Database Backup</b>',
+      `Last: ${backup.last_backup || 'None'} (${backup.size_mb}MB)`,
+    ].join('\n'), { parse_mode: 'HTML' });
   }
   if (text.startsWith('/mutations')) {
     const mutations = db.prepare('SELECT * FROM parameter_mutation_history ORDER BY id DESC LIMIT 10').all();
@@ -121,30 +161,36 @@ export async function handleMessage(msg) {
     const approved = approvedLiveConfig();
     const checksum = liveConfigChecksum();
     const unresolved = db.prepare("SELECT count(*) AS count FROM execution_operations WHERE status IN ('pending', 'outcome_unknown')").get().count;
+    const circuitOpen = setting('live_circuit_breaker_open', 'false') === 'true';
     return bot.sendMessage(chatId, [
-      '🔐 <b>Live Configuration</b>',
+      '🔐 <b>Live Safety Control</b>',
       '',
-      `Current checksum: <code>${checksum}</code>`,
-      `Approved snapshot: ${approved ? `#${approved.id}` : 'none'}`,
-      `Mode: ${escapeHtml(setting('trading_mode', 'dry_run'))}`,
-      `Unresolved executions: ${unresolved}`,
-      `Circuit breaker: ${escapeHtml(setting('live_circuit_breaker_open', 'false'))}`,
+      `${publicTradingModeIcon()} Current mode: <b>${publicTradingMode()}</b>`,
+      `Approved snapshot: <b>${approved ? `#${approved.id}` : 'NONE'}</b>`,
+      `Circuit breaker: <b>${circuitOpen ? 'OPEN' : 'CLOSED'}</b>`,
+      `Unresolved executions: <b>${unresolved}</b>`,
+      '',
+      '<b>Configuration checksum</b>',
+      `<code>${checksum}</code>`,
     ].join('\n'), { parse_mode: 'HTML' });
   }
   if (text.startsWith('/liveapprove')) {
     const [, actionOrId, checksum] = text.split(/\s+/);
     if (actionOrId === 'create') {
-      if (setting('trading_mode', 'dry_run') !== 'dry_run') {
-        return bot.sendMessage(chatId, 'Switch to dry_run before creating a live snapshot.');
+      if (!isSimulationSetting()) {
+        return bot.sendMessage(chatId, '🛡️ Switch to Simulation before creating a Live approval snapshot.');
       }
       const snapshot = createLiveConfigSnapshot();
       return bot.sendMessage(chatId, [
-        `🔐 Live snapshot #${snapshot.id} created.`,
+        '🔐 <b>Live Approval Snapshot Created</b>',
         '',
+        `Snapshot: <b>#${snapshot.id}</b>`,
         `<code>${snapshot.checksum}</code>`,
         '',
-        `Review it, then approve with:`,
+        'Review the configuration carefully, then approve with:',
         `<code>/liveapprove ${snapshot.id} ${snapshot.checksum}</code>`,
+        '',
+        '<i>Creating this snapshot does not enable Live mode.</i>',
       ].join('\n'), { parse_mode: 'HTML' });
     }
     const id = Number(actionOrId);
@@ -153,19 +199,19 @@ export async function handleMessage(msg) {
     }
     try {
       const approved = approveLiveConfigSnapshot(id, checksum);
-      return bot.sendMessage(chatId, `✅ Snapshot #${approved.id} approved. Live mode may now be enabled while its checksum remains unchanged.`);
+      return bot.sendMessage(chatId, `✅ Live safety snapshot #${approved.id} approved. Live/Confirm execution may be enabled only while this checksum remains unchanged.`);
     } catch (error) {
       return bot.sendMessage(chatId, `❌ Approval failed: ${error.message}`);
     }
   }
   if (text.startsWith('/circuitreset')) {
-    if (setting('trading_mode', 'dry_run') !== 'dry_run') {
-      return bot.sendMessage(chatId, 'Circuit reset requires trading_mode=dry_run.');
+    if (!isSimulationSetting()) {
+      return bot.sendMessage(chatId, '🛡️ Circuit breaker reset is allowed only while Angel is in Simulation mode.');
     }
     const unresolved = db.prepare("SELECT count(*) AS count FROM execution_operations WHERE status IN ('pending', 'outcome_unknown')").get().count;
-    if (unresolved > 0) return bot.sendMessage(chatId, `Cannot reset: ${unresolved} unresolved execution(s).`);
+    if (unresolved > 0) return bot.sendMessage(chatId, `Cannot reset: ${unresolved} unresolved execution(s). Reconcile them first.`);
     setSetting('live_circuit_breaker_open', 'false');
-    return bot.sendMessage(chatId, '✅ Circuit breaker reset in dry_run. Create and approve a fresh live snapshot before live/confirm execution.');
+    return bot.sendMessage(chatId, '✅ Circuit breaker reset while safely in Simulation. Create and approve a fresh Live snapshot before enabling Confirm/Live execution.');
   }
   const command = commandName(text);
   if (command === '/learn') {
@@ -253,8 +299,23 @@ export async function handleMessage(msg) {
     if (!valid.has(key) || value == null) {
       return bot.sendMessage(chatId, `Usage: /setfilter &lt;name&gt; &lt;value&gt;\n\n${filtersText()}`, { parse_mode: 'HTML' });
     }
-    setSetting(key, value === 'off' ? '0' : value);
-    return bot.sendMessage(chatId, filtersText(), { parse_mode: 'HTML' });
+    let normalizedValue = value === 'off' ? '0' : value;
+    if (key === 'trading_mode') {
+      const aliases = new Map([
+        ['dry_run', 'simulation'],
+        ['shadow_live', 'simulation'],
+        ['simulation', 'simulation'],
+        ['confirm', 'confirm'],
+        ['live', 'live'],
+      ]);
+      normalizedValue = aliases.get(String(value).toLowerCase());
+      if (!normalizedValue) return bot.sendMessage(chatId, 'Trading mode must be: simulation, confirm, or live.');
+    }
+    setSetting(key, normalizedValue);
+    return bot.sendMessage(chatId, key === 'trading_mode' ? agentText() : filtersText(), {
+      parse_mode: 'HTML',
+      ...(key === 'trading_mode' ? agentKeyboard() : {}),
+    });
   }
 }
 
@@ -271,8 +332,8 @@ export async function sendCandidate(chatId, id) {
 
 export async function sendPositions(chatId) {
   const rows = allPositions(12);
-  const text = rows.length ? rows.map(formatPosition).join('\n\n') : 'No dry-run positions yet.';
-  await bot.sendMessage(chatId, `📍 <b>Positions</b>\n\n${text}`, { parse_mode: 'HTML', disable_web_page_preview: true });
+  const text = rows.length ? rows.map(formatPosition).join('\n\n') : 'No positions recorded yet.';
+  await bot.sendMessage(chatId, `📍 <b>Position Monitor</b>\n\n${text}`, { parse_mode: 'HTML', disable_web_page_preview: true });
 }
 
 export async function sendPosition(chatId, id, query = null) {
@@ -310,8 +371,8 @@ export async function closePosition(chatId, id, reason) {
     INSERT INTO dry_run_trades (position_id, mint, side, at_ms, price, mcap, size_sol, token_amount_est, reason, payload_json)
     VALUES (?, ?, 'sell', ?, ?, ?, ?, ?, ?, ?)
   `).run(id, row.mint, now(), price, mcap, row.size_sol, row.token_amount_est, reason, json({ pnlPercent, pnlSol, sell }));
-  const label = row.execution_mode === 'live' ? 'Closed live position' : 'Closed dry-run position';
-  await bot.sendMessage(chatId, `${label} #${id}: ${escapeHtml(reason)} ${fmtPct(pnlPercent)}`, { parse_mode: 'HTML' });
+  const label = row.execution_mode === 'live' ? '🔴 Live position closed' : '🧪 Simulation position closed';
+  await bot.sendMessage(chatId, `${label} #${id}: ${escapeHtml(reason)} · ${fmtPct(pnlPercent)}`, { parse_mode: 'HTML' });
 }
 
 export async function updatePositionRule(chatId, id, field, nextValue, query = null) {
@@ -353,29 +414,30 @@ export async function toggleTrailing(chatId, id, query = null) {
 
 export function setupTelegram() {
   bot.setMyCommands([
-    { command: 'menu', description: 'Open Angel menu' },
-    { command: 'strategy', description: 'Show/switch strategy' },
-    { command: 'stratset', description: 'Set strategy config (stratset id key value)' },
-    { command: 'positions', description: 'Show dry-run positions' },
-    { command: 'candidate', description: 'Show candidate by mint' },
-    { command: 'filters', description: 'Show filters' },
+    { command: 'menu', description: 'Open Angel Control Center' },
+    { command: 'status', description: 'System, mode, risk and backup status' },
+    { command: 'strategy', description: 'View or switch strategy' },
+    { command: 'stratset', description: 'Configure a strategy parameter' },
+    { command: 'positions', description: 'Open position monitor' },
+    { command: 'candidate', description: 'Inspect a candidate by mint' },
+    { command: 'filters', description: 'View safety and market filters' },
     { command: 'pnl', description: 'Show saved-wallet PnL' },
-    { command: 'learn', description: 'Run manual learning report' },
-    { command: 'lessons', description: 'Show active screening lessons' },
-    { command: 'lessoneval', description: 'Evaluate outcomes exposed to active lessons' },
-    { command: 'setfilter', description: 'Set a filter value' },
-    { command: 'walletadd', description: 'Save wallet for exposure/PnL' },
-    { command: 'walletremove', description: 'Remove saved wallet' },
-    { command: 'wallets', description: 'List saved wallets' },
-    { command: 'backup', description: 'Create SQLite backup' },
-    { command: 'status', description: 'Show system status and LLM calibration' },
-    { command: 'mutations', description: 'List legacy mutation audit records' },
-    { command: 'livestatus', description: 'Show live configuration approval' },
-    { command: 'liveapprove', description: 'Create/approve a live snapshot' },
+    { command: 'report', description: 'Generate the daily trading report' },
+    { command: 'learn', description: 'Run a manual learning report' },
+    { command: 'lessons', description: 'Show active learning lessons' },
+    { command: 'lessoneval', description: 'Evaluate lesson outcomes' },
+    { command: 'setfilter', description: 'Set a runtime/filter value' },
+    { command: 'walletadd', description: 'Add a monitored wallet' },
+    { command: 'walletremove', description: 'Remove a monitored wallet' },
+    { command: 'wallets', description: 'List monitored wallets' },
+    { command: 'backup', description: 'Create a database backup' },
+    { command: 'livestatus', description: 'Show Live safety controls' },
+    { command: 'liveapprove', description: 'Create or approve a Live snapshot' },
     { command: 'executions', description: 'Show durable execution ledger' },
-    { command: 'circuitreset', description: 'Reset latched breaker in dry_run' },
-    { command: 'lessonapprove', description: 'Approve an LLM lesson candidate' },
-    { command: 'lessonreject', description: 'Reject an LLM lesson candidate' },
+    { command: 'circuitreset', description: 'Reset circuit breaker in Simulation' },
+    { command: 'mutations', description: 'Show legacy mutation audit records' },
+    { command: 'lessonapprove', description: 'Approve a learning lesson' },
+    { command: 'lessonreject', description: 'Reject a learning lesson' },
   ]).catch(err => {
     const msg = err?.message || String(err);
     if (!msg.includes('EFATAL') && !msg.includes('AggregateError')) {
@@ -400,7 +462,7 @@ async function sendMenu(chatId = TELEGRAM_CHAT_ID) {
 async function sendPnl(chatId, query = null) {
   const wallets = savedWallets();
   if (!wallets.length) {
-    const text = '📊 <b>PnL</b>\n\nNo saved wallets. Use /walletadd &lt;label&gt; &lt;address&gt;.';
+    const text = '📊 <b>Wallet PnL</b>\n\nNo wallets saved. Use <code>/walletadd &lt;label&gt; &lt;address&gt;</code>.';
     return query ? editMenuMessage(query, text, navKeyboard()) : bot.sendMessage(chatId, text, { parse_mode: 'HTML' });
   }
   const chunks = [];
@@ -412,11 +474,11 @@ async function sendPnl(chatId, query = null) {
     }
     chunks.push([
       `• <b>${escapeHtml(wallet.label)}</b>`,
-      `Win: ${fmtPct(pnl.winRate)} · PnL: ${fmtPct(pnl.totalPnlPercent)}`,
+      `Win rate: ${fmtPct(pnl.winRate)} · PnL: ${fmtPct(pnl.totalPnlPercent)}`,
       `Trades: ${pnl.totalTrades} · Wins: ${pnl.wins}`,
     ].join('\n'));
   }
-  const text = `📊 <b>PnL</b>\n\n${chunks.join('\n\n')}`;
+  const text = `📊 <b>Wallet PnL</b>\n\n${chunks.join('\n\n')}`;
   return query ? editMenuMessage(query, text, navKeyboard()) : bot.sendMessage(chatId, text, { parse_mode: 'HTML' });
 }
 

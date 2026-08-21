@@ -85,9 +85,7 @@ async function jupiterOrder({ inputMint, outputMint, amount }) {
     headers: { ...JSON_HEADERS, 'x-api-key': JUPITER_API_KEY },
   }), 'jupiter', REQUEST_PRIORITY.ENTRY_EXIT);
   const order = res.data;
-  if (order.errorCode || order.error) {
-    throw new Error(`Jupiter order failed: ${order.errorMessage || order.error || order.errorCode}`);
-  }
+  if (order.errorCode || order.error) throw new Error(`Jupiter order failed: ${order.errorMessage || order.error || order.errorCode}`);
   return order;
 }
 
@@ -98,9 +96,7 @@ function orderTransactionBase64(order) {
 function signTransaction(transactionBase64) {
   const tx = VersionedTransaction.deserialize(Buffer.from(transactionBase64, 'base64'));
   const feePayer = tx.message.staticAccountKeys?.[0];
-  if (!feePayer || !feePayer.equals(liveWallet.publicKey)) {
-    throw new Error('Refusing swap transaction with an unexpected fee payer.');
-  }
+  if (!feePayer || !feePayer.equals(liveWallet.publicKey)) throw new Error('Refusing swap transaction with an unexpected fee payer.');
   tx.sign([liveWallet]);
   return { tx, base64: Buffer.from(tx.serialize()).toString('base64') };
 }
@@ -133,9 +129,7 @@ async function simulateAndValidateTransaction(tx, { inputMint, outputMint, amoun
   const beforeAccounts = await solanaConnection.getMultipleAccountsInfo(publicKeys, 'confirmed');
   const walletIndex = addresses.indexOf(walletAddress);
   const walletBefore = beforeAccounts[walletIndex];
-  if (!walletBefore || !Number.isSafeInteger(Number(walletBefore.lamports))) {
-    throw new Error('Swap validation could not read the pre-simulation wallet balance.');
-  }
+  if (!walletBefore || !Number.isSafeInteger(Number(walletBefore.lamports))) throw new Error('Swap validation could not read the pre-simulation wallet balance.');
 
   const simulation = await solanaConnection.simulateTransaction(tx, {
     sigVerify: true,
@@ -145,23 +139,13 @@ async function simulateAndValidateTransaction(tx, { inputMint, outputMint, amoun
   });
   if (simulation.value.err) throw new Error(`Swap simulation failed: ${JSON.stringify(simulation.value.err)}`);
   const afterAccounts = simulation.value.accounts;
-  if (!Array.isArray(afterAccounts) || afterAccounts.length !== addresses.length) {
-    throw new Error('Swap simulation did not return the requested account state.');
-  }
+  if (!Array.isArray(afterAccounts) || afterAccounts.length !== addresses.length) throw new Error('Swap simulation did not return the requested account state.');
   const walletAfter = afterAccounts[walletIndex];
-  if (!walletAfter || !Number.isSafeInteger(Number(walletAfter.lamports))) {
-    throw new Error('Swap simulation did not return the post-simulation wallet balance.');
-  }
+  if (!walletAfter || !Number.isSafeInteger(Number(walletAfter.lamports))) throw new Error('Swap simulation did not return the post-simulation wallet balance.');
 
   validateSimulatedSwapEffects({
-    before: {
-      lamports: Number(walletBefore.lamports),
-      tokens: walletTokenBalancesFromAccounts(beforeAccounts, walletAddress),
-    },
-    after: {
-      lamports: Number(walletAfter.lamports),
-      tokens: walletTokenBalancesFromAccounts(afterAccounts, walletAddress),
-    },
+    before: { lamports: Number(walletBefore.lamports), tokens: walletTokenBalancesFromAccounts(beforeAccounts, walletAddress) },
+    after: { lamports: Number(walletAfter.lamports), tokens: walletTokenBalancesFromAccounts(afterAccounts, walletAddress) },
     inputMint,
     outputMint,
     amount,
@@ -171,10 +155,7 @@ async function simulateAndValidateTransaction(tx, { inputMint, outputMint, amoun
 
 async function jupiterExecute(order, signedTransaction) {
   requireLiveExecution();
-  const body = {
-    signedTransaction,
-    requestId: order.requestId,
-  };
+  const body = { signedTransaction, requestId: order.requestId };
   try {
     const res = await rateLimiter.schedule(() => axios.post(`${JUPITER_SWAP_BASE_URL.replace(/\/$/, '')}/execute`, body, {
       timeout: 30_000,
@@ -195,14 +176,8 @@ async function jitoSendTransaction(signedTransaction) {
   if (JITO_BUNDLE_ONLY) url.searchParams.set('bundleOnly', 'true');
   try {
     const res = await axios.post(url.toString(), {
-      jsonrpc: '2.0',
-      id: 1,
-      method: 'sendTransaction',
-      params: [signedTransaction, { encoding: 'base64' }],
-    }, {
-      timeout: 20_000,
-      headers: { 'content-type': 'application/json' },
-    });
+      jsonrpc: '2.0', id: 1, method: 'sendTransaction', params: [signedTransaction, { encoding: 'base64' }],
+    }, { timeout: 20_000, headers: { 'content-type': 'application/json' } });
     if (res.data?.error) throw new Error(`Jito sendTransaction failed: ${res.data.error.message || JSON.stringify(res.data.error)}`);
     if (!res.data?.result) throw new Error('Jito returned no transaction signature.');
     return { signature: res.data.result, mevProtected: true, jito: true };
@@ -213,18 +188,29 @@ async function jitoSendTransaction(signedTransaction) {
   }
 }
 
+export async function simulateJupiterSwap({ inputMint, outputMint, amount }) {
+  const order = await jupiterOrder({ inputMint, outputMint, amount });
+  const transaction = orderTransactionBase64(order);
+  if (!transaction) throw new Error('Jupiter order did not include a transaction.');
+  const signed = signTransaction(transaction);
+  await simulateAndValidateTransaction(signed.tx, { inputMint, outputMint, amount });
+  return {
+    order,
+    simulated: true,
+    broadcast: false,
+    inputAmount: String(amount),
+    outputAmount: String(order?.outAmount || order?.outputAmount || order?.outAmountResult || ''),
+  };
+}
+
 export async function executeJupiterSwap({ inputMint, outputMint, amount }) {
   const order = await jupiterOrder({ inputMint, outputMint, amount });
   const transaction = orderTransactionBase64(order);
   if (!transaction) throw new Error('Jupiter order did not include a transaction.');
   const signed = signTransaction(transaction);
   await simulateAndValidateTransaction(signed.tx, { inputMint, outputMint, amount });
-  const executed = JITO_ENABLED
-    ? await jitoSendTransaction(signed.base64)
-    : await jupiterExecute(order, signed.base64);
-  if (executed?.status && executed.status !== 'Success') {
-    throw new Error(`Jupiter execute failed: ${executed.error || executed.code || executed.status}`);
-  }
+  const executed = JITO_ENABLED ? await jitoSendTransaction(signed.base64) : await jupiterExecute(order, signed.base64);
+  if (executed?.status && executed.status !== 'Success') throw new Error(`Jupiter execute failed: ${executed.error || executed.code || executed.status}`);
   const signature = executed?.signature || executed?.txid || executed?.transactionId || null;
   if (!signature) {
     const error = new Error(`Jupiter execute returned no signature (status: ${executed?.status || 'unknown'})`);
@@ -237,9 +223,7 @@ export async function executeJupiterSwap({ inputMint, outputMint, amount }) {
       solanaConnection.confirmTransaction(signature, 'confirmed'),
       new Promise((_, reject) => setTimeout(() => reject(new Error('on-chain confirmation timeout')), 20_000)),
     ]);
-    if (confirmation?.value?.err) {
-      throw new Error(`On-chain swap failed: ${JSON.stringify(confirmation.value.err)}`);
-    }
+    if (confirmation?.value?.err) throw new Error(`On-chain swap failed: ${JSON.stringify(confirmation.value.err)}`);
   } catch (cause) {
     const error = new Error(`Swap signature ${signature} could not be confirmed: ${cause.message}`);
     error.swapOutcomeUnknown = true;
@@ -250,19 +234,12 @@ export async function executeJupiterSwap({ inputMint, outputMint, amount }) {
   let feeLamports = null;
   for (let attempt = 0; attempt < 3 && feeLamports == null; attempt += 1) {
     try {
-      const confirmed = await solanaConnection.getTransaction(signature, {
-        commitment: 'confirmed',
-        maxSupportedTransactionVersion: 0,
-      });
+      const confirmed = await solanaConnection.getTransaction(signature, { commitment: 'confirmed', maxSupportedTransactionVersion: 0 });
       feeLamports = Number.isFinite(Number(confirmed?.meta?.fee)) ? Number(confirmed.meta.fee) : null;
     } catch (feeError) {
-      if (attempt === 2) {
-        console.warn(`[live] fee lookup failed for ${signature.slice(0, 10)}...: ${feeError.message}`);
-      }
+      if (attempt === 2) console.warn(`[live] fee lookup failed for ${signature.slice(0, 10)}...: ${feeError.message}`);
     }
-    if (feeLamports == null && attempt < 2) {
-      await new Promise((resolve) => setTimeout(resolve, 500));
-    }
+    if (feeLamports == null && attempt < 2) await new Promise(resolve => setTimeout(resolve, 500));
   }
   return {
     order,

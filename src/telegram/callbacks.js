@@ -1,6 +1,5 @@
 import { bot } from './bot.js';
 import { TELEGRAM_CHAT_ID } from '../config.js';
-import { now } from '../utils.js';
 import { numSetting, boolSetting, setSetting, setActiveStrategy, activeStrategy, updateStrategyConfig } from '../db/settings.js';
 import {
   menuKeyboard,
@@ -17,11 +16,10 @@ import {
   strategyMenuText,
   strategyKeyboard,
 } from './menus.js';
-import { sendTelegram, sendBatch, sendPositionOpen, sendTradeIntent } from './send.js';
-import { candidateSummary } from './format.js';
+import { sendTelegram, sendBatch } from './send.js';
 import { candidateById, updateCandidateStatus } from '../db/candidates.js';
-import { storeDecision, logDecisionEvent } from '../db/decisions.js';
-import { createDryRunPosition, canOpenMorePositions, openPositionCount, tradingMode, incrementPendingPosition, decrementPendingPosition } from '../db/positions.js';
+import { storeDecision } from '../db/decisions.js';
+import { canOpenMorePositions, openPositionCount, tradingMode, incrementPendingPosition, decrementPendingPosition } from '../db/positions.js';
 import { executeLiveBuy, executeConfirmedIntent, rejectIntent } from '../execution/router.js';
 import { refreshCandidateForExecution } from '../execution/positions.js';
 import { sendCandidate, sendPosition, closePosition, updatePositionRule, toggleTrailing } from './commands.js';
@@ -42,9 +40,7 @@ export async function handleCallback(query) {
 
   if (data === 'menu:main') return editMenuMessage(query, mainMenuText(), menuKeyboard());
   if (data === 'noop') return null;
-  if (data === 'menu:agent') {
-    return editMenuMessage(query, agentText(), agentKeyboard());
-  }
+  if (data === 'menu:agent') return editMenuMessage(query, agentText(), agentKeyboard());
   if (data === 'toggle:agent') {
     setSetting('agent_enabled', boolSetting('agent_enabled', true) ? 'false' : 'true');
     return editMenuMessage(query, agentText(), agentKeyboard());
@@ -64,8 +60,8 @@ export async function handleCallback(query) {
   }
   if (data === 'menu:settings') return editMenuMessage(query, `${agentText()}\n\n${filtersText()}`, navKeyboard([
     [
-      { text: 'Agent', callback_data: 'menu:agent' },
-      { text: 'Filters', callback_data: 'menu:filters' },
+      { text: '🤖 Agent', callback_data: 'menu:agent' },
+      { text: '🛡️ Filters', callback_data: 'menu:filters' },
     ],
   ]));
 
@@ -94,44 +90,34 @@ export async function handleCallback(query) {
   if (kind === 'cand') return sendCandidate(chatId, Number(id));
   if (kind === 'ign') {
     updateCandidateStatus(Number(id), 'ignored');
-    return bot.sendMessage(chatId, 'Ignored candidate.');
+    return bot.sendMessage(chatId, 'Candidate ignored.');
   }
   if (kind === 'buy') {
     const row = candidateById(Number(id));
     if (!row) return bot.sendMessage(chatId, 'Candidate not found.');
     if (!canOpenMorePositions()) {
-      return bot.sendMessage(chatId, `Max open positions reached (${openPositionCount()}/${numSetting('max_open_positions', 3)}). Close one first or raise the limit.`);
+      return bot.sendMessage(chatId, `Position limit reached (${openPositionCount()}/${numSetting('max_open_positions', 3)}). Close a position or raise the limit.`);
     }
     const candidate = row.candidate;
-    const decision = { verdict: 'BUY', confidence: 100, reason: 'Manual dry buy', risks: [], suggested_tp_percent: numSetting('default_tp_percent', 50), suggested_sl_percent: numSetting('default_sl_percent', -25) };
+    const mode = tradingMode();
+    const decision = {
+      verdict: 'BUY', confidence: 100, reason: `Manual ${mode === 'shadow_live' ? 'simulation' : mode} test`, risks: [],
+      suggested_tp_percent: numSetting('default_tp_percent', 50),
+      suggested_sl_percent: numSetting('default_sl_percent', -25),
+    };
     const decisionId = storeDecision(row.id, candidate, decision);
     decision.id = decisionId;
     incrementPendingPosition();
     try {
-      if (tradingMode() === 'live') {
-        const freshRow = await refreshCandidateForExecution(row);
-        if (!freshRow.candidate.filters?.passed) {
-          return bot.sendMessage(chatId, `Manual live buy rejected by fresh safety check: ${(freshRow.candidate.filters?.failures || []).join('; ')}`);
-        }
-        await executeLiveBuy(freshRow, decision, 'manual', [freshRow], row.id);
-        return;
+      if (mode === 'confirm') {
+        return bot.sendMessage(chatId, 'Manual test is disabled in Confirm mode. Use the normal decision flow and approve the generated trade intent.');
       }
-      const result = await createDryRunPosition(row.id, candidate, decision, 'manual_buy');
-      const { id: positionId, isNew, blockedBy } = result;
-      logDecisionEvent({
-        batchId: 'manual',
-        triggerCandidateId: row.id,
-        selectedRow: row,
-        rows: [row],
-        decision,
-        mode: tradingMode(),
-      action: isNew ? 'manual_dry_run_entry' : `manual_dry_run_blocked_${blockedBy || 'duplicate'}`,
-      execution: { positionId, isNew, blockedBy: blockedBy || null },
-    });
-      if (!isNew) {
-        return bot.sendMessage(chatId, `Manual dry buy blocked: ${blockedBy || 'position already exists or is in cooldown'}.`);
+      const freshRow = await refreshCandidateForExecution(row);
+      if (!freshRow.candidate.filters?.passed) {
+        return bot.sendMessage(chatId, `Manual ${mode === 'live' ? 'live' : 'simulation'} test rejected by fresh safety check: ${(freshRow.candidate.filters?.failures || []).join('; ')}`);
       }
-      return sendPositionOpen(positionId);
+      await executeLiveBuy(freshRow, decision, 'manual', [freshRow], row.id);
+      return;
     } finally {
       decrementPendingPosition();
     }
@@ -153,11 +139,7 @@ export async function editMenuMessage(query, text, extra = {}) {
   const chatId = query.message?.chat?.id || TELEGRAM_CHAT_ID;
   const messageId = query.message?.message_id;
   if (!messageId) {
-    return bot.sendMessage(chatId, text, {
-      parse_mode: 'HTML',
-      disable_web_page_preview: true,
-      ...extra,
-    });
+    return bot.sendMessage(chatId, text, { parse_mode: 'HTML', disable_web_page_preview: true, ...extra });
   }
   try {
     return await bot.editMessageText(text, {
@@ -169,11 +151,7 @@ export async function editMenuMessage(query, text, extra = {}) {
     });
   } catch (err) {
     if (/message is not modified/i.test(err.message)) return null;
-    return bot.sendMessage(chatId, text, {
-      parse_mode: 'HTML',
-      disable_web_page_preview: true,
-      ...extra,
-    });
+    return bot.sendMessage(chatId, text, { parse_mode: 'HTML', disable_web_page_preview: true, ...extra });
   }
 }
 
@@ -198,9 +176,7 @@ const STRAT_PRESETS = {
 };
 
 function formatStratValue(key, value) {
-  if (key === 'max_hold_ms' || key === 'token_age_max_ms') {
-    return value > 0 ? `${Math.round(value / 60000)}m` : 'off';
-  }
+  if (key === 'max_hold_ms' || key === 'token_age_max_ms') return value > 0 ? `${Math.round(value / 60000)}m` : 'off';
   if (key.includes('percent') || key.includes('pct')) return `${value}%`;
   if (key.includes('sol')) return `${value} SOL`;
   if (key.includes('usd')) return value > 0 ? `$${value.toLocaleString()}` : 'off';
@@ -212,68 +188,36 @@ async function handleStratConfig(query, chatId, key) {
   const newConfig = { ...strat };
   delete newConfig.id;
   delete newConfig.name;
-
-  // Boolean toggles
   const boolKeys = new Set(['trailing_enabled', 'partial_tp', 'use_llm', 'require_fee_claim']);
   if (boolKeys.has(key)) {
     newConfig[key] = !strat[key];
     updateStrategyConfig(strat.id, newConfig);
     return editMenuMessage(query, strategyMenuText(), strategyKeyboard());
   }
-
-  // Cycle through presets
   const presets = STRAT_PRESETS[key];
   if (presets) {
     const current = Number(strat[key] ?? 0);
     const idx = presets.indexOf(current);
-    const next = idx >= 0 ? presets[(idx + 1) % presets.length] : presets[0];
-    newConfig[key] = next;
+    newConfig[key] = idx >= 0 ? presets[(idx + 1) % presets.length] : presets[0];
     updateStrategyConfig(strat.id, newConfig);
     return editMenuMessage(query, strategyMenuText(), strategyKeyboard());
   }
-
-  // Fallback: show current value
   return bot.sendMessage(chatId, `Current ${key}: ${formatStratValue(key, strat[key])}\nUse /stratset ${strat.id} ${key} <value> to change.`);
 }
 
 async function updateSettingFromButton(query, key, value) {
   const chatId = query.message?.chat?.id || TELEGRAM_CHAT_ID;
   const valid = new Set([
-    'min_fee_claim_sol',
-    'min_mcap_usd',
-    'max_mcap_usd',
-    'min_gmgn_total_fee_sol',
-    'min_graduated_volume_usd',
-    'max_top20_holder_percent',
-    'min_saved_wallet_holders',
-    'trending_enabled',
-    'trending_source',
-    'trending_allow_degen',
-    'trending_interval',
-    'trending_limit',
-    'trending_order_by',
-    'trending_min_volume_usd',
-    'trending_min_swaps',
-    'trending_max_rug_ratio',
-    'trending_max_bundler_rate',
-    'trading_mode',
-    'llm_min_confidence',
-    'llm_candidate_pick_count',
-    'llm_candidate_max_age_ms',
-    'max_open_positions',
-    'dry_run_buy_sol',
-    'default_tp_percent',
-    'default_sl_percent',
-    'default_trailing_enabled',
-    'default_trailing_percent',
+    'min_fee_claim_sol', 'min_mcap_usd', 'max_mcap_usd', 'min_gmgn_total_fee_sol',
+    'min_graduated_volume_usd', 'max_top20_holder_percent', 'min_saved_wallet_holders',
+    'trending_enabled', 'trending_source', 'trending_allow_degen', 'trending_interval',
+    'trending_limit', 'trending_order_by', 'trending_min_volume_usd', 'trending_min_swaps',
+    'trending_max_rug_ratio', 'trending_max_bundler_rate', 'trading_mode', 'llm_min_confidence',
+    'llm_candidate_pick_count', 'llm_candidate_max_age_ms', 'max_open_positions', 'dry_run_buy_sol',
+    'default_tp_percent', 'default_sl_percent', 'default_trailing_enabled', 'default_trailing_percent',
   ]);
   if (!valid.has(key) || value == null) return bot.sendMessage(chatId, 'Unknown setting.');
   setSetting(key, value);
-  const text = key.startsWith('default_') || key === 'dry_run_buy_sol' || key === 'trading_mode' || key === 'llm_min_confidence' || key === 'llm_candidate_pick_count' || key === 'llm_candidate_max_age_ms' || key === 'max_open_positions'
-    ? agentText()
-    : filtersText();
-  const extra = key.startsWith('default_') || key === 'dry_run_buy_sol' || key === 'trading_mode' || key === 'llm_min_confidence' || key === 'llm_candidate_pick_count' || key === 'llm_candidate_max_age_ms' || key === 'max_open_positions'
-    ? agentKeyboard()
-    : filtersKeyboard();
-  return editMenuMessage(query, text, extra);
+  const agentSetting = key.startsWith('default_') || key === 'dry_run_buy_sol' || key === 'trading_mode' || key === 'llm_min_confidence' || key === 'llm_candidate_pick_count' || key === 'llm_candidate_max_age_ms' || key === 'max_open_positions';
+  return editMenuMessage(query, agentSetting ? agentText() : filtersText(), agentSetting ? agentKeyboard() : filtersKeyboard());
 }

@@ -1,5 +1,5 @@
 import { db } from '../db/connection.js';
-import { now, safeJson, parseWindowMs, formatWindow } from '../utils.js';
+import { now, safeJson } from '../utils.js';
 import { validateDryRunRows } from './dataQuality.js';
 import { DRY_RUN_SIMULATOR_VERSION } from './simulatorVersion.js';
 
@@ -67,13 +67,7 @@ function featureOutcomeEvidence(closed) {
     const winners = numericStats(closed.filter(row => Number(row.pnl_percent) > 0).map(row => read(positionSnapshotCandidate(row))));
     const losers = numericStats(closed.filter(row => Number(row.pnl_percent) <= 0).map(row => read(positionSnapshotCandidate(row))));
     if (winners.count < 5 || losers.count < 5) continue;
-    evidence.push({
-      feature,
-      winners,
-      losers,
-      meanDifference: winners.mean - losers.mean,
-      evidenceOnly: true,
-    });
+    evidence.push({ feature, winners, losers, meanDifference: winners.mean - losers.mean, evidenceOnly: true });
   }
   return evidence;
 }
@@ -85,7 +79,9 @@ export function summarizeLearningWindow(windowMs) {
     FROM dry_run_positions
     WHERE ((status = 'closed' AND COALESCE(closed_at_ms, opened_at_ms) >= ?)
        OR (status != 'closed' AND opened_at_ms >= ?))
-      AND COALESCE(execution_mode, 'dry_run') = 'dry_run'
+      AND execution_mode = 'shadow_live'
+      AND json_extract(snapshot_json, '$.shadowLiveCompatible') = 1
+      AND json_extract(snapshot_json, '$.entryQuoteMode') = 'position_sized'
       AND json_extract(snapshot_json, '$.simulatorVersion') = ?
     ORDER BY opened_at_ms ASC
   `).all(cutoff, cutoff, DRY_RUN_SIMULATOR_VERSION);
