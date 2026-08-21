@@ -1,10 +1,9 @@
 import assert from 'node:assert/strict';
-import { validateSimulatedSwapEffects } from '../../src/liveExecutor.js';
+import { validateSimulatedSwapEffects } from '../../src/execution/swapValidation.js';
 import { WSOL_MINT } from '../../src/config.js';
 
 console.log('[test_live_executor_semantics] Starting simulated swap semantic tests...');
 
-const wallet = 'Wallet111111111111111111111111111111111111';
 const inputMint = 'InputMint111111111111111111111111111111111';
 const outputMint = 'OutputMint11111111111111111111111111111111';
 const unrelatedMint = 'OtherMint111111111111111111111111111111111';
@@ -19,6 +18,7 @@ assert.doesNotThrow(() => validateSimulatedSwapEffects({
   inputMint,
   outputMint,
   amount: '300',
+  nativeMint: WSOL_MINT,
 }));
 
 assert.throws(() => validateSimulatedSwapEffects({
@@ -27,6 +27,7 @@ assert.throws(() => validateSimulatedSwapEffects({
   inputMint,
   outputMint,
   amount: '300',
+  nativeMint: WSOL_MINT,
 }), /exceeded requested input/);
 
 assert.throws(() => validateSimulatedSwapEffects({
@@ -35,6 +36,7 @@ assert.throws(() => validateSimulatedSwapEffects({
   inputMint,
   outputMint,
   amount: '300',
+  nativeMint: WSOL_MINT,
 }), /unexpected token debit/);
 
 assert.throws(() => validateSimulatedSwapEffects({
@@ -43,6 +45,7 @@ assert.throws(() => validateSimulatedSwapEffects({
   inputMint,
   outputMint,
   amount: '300',
+  nativeMint: WSOL_MINT,
 }), /did not credit expected output/);
 
 assert.doesNotThrow(() => validateSimulatedSwapEffects({
@@ -51,6 +54,7 @@ assert.doesNotThrow(() => validateSimulatedSwapEffects({
   inputMint,
   outputMint: WSOL_MINT,
   amount: '300',
+  nativeMint: WSOL_MINT,
 }));
 
 assert.throws(() => validateSimulatedSwapEffects({
@@ -59,6 +63,7 @@ assert.throws(() => validateSimulatedSwapEffects({
   inputMint,
   outputMint: WSOL_MINT,
   amount: '300',
+  nativeMint: WSOL_MINT,
 }), /did not increase wallet SOL/);
 
 assert.throws(() => validateSimulatedSwapEffects({
@@ -67,10 +72,11 @@ assert.throws(() => validateSimulatedSwapEffects({
   inputMint: WSOL_MINT,
   outputMint,
   amount: '50000000',
+  nativeMint: WSOL_MINT,
 }), /excessive wallet debit/);
 
 assert.throws(() => validateSimulatedSwapEffects({
-  before: snapshot(), after: snapshot(), inputMint, outputMint, amount: 'not-a-number',
+  before: snapshot(), after: snapshot(), inputMint, outputMint, amount: 'not-a-number', nativeMint: WSOL_MINT,
 }), /Invalid raw token amount/);
 
 console.log('[test_live_executor_semantics] SUCCESS: token debits, output credits, and SOL effects fail closed.');
