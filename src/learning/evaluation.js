@@ -11,7 +11,12 @@ function lessonPerformance(lessonId) {
     SELECT d.learning_lesson_ids_json, p.pnl_percent, p.pnl_sol
     FROM llm_decisions d
     JOIN dry_run_positions p ON p.llm_decision_id = d.id
-    WHERE p.status = 'closed' AND d.created_at_ms >= ?
+    WHERE p.status = 'closed'
+      AND p.execution_mode = 'shadow_live'
+      AND json_extract(p.snapshot_json, '$.shadowLiveCompatible') = 1
+      AND json_extract(p.snapshot_json, '$.simulatorVersion') = 'quote_sized_v3'
+      AND json_extract(p.snapshot_json, '$.entryQuoteMode') = 'position_sized'
+      AND d.created_at_ms >= ?
   `).all(lesson.approved_at_ms || 0).filter(row =>
     safeJson(row.learning_lesson_ids_json, []).includes(Number(lessonId))
   );
