@@ -22,6 +22,7 @@ import { createTradeIntent } from '../db/intents.js';
 import { assertLiveConfigApproved } from '../db/liveConfig.js';
 import { pauseLiveEntries } from '../health/circuitBreaker.js';
 import { assertLossStreakAllowed } from './riskControls.js';
+import { assertContractSafetyForMoneyMode } from './contractSafetyGate.js';
 
 const ENTRY_MAX_ATTEMPTS = 3;
 
@@ -76,6 +77,7 @@ export async function executeLiveBuy(selectedRow, decision, batchId, rows = [], 
   const strat = activeStrategy();
   const candidate = selectedRow.candidate;
   assertSafeLiveDecision(decision, strat);
+  await assertContractSafetyForMoneyMode(candidate, { stage: 'pre_execution' });
   const blocked = liveEntryBlockReason(candidate.token.mint, strat);
   if (blocked) throw new Error(`Live buy blocked before swap: ${blocked}`);
   const scaledSizeSol = calculatePositionSizeSol(candidate, decision, strat);
@@ -306,6 +308,7 @@ export async function executeConfirmedIntent(chatId, intentId) {
         `Failures: ${escapeHtml((freshRow.candidate.filters?.failures || []).join('; ') || 'fresh execution guard failed')}`,
       ].join('\n'), { parse_mode: 'HTML', disable_web_page_preview: true });
     }
+    await assertContractSafetyForMoneyMode(freshRow.candidate, { stage: 'pre_execution' });
     const strat = activeStrategy();
     assertSafeLiveDecision(decision, strat);
     const blocked = liveEntryBlockReason(freshRow.candidate.token.mint, strat);

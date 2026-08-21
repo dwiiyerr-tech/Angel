@@ -22,6 +22,7 @@ import { short } from '../format.js';
 import { escapeHtml } from '../format.js';
 import { fetchDryRunEntryQuote } from '../enrichment/jupiter.js';
 import { evaluateMarketAllocator, allocationAllowsCandidate } from '../execution/marketAllocator.js';
+import { applyContractSafetyGate } from '../execution/contractSafetyGate.js';
 
 // Track A: High-conviction routes that bypass PreScorer/ML/LLM for sub-second execution
 // User requested full pipeline (ML + LLM) for all routes, so this is empty.
@@ -129,6 +130,12 @@ async function _processCandidateFromSignals(signals) {
   }
 
   let candidate = await buildCandidate(signals);
+  const moneyMode = tradingMode() !== 'dry_run';
+  await applyContractSafetyGate(candidate, {
+    moneyMode,
+    stage: 'screening',
+    fetchRugcheck: moneyMode,
+  });
   const signature = signals.signature || null;
   const candidateId = upsertCandidate(candidate, signature);
 
