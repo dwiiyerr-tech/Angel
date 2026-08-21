@@ -64,13 +64,14 @@ export function validateSimulatedSwapEffects({ before, after, inputMint, outputM
   const afterLamports = lamports(after?.lamports, 'post-simulation');
   const native = String(nativeMint || 'So11111111111111111111111111111111111111112');
 
-  if (inputMint === native) {
-    const debit = Math.max(0, beforeLamports - afterLamports);
-    const maxDebit = requestedInput + BigInt(MAX_SWAP_OVERHEAD_LAMPORTS);
-    if (BigInt(debit) > maxDebit) {
-      throw new Error(`Swap simulation attempted excessive wallet debit: ${debit} lamports.`);
-    }
-  } else {
+  const nativeDebit = Math.max(0, beforeLamports - afterLamports);
+  const nativeTradeDebit = inputMint === native ? requestedInput : 0n;
+  const maxNativeDebit = nativeTradeDebit + BigInt(MAX_SWAP_OVERHEAD_LAMPORTS);
+  if (BigInt(nativeDebit) > maxNativeDebit) {
+    throw new Error(`Swap simulation attempted excessive wallet debit: ${nativeDebit} lamports.`);
+  }
+
+  if (inputMint !== native) {
     const inputBefore = tokenAmount(before, inputMint);
     const inputAfter = tokenAmount(after, inputMint);
     const inputDebit = inputBefore > inputAfter ? inputBefore - inputAfter : 0n;
@@ -108,7 +109,7 @@ export function validateSimulatedSwapEffects({ before, after, inputMint, outputM
   return {
     walletLamportDelta: afterLamports - beforeLamports,
     inputDebitRaw: inputMint === native
-      ? BigInt(Math.max(0, beforeLamports - afterLamports))
+      ? BigInt(nativeDebit)
       : tokenAmount(before, inputMint) - tokenAmount(after, inputMint),
     outputCreditRaw: outputMint === native
       ? BigInt(Math.max(0, afterLamports - beforeLamports))
