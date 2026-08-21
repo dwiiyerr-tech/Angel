@@ -24,6 +24,9 @@ jobs:
           node-version: '22.18.0'
           cache: npm
 
+      - name: Use stable npm 11
+        run: npm install --global npm@11.19.0
+
       - name: Install native build dependencies
         run: |
           sudo apt-get update
