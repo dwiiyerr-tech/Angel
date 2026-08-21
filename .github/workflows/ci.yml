@@ -29,6 +29,12 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y build-essential python3 pkg-config libcairo2-dev libpango1.0-dev libjpeg-dev libgif-dev librsvg2-dev
 
+      # Temporary while the repository lockfile drift is being repaired in a
+      # dedicated dependency PR. Generate a runner-local lock from package.json
+      # so safety changes can still execute the full test suite.
+      - name: Prepare dependency graph
+        run: npm install --package-lock-only --ignore-scripts
+
       - name: Install dependencies
         run: npm ci
 
