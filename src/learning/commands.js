@@ -29,7 +29,7 @@ export async function sendLessons(chatId) {
   `).all();
   const text = rows.length
     ? rows.map(row => `#${row.id} [${escapeHtml(row.status)} · ${escapeHtml(row.scope || 'global')} · ${escapeHtml(row.confidence || 'low')}]\n${escapeHtml(row.lesson)}\n→ ${escapeHtml(row.instruction || row.lesson)}`).join('\n\n')
-    : 'No approved or candidate lessons. A candidate needs 7 days and at least 50 closed dry-run trades.';
+    : 'No approved or candidate lessons. A candidate needs 7 days and at least 50 closed shadow-live-compatible trades.';
   return bot.sendMessage(chatId, `🧠 <b>LLM Lessons</b>\n\n${text}`, { parse_mode: 'HTML' });
 }
 
