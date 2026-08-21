@@ -26,20 +26,38 @@ import { assertContractSafetyForMoneyMode } from './contractSafetyGate.js';
 
 const ENTRY_MAX_ATTEMPTS = 3;
 
-export function assertLiveRiskBudget(nextSizeSol) {
+function normalizedRiskBudgetMode(executionMode) {
+  const normalizedMode = executionMode === 'confirm' ? 'live' : executionMode;
+  if (normalizedMode !== 'live' && normalizedMode !== 'shadow_live') {
+    throw new Error(`Hard risk budget only supports live/confirm/shadow_live modes, got: ${executionMode}`);
+  }
+  return normalizedMode;
+}
+
+export function assertLiveRiskBudget(nextSizeSol, executionMode = 'live') {
+  const mode = normalizedRiskBudgetMode(executionMode);
+  const label = mode === 'shadow_live' ? 'shadow-live' : 'live';
   const active = db.prepare(`
     SELECT count(*) AS count, coalesce(sum(size_sol), 0) AS exposure
     FROM dry_run_positions
-    WHERE execution_mode = 'live' AND status IN ('open', 'entry_unknown', 'exit_unknown', 'partial_exit_unknown')
-  `).get();
-  if (Number(active.count) >= LIVE_MAX_OPEN_POSITIONS) throw new Error(`Hard live position cap reached (${active.count}/${LIVE_MAX_OPEN_POSITIONS}).`);
-  if (Number(active.exposure) + Number(nextSizeSol) > LIVE_MAX_TOTAL_EXPOSURE_SOL) throw new Error(`Hard live exposure cap exceeded (${LIVE_MAX_TOTAL_EXPOSURE_SOL} SOL).`);
+    WHERE execution_mode = ? AND status IN ('open', 'entry_unknown', 'exit_unknown', 'partial_exit_unknown')
+  `).get(mode);
+  if (Number(active.count) >= LIVE_MAX_OPEN_POSITIONS) throw new Error(`Hard ${label} position cap reached (${active.count}/${LIVE_MAX_OPEN_POSITIONS}).`);
+  if (Number(active.exposure) + Number(nextSizeSol) > LIVE_MAX_TOTAL_EXPOSURE_SOL) throw new Error(`Hard ${label} exposure cap exceeded (${LIVE_MAX_TOTAL_EXPOSURE_SOL} SOL).`);
+
   const since = Date.now() - 24 * 60 * 60 * 1000;
-  const entries = db.prepare(`SELECT count(*) AS count FROM execution_operations WHERE side = 'buy' AND status IN ('completed', 'outcome_unknown') AND created_at_ms >= ?`).get(since).count;
-  if (Number(entries) >= LIVE_MAX_DAILY_ENTRIES) throw new Error(`Hard daily live entry cap reached (${entries}/${LIVE_MAX_DAILY_ENTRIES}).`);
-  const pnl = Number(db.prepare(`SELECT coalesce(sum(pnl_sol), 0) AS pnl FROM dry_run_positions WHERE execution_mode = 'live' AND status = 'closed' AND closed_at_ms >= ?`).get(since).pnl);
-  if (pnl <= -LIVE_MAX_DAILY_LOSS_SOL) throw new Error(`Hard daily loss limit reached (${pnl.toFixed(4)} SOL).`);
-  return { activePositions: Number(active.count), exposureSol: Number(active.exposure), dailyEntries: Number(entries), dailyPnlSol: pnl };
+  const entries = mode === 'live'
+    ? db.prepare(`SELECT count(*) AS count FROM execution_operations WHERE side = 'buy' AND status IN ('completed', 'outcome_unknown') AND created_at_ms >= ?`).get(since).count
+    : db.prepare(`SELECT count(*) AS count FROM dry_run_positions WHERE execution_mode = 'shadow_live' AND opened_at_ms >= ?`).get(since).count;
+  if (Number(entries) >= LIVE_MAX_DAILY_ENTRIES) throw new Error(`Hard daily ${label} entry cap reached (${entries}/${LIVE_MAX_DAILY_ENTRIES}).`);
+
+  const pnl = Number(db.prepare(`
+    SELECT coalesce(sum(pnl_sol), 0) AS pnl
+    FROM dry_run_positions
+    WHERE execution_mode = ? AND status = 'closed' AND closed_at_ms >= ?
+  `).get(mode, since).pnl);
+  if (pnl <= -LIVE_MAX_DAILY_LOSS_SOL) throw new Error(`Hard daily ${label} loss limit reached (${pnl.toFixed(4)} SOL).`);
+  return { executionMode: mode, activePositions: Number(active.count), exposureSol: Number(active.exposure), dailyEntries: Number(entries), dailyPnlSol: pnl };
 }
 
 export function assertSafeLiveDecision(decision, strat) {
@@ -64,8 +82,8 @@ async function executeShadowLiveBuy(selectedRow, decision, batchId, rows = [], t
   const scaledSizeSol = calculatePositionSizeSol(candidate, decision, strat);
   const amountLamports = Math.floor(scaledSizeSol * 1_000_000_000);
   if (!Number.isSafeInteger(amountLamports) || amountLamports <= 0 || scaledSizeSol > LIVE_MAX_POSITION_SOL) throw new Error(`Unsafe shadow-live position size: ${scaledSizeSol} SOL (cap ${LIVE_MAX_POSITION_SOL})`);
-  assertLiveRiskBudget(scaledSizeSol);
-  assertLossStreakAllowed('live');
+  assertLiveRiskBudget(scaledSizeSol, 'shadow_live');
+  assertLossStreakAllowed('shadow_live');
   const balance = await liveWalletBalanceLamports();
   if (balance < amountLamports + LIVE_MIN_SOL_RESERVE_LAMPORTS) throw new Error('Shadow-live insufficient SOL balance for realistic simulation including reserve.');
   if (amountLamports > balance * LIVE_MAX_WALLET_FRACTION) throw new Error(`Shadow-live position exceeds ${(LIVE_MAX_WALLET_FRACTION * 100).toFixed(0)}% wallet cap.`);
