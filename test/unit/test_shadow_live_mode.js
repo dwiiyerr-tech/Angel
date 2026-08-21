@@ -10,7 +10,8 @@ const calibration = fs.readFileSync(new URL('../../src/pipeline/llmCalibrator.js
 const evaluation = fs.readFileSync(new URL('../../src/learning/evaluation.js', import.meta.url), 'utf8');
 const simulator = fs.readFileSync(new URL('../../src/learning/simulatorVersion.js', import.meta.url), 'utf8');
 
-assert.match(positions, /'shadow_live'/);
+assert.match(positions, /mode === 'dry_run' \|\| mode === 'simulation'/);
+assert.match(positions, /return 'shadow_live'/);
 assert.match(router, /tradingMode\(\) === 'shadow_live'/);
 assert.match(router, /assertContractSafetyForMoneyMode/);
 assert.match(router, /assertLiveRiskBudget/);
@@ -31,4 +32,4 @@ for (const source of [memory, summary, calibration, evaluation]) {
 }
 assert.match(simulator, /MAX_ENTRY_QUOTE_FALLBACK_RATE = 0/);
 
-console.log('shadow-live parity and learning hygiene invariants passed');
+console.log('simulation/shadow-live parity, no-broadcast, and learning hygiene invariants passed');
