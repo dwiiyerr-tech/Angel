@@ -33,6 +33,7 @@ jobs:
       - name: Regenerate package lock from official registry
         run: |
           npm config set registry https://registry.npmjs.org/
+          rm -f package-lock.json
           npm install --package-lock-only --ignore-scripts
 
       - name: Upload generated lockfile
