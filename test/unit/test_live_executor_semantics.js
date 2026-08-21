@@ -6,6 +6,7 @@ console.log('[test_live_executor_semantics] Starting simulated swap semantic tes
 
 // These cases validate wallet effects before a signed Jupiter transaction is
 // broadcast, so any unexpected asset debit must fail closed at simulation time.
+// This suite is also the final integration gate after syncing onto main.
 const inputMint = 'InputMint111111111111111111111111111111111';
 const outputMint = 'OutputMint11111111111111111111111111111111';
 const unrelatedMint = 'OtherMint111111111111111111111111111111111';
