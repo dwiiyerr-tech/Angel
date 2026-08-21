@@ -56,8 +56,9 @@ setSetting('loss_streak_size_multiplier', '0.5');
 const insertClosedPosition = db.prepare(`
   INSERT INTO dry_run_positions (
     candidate_id, mint, symbol, status, opened_at_ms, closed_at_ms, size_sol,
-    pnl_percent, pnl_sol, execution_mode
-  ) VALUES (NULL, ?, ?, 'closed', ?, ?, 0.01, ?, ?, ?)
+    tp_percent, sl_percent, trailing_enabled, trailing_percent,
+    pnl_percent, pnl_sol, execution_mode, snapshot_json
+  ) VALUES (NULL, ?, ?, 'closed', ?, ?, 0.01, 60, -15, 0, 20, ?, ?, ?, '{}')
 `);
 for (let i = 0; i < 3; i++) {
   const at = Date.now() - i * 1000;
