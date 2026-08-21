@@ -14,6 +14,11 @@ import {
   WSOL_MINT,
 } from './config.js';
 import { rateLimiter, REQUEST_PRIORITY } from './enrichment/rateLimiter.js';
+import {
+  MAX_SWAP_VALIDATION_ACCOUNTS,
+  validateSimulatedSwapEffects,
+  walletTokenBalancesFromAccounts,
+} from './execution/swapValidation.js';
 
 let liveWallet = null;
 let solanaConnection = null;
@@ -100,24 +105,68 @@ function signTransaction(transactionBase64) {
   return { tx, base64: Buffer.from(tx.serialize()).toString('base64') };
 }
 
-async function simulateAndValidateTransaction(tx, { inputMint, amount }) {
+async function transactionValidationAddresses(tx) {
+  const addressLookupTableAccounts = [];
+  for (const lookup of tx.message.addressTableLookups || []) {
+    const resolved = await solanaConnection.getAddressLookupTable(lookup.accountKey, { commitment: 'confirmed' });
+    if (!resolved?.value) throw new Error(`Swap validation could not resolve lookup table ${lookup.accountKey.toBase58()}.`);
+    addressLookupTableAccounts.push(resolved.value);
+  }
+  const accountKeys = tx.message.getAccountKeys({ addressLookupTableAccounts });
+  const addresses = [liveWallet.publicKey.toBase58()];
+  for (let index = 0; index < accountKeys.length; index += 1) {
+    if (!tx.message.isAccountWritable(index)) continue;
+    const key = accountKeys.get(index);
+    if (key) addresses.push(key.toBase58());
+  }
+  const unique = [...new Set(addresses)];
+  if (unique.length > MAX_SWAP_VALIDATION_ACCOUNTS) {
+    throw new Error(`Swap validation requires ${unique.length} accounts, above the safe limit of ${MAX_SWAP_VALIDATION_ACCOUNTS}.`);
+  }
+  return unique;
+}
+
+async function simulateAndValidateTransaction(tx, { inputMint, outputMint, amount }) {
   const walletAddress = liveWallet.publicKey.toBase58();
-  const balanceBefore = await solanaConnection.getBalance(liveWallet.publicKey, 'confirmed');
+  const addresses = await transactionValidationAddresses(tx);
+  const publicKeys = addresses.map(address => new PublicKey(address));
+  const beforeAccounts = await solanaConnection.getMultipleAccountsInfo(publicKeys, 'confirmed');
+  const walletIndex = addresses.indexOf(walletAddress);
+  const walletBefore = beforeAccounts[walletIndex];
+  if (!walletBefore || !Number.isSafeInteger(Number(walletBefore.lamports))) {
+    throw new Error('Swap validation could not read the pre-simulation wallet balance.');
+  }
+
   const simulation = await solanaConnection.simulateTransaction(tx, {
     sigVerify: true,
     replaceRecentBlockhash: false,
     commitment: 'confirmed',
-    accounts: { encoding: 'base64', addresses: [walletAddress] },
+    accounts: { encoding: 'base64', addresses },
   });
   if (simulation.value.err) throw new Error(`Swap simulation failed: ${JSON.stringify(simulation.value.err)}`);
-  const balanceAfter = Number(simulation.value.accounts?.[0]?.lamports);
-  if (!Number.isFinite(balanceAfter)) throw new Error('Swap simulation did not return the wallet balance.');
-  const debit = Math.max(0, balanceBefore - balanceAfter);
-  const tradeDebit = inputMint === WSOL_MINT ? Number(amount) : 0;
-  const maxOverheadLamports = 10_000_000; // fees + ATA/rent ceiling (0.01 SOL)
-  if (debit > tradeDebit + maxOverheadLamports) {
-    throw new Error(`Swap simulation attempted excessive wallet debit: ${debit} lamports.`);
+  const afterAccounts = simulation.value.accounts;
+  if (!Array.isArray(afterAccounts) || afterAccounts.length !== addresses.length) {
+    throw new Error('Swap simulation did not return the requested account state.');
   }
+  const walletAfter = afterAccounts[walletIndex];
+  if (!walletAfter || !Number.isSafeInteger(Number(walletAfter.lamports))) {
+    throw new Error('Swap simulation did not return the post-simulation wallet balance.');
+  }
+
+  validateSimulatedSwapEffects({
+    before: {
+      lamports: Number(walletBefore.lamports),
+      tokens: walletTokenBalancesFromAccounts(beforeAccounts, walletAddress),
+    },
+    after: {
+      lamports: Number(walletAfter.lamports),
+      tokens: walletTokenBalancesFromAccounts(afterAccounts, walletAddress),
+    },
+    inputMint,
+    outputMint,
+    amount,
+    nativeMint: WSOL_MINT,
+  });
 }
 
 async function jupiterExecute(order, signedTransaction) {
@@ -133,11 +182,6 @@ async function jupiterExecute(order, signedTransaction) {
     }), 'jupiter', REQUEST_PRIORITY.ENTRY_EXIT);
     return res.data;
   } catch (error) {
-    // Once /execute has been submitted, a timeout or transport failure does
-    // not prove the transaction failed. Retrying with a new order can create
-    // a duplicate fill, so callers must treat this outcome as ambiguous.
-    // Any failure after submitting /execute is ambiguous. Even an HTTP error
-    // can be returned after the provider broadcast the transaction.
     error.swapOutcomeUnknown = true;
     error.swapStage = 'execute';
     error.swapRequestId = order.requestId || null;
@@ -174,10 +218,7 @@ export async function executeJupiterSwap({ inputMint, outputMint, amount }) {
   const transaction = orderTransactionBase64(order);
   if (!transaction) throw new Error('Jupiter order did not include a transaction.');
   const signed = signTransaction(transaction);
-  await simulateAndValidateTransaction(signed.tx, { inputMint, amount });
-  // Jito's block-engine sendTransaction is an optional MEV-protected broadcast.
-  // It is fail-closed when enabled: do not silently fall back to a public RPC
-  // after submission, which could create an ambiguous duplicate execution.
+  await simulateAndValidateTransaction(signed.tx, { inputMint, outputMint, amount });
   const executed = JITO_ENABLED
     ? await jitoSendTransaction(signed.base64)
     : await jupiterExecute(order, signed.base64);
@@ -228,7 +269,6 @@ export async function executeJupiterSwap({ inputMint, outputMint, amount }) {
     executed,
     signature,
     inputAmount: String(amount),
-    // Never treat a pre-trade quote as the amount actually received.
     outputAmount: String(executed?.outputAmountResult || executed?.totalOutputAmount || ''),
     feeLamports,
     feeSol: feeLamports == null ? 0 : feeLamports / 1_000_000_000,
