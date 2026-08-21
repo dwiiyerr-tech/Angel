@@ -4,7 +4,7 @@ on:
   pull_request:
     branches: [main]
   push:
-    branches: [main, fix/jupiter-simulation-guard]
+    branches: [main]
 
 permissions:
   contents: read
@@ -32,6 +32,9 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y build-essential python3 pkg-config libcairo2-dev libpango1.0-dev libjpeg-dev libgif-dev librsvg2-dev
 
+      # Temporary while the repository lockfile drift is being repaired in a
+      # dedicated dependency PR. Generate a runner-local fresh lock from the
+      # official registry so safety changes can execute the full test suite.
       - name: Prepare dependency graph
         run: |
           npm config set registry https://registry.npmjs.org/
