@@ -81,7 +81,12 @@ export function liveEntryBlockReason(mint, strat = activeStrategy()) {
 
 export function tradingMode() {
   const mode = setting('trading_mode', 'dry_run');
-  return ['dry_run', 'shadow_live', 'confirm', 'live'].includes(mode) ? mode : 'dry_run';
+  // Publicly dry-run and shadow-live are now one Simulation mode. Keep the
+  // historical shadow_live execution label internally so verified simulation
+  // data remains isolated from real-money live history and existing learning
+  // queries continue to work without a destructive migration.
+  if (mode === 'dry_run' || mode === 'simulation') return 'shadow_live';
+  return ['shadow_live', 'confirm', 'live'].includes(mode) ? mode : 'shadow_live';
 }
 
 export function allPositions(limit = 10) {
@@ -100,7 +105,7 @@ export function positionSizeBreakdown(candidate, decision, strat = activeStrateg
     : 0;
   const sessionMultiplier = utcHour >= 12 && utcHour <= 18 ? 0.5 : 1;
   const regimeMultiplier = 1;
-  const lossRisk = riskControlState(setting('trading_mode', 'dry_run'));
+  const lossRisk = riskControlState(tradingMode());
   const unconstrainedSizeSol = Math.max(0, baseAfterConfidence * riskMultiplier * sourceWeight * sessionMultiplier * lossRisk.sizeMultiplier);
   const stopDistanceFraction = Math.abs(Number(decision?.suggested_sl_percent ?? strat?.sl_percent ?? numSetting('default_sl_percent', -25))) / 100;
   const riskBudgetSol = Math.max(0, numSetting('risk_per_trade_sol', RISK_PER_TRADE_SOL));
