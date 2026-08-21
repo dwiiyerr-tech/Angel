@@ -5,6 +5,7 @@ import { storeLearningRun } from '../../src/learning/lessons.js';
 import { activeLessonsForPrompt } from '../../src/pipeline/llm.js';
 import { momentumFilter } from '../../src/pipeline/momentumFilter.js';
 import { riskControlState, assertLossStreakAllowed } from '../../src/execution/riskControls.js';
+import { LIVE_SETTING_KEYS } from '../../src/db/liveConfig.js';
 
 process.env.TELEGRAM_POLLING = 'false';
 const { assertLiveRiskBudget, assertSafeLiveDecision } = await import('../../src/execution/router.js');
@@ -22,6 +23,10 @@ const insertOperation = db.prepare(`
 for (let i = 0; i < 5; i++) insertOperation.run(`DailyCapMint${i}`, Date.now(), Date.now());
 assert.throws(() => assertLiveRiskBudget(0.01), /daily live entry cap/);
 db.prepare('DELETE FROM execution_operations').run();
+
+for (const key of ['max_entry_sl_percent', 'min_entry_tp_percent', 'min_executable_position_sol', 'min_opportunity_size_multiplier']) {
+  assert.equal(LIVE_SETTING_KEYS.has(key), true, `${key} must invalidate live approval when changed`);
+}
 
 const summary49 = { positions: { closed: 49 } };
 const insufficientRun = storeLearningRun(7 * 24 * 60 * 60 * 1000, summary49, [{ lesson: 'weak evidence', evidence: {} }], {});
@@ -65,5 +70,5 @@ assert.equal(confirmRisk.paused, true, 'confirm mode must inherit live loss paus
 assert.equal(confirmRisk.sizeMultiplier, 0, 'paused money mode must calculate a zero-sized entry');
 assert.throws(() => assertLossStreakAllowed('confirm'), /Entry paused after 3 consecutive losses/);
 
-console.log('[test_live_money_safety] SUCCESS: hard budgets, lesson approval gate, live ML fail-closed, and confirm-mode loss controls verified.');
+console.log('[test_live_money_safety] SUCCESS: hard budgets, live approval fingerprint, lesson approval gate, live ML fail-closed, and confirm-mode loss controls verified.');
 process.exit(0);
