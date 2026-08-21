@@ -11,15 +11,20 @@ export async function runLLMCalibration() {
 
     const query = `
       SELECT p.pnl_percent, l.confidence
-      FROM llm_decisions l 
-      JOIN dry_run_positions p ON l.id = p.llm_decision_id 
-      WHERE l.verdict = 'BUY' AND p.status = 'closed' AND l.created_at_ms > ?
+      FROM llm_decisions l
+      JOIN dry_run_positions p ON l.id = p.llm_decision_id
+      WHERE l.verdict = 'BUY'
+        AND p.status = 'closed'
+        AND p.execution_mode = 'shadow_live'
+        AND json_extract(p.snapshot_json, '$.shadowLiveCompatible') = 1
+        AND json_extract(p.snapshot_json, '$.entryQuoteMode') = 'position_sized'
+        AND l.created_at_ms > ?
         AND json_extract(p.snapshot_json, '$.simulatorVersion') = ?
     `;
-    
+
     const decisions = db.prepare(query).all(now - 7 * 24 * 3600 * 1000, DRY_RUN_SIMULATOR_VERSION);
-    if (decisions.length < 5) return 'Not enough closed trades (need 5)';
-    
+    if (decisions.length < 5) return 'Not enough closed shadow-live trades (need 5)';
+
     const wins = decisions.filter(row => Number(row.pnl_percent) > 0).length;
     const winRate = wins / decisions.length;
     const brier = decisions.reduce((sum, row) => {
@@ -46,14 +51,12 @@ export async function runLLMCalibration() {
     setSetting('llm_calibration_brier', brier.toString());
     setSetting('llm_calibration_ece', ece.toString());
     setSetting('last_llm_calibration_ms', now.toString());
-    
+
     let msg = `BUY outcome audit: win rate ${(winRate * 100).toFixed(1)}% (${wins}/${decisions.length}), Brier ${brier.toFixed(3)}, ECE ${(ece * 100).toFixed(1)}%`;
-    
     if (winRate < 0.35 || ece > 0.2) {
       msg += '\n⚠️ Warning: BUY outcomes are weak or confidence is poorly calibrated. Review prompt lessons; no setting was changed.';
       await sendTelegram(msg);
     }
-    
     return msg;
   } catch (err) {
     console.error('LLM calibration failed:', err);
@@ -62,6 +65,6 @@ export async function runLLMCalibration() {
 }
 
 export function startLLMCalibrator() {
-  setTimeout(runLLMCalibration, 10 * 60 * 1000); // First run 10 min after boot
+  setTimeout(runLLMCalibration, 10 * 60 * 1000);
   setInterval(runLLMCalibration, 24 * 60 * 60 * 1000);
 }
