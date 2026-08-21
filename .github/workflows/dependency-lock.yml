@@ -1,18 +1,16 @@
-name: CI
+name: Dependency Security CI
 
 on:
   pull_request:
-    branches: [main]
-  push:
     branches: [main]
 
 permissions:
   contents: read
 
 jobs:
-  check:
+  validate:
     runs-on: ubuntu-latest
-    timeout-minutes: 15
+    timeout-minutes: 20
 
     steps:
       - name: Checkout
@@ -22,6 +20,7 @@ jobs:
         uses: actions/setup-node@v4
         with:
           node-version: '22.18.0'
+          registry-url: 'https://registry.npmjs.org'
           cache: npm
 
       - name: Use stable npm 11
@@ -32,17 +31,14 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y build-essential python3 pkg-config libcairo2-dev libpango1.0-dev libjpeg-dev libgif-dev librsvg2-dev
 
-      # Temporary while the repository lockfile drift is being repaired in a
-      # dedicated dependency PR. Generate a runner-local fresh lock from the
-      # official registry so safety changes can execute the full test suite.
-      - name: Prepare dependency graph
-        run: |
-          npm config set registry https://registry.npmjs.org/
-          rm -f package-lock.json
-          npm install --package-lock-only --ignore-scripts
-
-      - name: Install dependencies
+      - name: Clean install from committed lockfile
         run: npm ci
 
       - name: Lint and unit tests
         run: npm run check
+
+      - name: Dependency audit
+        run: npm audit --audit-level=high
+
+      - name: Verify registry signatures
+        run: npm audit signatures
