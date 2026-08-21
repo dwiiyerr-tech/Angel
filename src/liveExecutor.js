@@ -108,7 +108,7 @@ function signTransaction(transactionBase64) {
 async function transactionValidationAddresses(tx) {
   const addressLookupTableAccounts = [];
   for (const lookup of tx.message.addressTableLookups || []) {
-    const resolved = await solanaConnection.getAddressLookupTable(lookup.accountKey, 'confirmed');
+    const resolved = await solanaConnection.getAddressLookupTable(lookup.accountKey, { commitment: 'confirmed' });
     if (!resolved?.value) throw new Error(`Swap validation could not resolve lookup table ${lookup.accountKey.toBase58()}.`);
     addressLookupTableAccounts.push(resolved.value);
   }
