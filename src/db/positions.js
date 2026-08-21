@@ -32,9 +32,6 @@ export function decrementPendingPosition() {
   pendingPositionCount = Math.max(0, pendingPositionCount - 1);
 }
 
-// Reserve a position slot synchronously before any async refresh/execution.
-// JavaScript runs this check-and-increment without an await boundary, so
-// concurrent candidates cannot all claim the same slot.
 export function tryReservePositionSlot() {
   const strat = activeStrategy();
   const max = strat.max_open_positions ?? numSetting('max_open_positions', 3);
@@ -84,7 +81,7 @@ export function liveEntryBlockReason(mint, strat = activeStrategy()) {
 
 export function tradingMode() {
   const mode = setting('trading_mode', 'dry_run');
-  return ['dry_run', 'confirm', 'live'].includes(mode) ? mode : 'dry_run';
+  return ['dry_run', 'shadow_live', 'confirm', 'live'].includes(mode) ? mode : 'dry_run';
 }
 
 export function allPositions(limit = 10) {
@@ -98,15 +95,10 @@ export function positionSizeBreakdown(candidate, decision, strat = activeStrateg
   const riskMultiplier = totalRiskSeverity >= 4 ? 0.25 : totalRiskSeverity >= 2 ? 0.5 : 1;
   const rawSourceWeight = Number(candidate.filters?.sourceWeight ?? 1);
   const minimumOpportunityWeight = Math.max(0, Math.min(1, numSetting('min_opportunity_size_multiplier', 0.35)));
-  // A passed candidate must not be reduced repeatedly by correlated soft
-  // opportunity scores. Zero remains zero (hard/no-route rejection); positive
-  // weights share one conservative floor. Independent safety risk still applies.
   const sourceWeight = Number.isFinite(rawSourceWeight)
     ? rawSourceWeight > 0 ? Math.max(minimumOpportunityWeight, Math.min(1, rawSourceWeight)) : 0
     : 0;
   const sessionMultiplier = utcHour >= 12 && utcHour <= 18 ? 0.5 : 1;
-  // Regime learning is advisory only. It must not mutate money sizing outside
-  // the reviewed learning/approval pipeline.
   const regimeMultiplier = 1;
   const lossRisk = riskControlState(setting('trading_mode', 'dry_run'));
   const unconstrainedSizeSol = Math.max(0, baseAfterConfidence * riskMultiplier * sourceWeight * sessionMultiplier * lossRisk.sizeMultiplier);
@@ -162,7 +154,6 @@ export function createDryRunPosition(candidateId, candidate, decision, reason = 
     `).get(candidate.token.mint);
     if (existing) return { id: existing.id, isNew: false };
 
-    // Dedup: block re-entry if this token has been closed within 24 hours
     const recentClosed = db.prepare(`
       SELECT id FROM dry_run_positions WHERE mint = ? AND status = 'closed' AND closed_at_ms > ? LIMIT 1
     `).get(candidate.token.mint, now() - 86400000);
@@ -171,16 +162,9 @@ export function createDryRunPosition(candidateId, candidate, decision, reason = 
       return { id: recentClosed.id, isNew: false };
     }
 
-    // Block re-entry if this mint had a winning trade in the last WIN_BLOCK_DAYS days (avoid round-trip losses)
-    const WIN_BLOCK_DAYS_BY_STRATEGY = {
-      sniper: 2,
-      dip_buy: 5,
-      smart_money: 3,
-      degen: 1
-    };
+    const WIN_BLOCK_DAYS_BY_STRATEGY = { sniper: 2, dip_buy: 5, smart_money: 3, degen: 1 };
     const stratId = strat.id || 'default';
     const WIN_BLOCK_DAYS = strat.win_block_days ?? WIN_BLOCK_DAYS_BY_STRATEGY[stratId] ?? numSetting('win_block_days', 7);
-
     const pastWin = db.prepare(`
       SELECT id, pnl_sol, closed_at_ms FROM dry_run_positions
       WHERE mint = ? AND status = 'closed' AND pnl_percent > 0
@@ -199,23 +183,9 @@ export function createDryRunPosition(candidateId, candidate, decision, reason = 
         trailing_enabled, trailing_percent, trailing_armed, llm_decision_id, strategy_id, entry_fee_sol, snapshot_json
       ) VALUES (?, ?, ?, 'open', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0, ?, ?, ?, ?)
     `).run(
-      candidateId,
-      candidate.token.mint,
-      candidate.token.symbol,
-      now(),
-      finalSize,
-      entryPrice,
-      entryMcap,
+      candidateId, candidate.token.mint, candidate.token.symbol, now(), finalSize, entryPrice, entryMcap,
       Number(entryQuote?.tokenAmount) > 0 ? Number(entryQuote.tokenAmount) : null,
-      entryPrice,
-      entryMcap,
-      tp,
-      sl,
-      trailingEnabled,
-      trailingPercent,
-      decision.id || null,
-      strat.id,
-      entryFeeSol,
+      entryPrice, entryMcap, tp, sl, trailingEnabled, trailingPercent, decision.id || null, strat.id, entryFeeSol,
       json({
         candidate, decision, reason, strategy: strat.id, sizing, entryQuote,
         strategyFamily: candidate.signals?.strategyFamily || candidate.strategyFamily || 'edge1',
@@ -226,9 +196,7 @@ export function createDryRunPosition(candidateId, candidate, decision, reason = 
       }),
     );
     const positionId = Number(result.lastInsertRowid);
-    if (entryQuote?.outputAmountRaw) {
-      db.prepare('UPDATE dry_run_positions SET token_amount_raw = ? WHERE id = ?').run(String(entryQuote.outputAmountRaw), positionId);
-    }
+    if (entryQuote?.outputAmountRaw) db.prepare('UPDATE dry_run_positions SET token_amount_raw = ? WHERE id = ?').run(String(entryQuote.outputAmountRaw), positionId);
     db.prepare(`
       INSERT INTO dry_run_trades (position_id, mint, side, at_ms, price, mcap, size_sol, token_amount_est, reason, payload_json)
       VALUES (?, ?, 'buy', ?, ?, ?, ?, ?, ?, ?)
@@ -243,10 +211,7 @@ export function createDryRunPosition(candidateId, candidate, decision, reason = 
 
 export function createLivePosition(candidateId, candidate, decision, swap, reason = 'live_buy', sizeSolOverride = null) {
   const strat = activeStrategy();
-  const sizeSol = Number.isFinite(Number(sizeSolOverride))
-    ? Number(sizeSolOverride)
-    : calculatePositionSizeSol(candidate, decision, strat);
-
+  const sizeSol = Number.isFinite(Number(sizeSolOverride)) ? Number(sizeSolOverride) : calculatePositionSizeSol(candidate, decision, strat);
   const entryPrice = Number(candidate.metrics.priceUsd || 0) || null;
   const entryMcap = Number(candidate.metrics.marketCapUsd || candidate.metrics.graduatedMarketCapUsd || 0) || null;
   const tp = Number(decision.suggested_tp_percent || strat.tp_percent || numSetting('default_tp_percent', 50));
@@ -255,40 +220,15 @@ export function createLivePosition(candidateId, candidate, decision, swap, reaso
   const trailingPercent = strat.trailing_percent ?? numSetting('default_trailing_percent', 20);
 
   return db.transaction(() => {
-    const existing = db.prepare(`
-      SELECT id FROM dry_run_positions WHERE mint = ? AND status = 'open' LIMIT 1
-    `).get(candidate.token.mint);
+    const existing = db.prepare(`SELECT id FROM dry_run_positions WHERE mint = ? AND status = 'open' LIMIT 1`).get(candidate.token.mint);
     if (existing) return { id: existing.id, isNew: false };
-
-    // Dedup: block re-entry if this token has been closed within 24 hours
-    const recentClosed = db.prepare(`
-      SELECT id FROM dry_run_positions WHERE mint = ? AND status = 'closed' AND closed_at_ms > ? LIMIT 1
-    `).get(candidate.token.mint, now() - 86400000);
-    if (recentClosed) {
-      console.log(`[positions] blocked re-entry ${candidate.token.symbol} (${candidate.token.mint.slice(0, 8)}) — closed <24h ago (live)`);
-      return { id: recentClosed.id, isNew: false };
-    }
-
-    // Block re-entry if this mint ever had a winning trade (avoid round-trip losses)
-    const WIN_BLOCK_DAYS_BY_STRATEGY = {
-      sniper: 2,
-      dip_buy: 5,
-      smart_money: 3,
-      degen: 1
-    };
+    const recentClosed = db.prepare(`SELECT id FROM dry_run_positions WHERE mint = ? AND status = 'closed' AND closed_at_ms > ? LIMIT 1`).get(candidate.token.mint, now() - 86400000);
+    if (recentClosed) return { id: recentClosed.id, isNew: false };
+    const WIN_BLOCK_DAYS_BY_STRATEGY = { sniper: 2, dip_buy: 5, smart_money: 3, degen: 1 };
     const stratId = strat.id || 'default';
     const WIN_BLOCK_DAYS = strat.win_block_days ?? WIN_BLOCK_DAYS_BY_STRATEGY[stratId] ?? numSetting('win_block_days', 7);
-
-    const pastWin = db.prepare(`
-      SELECT id FROM dry_run_positions
-      WHERE mint = ? AND status = 'closed' AND pnl_percent > 0
-        AND closed_at_ms > ? LIMIT 1
-    `).get(candidate.token.mint, now() - WIN_BLOCK_DAYS * 86400000);
-    if (pastWin) {
-      console.log(`[positions] blocked re-entry ${candidate.token.symbol} (${candidate.token.mint.slice(0, 8)}) — past WIN exists (live)`);
-      return { id: pastWin.id, isNew: false };
-    }
-
+    const pastWin = db.prepare(`SELECT id FROM dry_run_positions WHERE mint = ? AND status = 'closed' AND pnl_percent > 0 AND closed_at_ms > ? LIMIT 1`).get(candidate.token.mint, now() - WIN_BLOCK_DAYS * 86400000);
+    if (pastWin) return { id: pastWin.id, isNew: false };
     const result = db.prepare(`
       INSERT INTO dry_run_positions (
         candidate_id, mint, symbol, status, opened_at_ms, size_sol, entry_price, entry_mcap,
@@ -297,36 +237,14 @@ export function createLivePosition(candidateId, candidate, decision, swap, reaso
         execution_mode, entry_signature, token_amount_raw, strategy_id, entry_fee_sol, snapshot_json
       ) VALUES (?, ?, ?, 'open', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0, ?, 'live', ?, ?, ?, ?, ?)
     `).run(
-      candidateId,
-      candidate.token.mint,
-      candidate.token.symbol,
-      now(),
-      sizeSol,
-      entryPrice,
-      entryMcap,
-      null,
-      entryPrice,
-      entryMcap,
-      tp,
-      sl,
-      trailingEnabled,
-      trailingPercent,
-      decision.id || null,
-      swap.signature,
-      swap.outputAmount || null,
-      strat.id,
-      Number(swap.feeSol || 0),
+      candidateId, candidate.token.mint, candidate.token.symbol, now(), sizeSol, entryPrice, entryMcap, null,
+      entryPrice, entryMcap, tp, sl, trailingEnabled, trailingPercent, decision.id || null,
+      swap.signature, swap.outputAmount || null, strat.id, Number(swap.feeSol || 0),
       json({ candidate, decision, reason, swap, strategy: strat.id, strategyFamily: candidate.signals?.strategyFamily || candidate.strategyFamily || 'edge1' }),
     );
     const positionId = Number(result.lastInsertRowid);
-    db.prepare(`
-      INSERT INTO dry_run_trades (position_id, mint, side, at_ms, price, mcap, size_sol, token_amount_est, reason, payload_json)
-      VALUES (?, ?, 'buy', ?, ?, ?, ?, ?, ?, ?)
-    `).run(positionId, candidate.token.mint, now(), entryPrice, entryMcap, sizeSol, null, reason, json({ candidateId, decision, swap }));
-    db.prepare(`
-      INSERT INTO tp_sl_rules (position_id, tp_percent, sl_percent, trailing_enabled, trailing_percent, updated_at_ms)
-      VALUES (?, ?, ?, ?, ?, ?)
-    `).run(positionId, tp, sl, trailingEnabled, trailingPercent, now());
+    db.prepare(`INSERT INTO dry_run_trades (position_id, mint, side, at_ms, price, mcap, size_sol, token_amount_est, reason, payload_json) VALUES (?, ?, 'buy', ?, ?, ?, ?, ?, ?, ?)`).run(positionId, candidate.token.mint, now(), entryPrice, entryMcap, sizeSol, null, reason, json({ candidateId, decision, swap }));
+    db.prepare(`INSERT INTO tp_sl_rules (position_id, tp_percent, sl_percent, trailing_enabled, trailing_percent, updated_at_ms) VALUES (?, ?, ?, ?, ?, ?)`).run(positionId, tp, sl, trailingEnabled, trailingPercent, now());
     return { id: positionId, isNew: true };
   })();
 }
