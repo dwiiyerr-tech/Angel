@@ -4,6 +4,8 @@ import { WSOL_MINT } from '../../src/config.js';
 
 console.log('[test_live_executor_semantics] Starting simulated swap semantic tests...');
 
+// These cases validate wallet effects before a signed Jupiter transaction is
+// broadcast, so any unexpected asset debit must fail closed at simulation time.
 const inputMint = 'InputMint111111111111111111111111111111111';
 const outputMint = 'OutputMint11111111111111111111111111111111';
 const unrelatedMint = 'OtherMint111111111111111111111111111111111';
