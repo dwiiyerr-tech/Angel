@@ -9,6 +9,8 @@ import { hunterPolicy } from '../pipeline/hunterPolicy.js';
 
 export const RESEARCH_SIMULATOR_VERSION = 'zero_capital_quote_v1';
 
+let pendingResearchPositionCount = 0;
+
 function boundedPositive(value, fallback, min = 0.001, max = 1) {
   const n = Number(value);
   if (!Number.isFinite(n) || n <= 0) return fallback;
@@ -23,7 +25,7 @@ export function researchPositionCap() {
   return Math.max(1, Math.min(100, Math.floor(numSetting('research_max_open_positions', 12))));
 }
 
-export function openResearchPositionCount() {
+function persistedResearchPositionCount() {
   ensureResearchSchema();
   return Number(db.prepare(`
     SELECT COUNT(*) AS count
@@ -32,8 +34,31 @@ export function openResearchPositionCount() {
   `).get()?.count || 0);
 }
 
+export function openResearchPositionCount() {
+  return persistedResearchPositionCount() + pendingResearchPositionCount;
+}
+
+export function pendingResearchPositions() {
+  return pendingResearchPositionCount;
+}
+
 export function canOpenResearchPosition() {
   return openResearchPositionCount() < researchPositionCap();
+}
+
+export function tryReserveResearchPositionSlot() {
+  const max = researchPositionCap();
+  if (openResearchPositionCount() >= max) return false;
+  pendingResearchPositionCount += 1;
+  return true;
+}
+
+export function releaseResearchPositionSlot() {
+  pendingResearchPositionCount = Math.max(0, pendingResearchPositionCount - 1);
+}
+
+export function resetResearchCapacityForTests() {
+  pendingResearchPositionCount = 0;
 }
 
 export function researchQuoteLadder(referenceNotional = researchReferenceNotionalSol()) {
@@ -245,12 +270,16 @@ export function createResearchPosition(candidateId, candidate, decision, quoteBu
 }
 
 export async function executeResearchEntry(selectedRow, decision, reason = 'research_zero_capital') {
-  if (!canOpenResearchPosition()) {
+  if (!tryReserveResearchPositionSlot()) {
     return { id: null, isNew: false, blockedBy: 'research_position_cap' };
   }
-  const notional = researchReferenceNotionalSol();
-  const quoteBundle = await fetchResearchQuoteLadder(selectedRow.candidate, notional);
-  return createResearchPosition(selectedRow.id, selectedRow.candidate, decision, quoteBundle, reason);
+  try {
+    const notional = researchReferenceNotionalSol();
+    const quoteBundle = await fetchResearchQuoteLadder(selectedRow.candidate, notional);
+    return createResearchPosition(selectedRow.id, selectedRow.candidate, decision, quoteBundle, reason);
+  } finally {
+    releaseResearchPositionSlot();
+  }
 }
 
 export function recordResearchObservation(positionId, result) {
