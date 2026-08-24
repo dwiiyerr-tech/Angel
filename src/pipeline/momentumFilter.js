@@ -38,8 +38,8 @@ function attachEdgeEvidence(candidate, momentumScore) {
 
 /**
  * Score a candidate using the ML service.
- * Research remains fail-open, but missing ML is represented as score=-1 rather
- * than fake bullish momentum. Money-grade modes remain fail-closed upstream.
+ * Research remains fail-open, but unavailable ML is represented as score=-1
+ * instead of fake bullish momentum. Money-grade modes remain fail-closed upstream.
  * Runner/Route edge evidence is attached after every outcome when possible.
  */
 export async function momentumFilter(candidate, threshold = DEFAULT_THRESHOLD) {
@@ -47,12 +47,13 @@ export async function momentumFilter(candidate, threshold = DEFAULT_THRESHOLD) {
   const mint = candidate.token?.mint?.slice(0, 8) || 'unknown';
   const failClosed = setting('trading_mode', 'dry_run') !== 'dry_run';
 
+  // The current Momentum model was trained on GMGN price-history features. A
+  // Jupiter spot price is not a substitute for those historical inputs.
   const price = candidate.gmgn?.price || {};
-  const jupiterPrice = Number(candidate?.jupiterAsset?.usdPrice || candidate?.metrics?.priceUsd || 0);
-  if (!price.price && !price.price_1h && !(jupiterPrice > 0)) {
-    console.log(`[momentum] ${mint}... no price data — ${failClosed ? 'reject' : 'research pass'}`);
+  if (!price.price && !price.price_1h) {
+    console.log(`[momentum] ${mint}... model features unavailable — ${failClosed ? 'reject' : 'research pass'}`);
     const edge = attachEdgeEvidence(candidate, -1);
-    return { passed: !failClosed, score: -1, reason: 'no_price_data', edge };
+    return { passed: !failClosed, score: -1, reason: 'no_price_history_features', edge };
   }
 
   try {
