@@ -40,7 +40,7 @@ assert.equal(qualityScoreCandidate({}).dataQuality, 'LOW', 'missing quality data
 // Integration invariant: whatever Research history happens to exist in the shared
 // test DB, the live assessment path must always return a finite opportunity state
 // and must degrade unavailable probability models instead of throwing/vetoing.
-const integrationAssessment = assessCandidateEdge(structuredClone(strongCandidate));
+const integrationAssessment = assessCandidateEdge(JSON.parse(JSON.stringify(strongCandidate)));
 assert.equal(integrationAssessment.quality.dataQuality, 'HIGH');
 assert.ok(Number.isFinite(integrationAssessment.combined.opportunityProbability));
 assert.ok(['LOW', 'MEDIUM', 'HIGH'].includes(integrationAssessment.combined.evidenceQuality));
