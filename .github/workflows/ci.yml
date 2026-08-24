@@ -52,6 +52,11 @@ jobs:
           DB_PATH: /tmp/angel-control-plane-report.sqlite
         run: npm run control:report
 
+      - name: Fast Hunter latency report smoke test
+        env:
+          DB_PATH: /tmp/angel-fast-hunter-report.sqlite
+        run: npm run fast:report
+
   python-syntax:
     name: Python syntax
     runs-on: ubuntu-latest
