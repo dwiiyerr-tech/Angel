@@ -47,6 +47,11 @@ jobs:
           DB_PATH: /tmp/angel-edge-report.sqlite
         run: npm run edge:report
 
+      - name: Strategy control-plane report smoke test
+        env:
+          DB_PATH: /tmp/angel-control-plane-report.sqlite
+        run: npm run control:report
+
   python-syntax:
     name: Python syntax
     runs-on: ubuntu-latest
