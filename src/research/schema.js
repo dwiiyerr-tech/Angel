@@ -17,6 +17,16 @@ const POSITION_COLUMNS = {
   time_to_mae_ms: 'INTEGER',
   research_data_quality: 'TEXT',
   research_quote_ladder_json: 'TEXT',
+  research_execution_cost_json: 'TEXT',
+  entry_latency_ms: 'INTEGER',
+  entry_quote_deterioration_pct: 'REAL',
+  entry_roundtrip_spread_pct: 'REAL',
+  entry_size_impact_pct: 'REAL',
+  entry_priority_fee_sol: 'REAL',
+  entry_jito_tip_sol: 'REAL',
+  modeled_exit_fee_sol: 'REAL',
+  modeled_net_pnl_sol: 'REAL',
+  modeled_net_pnl_percent: 'REAL',
 };
 
 let initialized = false;
