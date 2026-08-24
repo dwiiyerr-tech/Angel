@@ -49,6 +49,31 @@ const primaryQuote = {
   effectiveMcapUsd: 10000,
 };
 
+const executionProfile = {
+  version: 'execution_cost_v2',
+  signalQuote: { ...primaryQuote, tokenAmount: 1010, outputAmountRaw: '1010000000' },
+  fillQuote: primaryQuote,
+  immediateExitQuote: { outSol: 0.048 },
+  configuredLatencyMs: 500,
+  measuredQuoteToFillLatencyMs: 620,
+  quoteDeteriorationPct: 0.990099,
+  roundTripSpreadPct: 4,
+  sizeImpactPct: 2,
+  entryFees: {
+    totalFeeSol: 0.00002,
+    priorityFeeSol: 0.00001,
+    jitoTipSol: 0.000005,
+    quality: 'dynamic',
+  },
+  expectedExitFees: {
+    totalFeeSol: 0.00003,
+    priorityFeeSol: 0.000015,
+    jitoTipSol: 0.00001,
+    quality: 'dynamic',
+  },
+  quality: 'executable_roundtrip',
+};
+
 const quoteBundle = {
   referenceNotional: 0.05,
   primary: primaryQuote,
@@ -56,6 +81,7 @@ const quoteBundle = {
     { notionalSol: 0.01, quote: { ...primaryQuote, inputLamports: 10_000_000, outputAmountRaw: '200000000', tokenAmount: 200 } },
     { notionalSol: 0.05, quote: primaryQuote },
   ],
+  executionProfile,
 };
 
 const created = createResearchPosition(999, candidate, decision, quoteBundle, 'unit_test');
@@ -64,7 +90,8 @@ assert.ok(created.id > 0);
 assert.equal(created.realCapitalSol, 0);
 assert.equal(created.simNotionalSol, 0.05);
 assert.equal(created.plannedRr, 4);
-assert.ok(created.initialRiskSol > 0);
+assert.ok(created.initialRiskSol > 0.0075);
+assert.equal(created.executionCost.version, 'execution_cost_v2');
 
 let row = db.prepare('SELECT * FROM dry_run_positions WHERE id = ?').get(created.id);
 assert.equal(row.execution_mode, 'research');
@@ -74,7 +101,14 @@ assert.equal(row.size_sol, 0.05, 'legacy size_sol must remain virtual accounting
 assert.equal(row.token_amount_raw, '1000000000');
 assert.equal(row.initial_risk_percent, 15);
 assert.equal(row.planned_rr, 4);
-assert.equal(row.research_data_quality, 'entry_executable');
+assert.equal(row.research_data_quality, 'executable_roundtrip');
+assert.equal(row.entry_fee_sol, 0.00002);
+assert.equal(row.entry_latency_ms, 620);
+assert.equal(row.entry_roundtrip_spread_pct, 4);
+assert.equal(row.entry_size_impact_pct, 2);
+assert.equal(row.entry_priority_fee_sol, 0.00001);
+assert.equal(row.entry_jito_tip_sol, 0.000005);
+assert.ok(row.research_execution_cost_json);
 
 // DB-level fail-safe: no future code path may turn a Research record into
 // capital-bearing or signed execution state.
@@ -99,25 +133,27 @@ const observation = recordResearchObservation(created.id, {
   pnlSol: 0.015,
 });
 assert.ok(observation.currentR > 0);
-assert.equal(observation.mfePercent, 30);
+assert.ok(observation.mfePercent > 29.8 && observation.mfePercent < 30);
 assert.equal(observation.maePercent, 0);
+assert.equal(observation.modeledExitFeeSol, 0.00003);
 
 row = db.prepare('SELECT * FROM dry_run_positions WHERE id = ?').get(created.id);
-assert.equal(row.mfe_percent, 30);
+assert.ok(row.mfe_percent > 29.8 && row.mfe_percent < 30);
 assert.ok(row.mfe_r > 0);
 assert.equal(row.real_capital_sol, 0);
 assert.equal(db.prepare('SELECT COUNT(*) AS count FROM research_observations WHERE position_id = ?').get(created.id).count, 1);
 
-// Simulate the mature exit engine having closed the virtual position, then make
-// sure research bookkeeping derives realized R without ever converting capital
-// usage from zero into simulated notional.
+// Simulate the mature exit engine closing at its quote-derived PnL. V2 then
+// replaces the legacy dry-run exit fee with a fresh dynamic fee estimate.
 db.prepare(`
   UPDATE dry_run_positions
-  SET status = 'closed', closed_at_ms = ?, pnl_percent = 45, pnl_sol = 0.0225, exit_reason = 'TP'
+  SET status = 'closed', closed_at_ms = ?, pnl_percent = 45, pnl_sol = 0.0225,
+      exit_fee_sol = 0.000005, exit_reason = 'TP'
   WHERE id = ?
 `).run(Date.now(), created.id);
 
 const closedObservation = recordResearchObservation(created.id, {
+  status: 'closed',
   price: 0.0000145,
   mcap: 14500,
   pnl_percent: 45,
@@ -125,12 +161,24 @@ const closedObservation = recordResearchObservation(created.id, {
   pnlPercent: 45,
   pnlSol: 0.0225,
   exitReason: 'TP',
+}, {
+  exitFees: {
+    totalFeeSol: 0.00004,
+    priorityFeeSol: 0.00002,
+    jitoTipSol: 0.000015,
+    quality: 'dynamic',
+  },
 });
 assert.ok(closedObservation.realizedR > 0);
+assert.equal(closedObservation.modeledExitFeeSol, 0.00004);
+assert.equal(Number(closedObservation.pnlSol.toFixed(9)), 0.022465);
 
 row = db.prepare('SELECT * FROM dry_run_positions WHERE id = ?').get(created.id);
 assert.equal(row.real_capital_sol, 0);
 assert.ok(row.realized_r > 0);
+assert.equal(row.exit_fee_sol, 0.00004);
+assert.equal(row.modeled_exit_fee_sol, 0.00004);
+assert.equal(Number(row.modeled_net_pnl_sol.toFixed(9)), 0.022465);
 assert.equal(db.prepare('SELECT COUNT(*) AS count FROM research_observations WHERE position_id = ?').get(created.id).count, 2);
 
-console.log('[research-engine] zero-capital lifecycle and DB invariants passed');
+console.log('[research-engine] zero-capital lifecycle, execution-cost v2, and DB invariants passed');
