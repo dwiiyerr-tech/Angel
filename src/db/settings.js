@@ -1,13 +1,33 @@
 import { db } from './connection.js';
 import { LIVE_SETTING_KEYS, assertLiveConfigApproved } from './liveConfig.js';
 
+const TRADING_MODE_STORAGE = new Map([
+  ['dry_run', 'dry_run'],
+  ['dry-run', 'dry_run'],
+  ['simulation', 'dry_run'],
+  ['research', 'dry_run'],
+  ['shadow', 'shadow_live'],
+  ['shadow_live', 'shadow_live'],
+  ['confirm', 'confirm'],
+  ['live', 'live'],
+]);
+
+export function normalizeTradingModeStorage(value = 'dry_run') {
+  const normalized = String(value || 'dry_run').trim().toLowerCase();
+  const stored = TRADING_MODE_STORAGE.get(normalized);
+  if (!stored) throw new Error(`Unknown trading mode: ${value}`);
+  return stored;
+}
+
 export function setting(key, fallback = '') {
   return db.prepare('SELECT value FROM settings WHERE key = ?').get(key)?.value ?? fallback;
 }
 export const getSetting = setting;
 
 export function setSetting(key, value) {
-  const normalized = String(value);
+  const normalized = key === 'trading_mode'
+    ? normalizeTradingModeStorage(value)
+    : String(value);
   const currentMode = setting('trading_mode', 'dry_run');
   if (key === 'trading_mode' && normalized === 'live') assertLiveConfigApproved();
   if (currentMode === 'live' && LIVE_SETTING_KEYS.has(key) && setting(key) !== normalized) {
