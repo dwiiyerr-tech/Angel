@@ -1,10 +1,11 @@
 import http from 'http';
 import { db } from '../db/connection.js';
-import { setting, getSetting, boolSetting } from '../db/settings.js';
+import { setting, boolSetting } from '../db/settings.js';
 import { getLastSignalProcessedAt } from './deadMansSwitch.js';
 import { getBackupStatus } from '../db/backup.js';
 import axios from 'axios';
 import { unresolvedExecutionCount } from '../db/executionOperations.js';
+import { configuredTradingMode } from '../research/policy.js';
 
 const PORT = process.env.PORT_HEALTH || 3099;
 const bootTime = Date.now();
@@ -22,23 +23,30 @@ export function startHealthServer() {
       res.writeHead(200, { 'Content-Type': 'text/plain' });
       return res.end('pong');
     }
-    
+
     if (req.url === '/health') {
       try {
-        const openPosCount = db.prepare("SELECT count(*) as c FROM dry_run_positions WHERE status IN ('open', 'entry_unknown', 'exit_unknown', 'partial_exit_unknown')").get().c;
+        const positionCounts = db.prepare(`
+          SELECT
+            count(*) AS total,
+            sum(CASE WHEN execution_mode = 'research' THEN 1 ELSE 0 END) AS research,
+            sum(CASE WHEN coalesce(execution_mode, 'dry_run') != 'research' THEN 1 ELSE 0 END) AS execution
+          FROM dry_run_positions
+          WHERE status IN ('open', 'entry_unknown', 'exit_unknown', 'partial_exit_unknown')
+        `).get();
         const backupStatus = getBackupStatus();
         let backupLastMs = null;
         if (backupStatus.last_backup) {
           const m = backupStatus.last_backup.match(/(\d{4})(\d{2})(\d{2})_?(\d{2})(\d{2})(\d{2})/);
           if (m) backupLastMs = new Date(`${m[1]}-${m[2]}-${m[3]}T${m[4]}:${m[5]}:${m[6]}Z`).getTime();
         }
-        
+
         const regimeAwarenessEnabled = boolSetting('enable_regime_awareness', false);
         const macroStateText = setting('current_macro_state') || '';
         const weatherMatch = macroStateText.match(/Market weather is (\w+)/);
         const macroState = regimeAwarenessEnabled ? (weatherMatch ? weatherMatch[1] : 'UNKNOWN') : 'DISABLED';
         const lastSignalMs = getLastSignalProcessedAt();
-        
+
         const mlServiceUp = await checkMlHealth();
         const unresolvedExecutions = unresolvedExecutionCount();
         const signalAgeMs = Date.now() - lastSignalMs;
@@ -51,10 +59,14 @@ export function startHealthServer() {
         const payload = {
           status: degradedReasons.length ? 'degraded' : 'ok',
           uptime_seconds: Math.floor((Date.now() - bootTime) / 1000),
-          open_positions: openPosCount,
+          open_positions: Number(positionCounts?.total || 0),
+          research_positions: Number(positionCounts?.research || 0),
+          execution_positions: Number(positionCounts?.execution || 0),
+          research_real_capital_sol: 0,
           last_signal_processed_ms: lastSignalMs,
           last_signal_age_seconds: Math.floor((Date.now() - lastSignalMs) / 1000),
-          trading_mode: getSetting('trading_mode') || 'dry_run',
+          trading_mode: configuredTradingMode(),
+          trading_mode_storage: setting('trading_mode', 'dry_run'),
           ml_service_up: mlServiceUp,
           db_backup_last_ms: backupLastMs,
           unresolved_executions: unresolvedExecutions,
@@ -62,7 +74,7 @@ export function startHealthServer() {
           macro_state: macroState,
           regime_awareness_enabled: regimeAwarenessEnabled,
         };
-        
+
         res.writeHead(degradedReasons.length ? 503 : 200, { 'Content-Type': 'application/json' });
         return res.end(JSON.stringify(payload));
       } catch (err) {
@@ -70,11 +82,11 @@ export function startHealthServer() {
         return res.end(JSON.stringify({ status: 'error', error: err.message }));
       }
     }
-    
+
     res.writeHead(404);
     res.end();
   });
-  
+
   server.listen(PORT, process.env.HEALTH_HOST || '127.0.0.1', () => {
     console.log(`[health] server running on port ${PORT}`);
   });
