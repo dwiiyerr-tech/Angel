@@ -30,8 +30,8 @@ import {
 } from '../research/engine.js';
 import { hunterPolicy } from './hunterPolicy.js';
 
-// Keep fast-track disabled: research aggression comes from explicit Hunter policy,
-// never from bypassing the established candidate safety/enrichment pipeline.
+// Fast-track bypass remains disabled. Research aggression comes from explicit
+// policy and zero-capital sampling, never from skipping contract safety.
 const TRACK_A_ROUTES = new Set([]);
 
 export const seenSignalCandidates = new Map();
@@ -43,6 +43,38 @@ setCandidateHandler(processCandidateFromSignals);
 
 function candidateRiskSeverity(candidate) {
   return (candidate?.riskFlags || []).reduce((sum, flag) => sum + Math.max(0, Number(flag?.severity) || 0), 0);
+}
+
+function researchFilterAdmission(candidate, researchMode) {
+  const filters = candidate?.filters || {};
+  if (!researchMode) return { allowed: filters.passed !== false, softFailures: [] };
+
+  // Contract Safety is the catastrophic kernel and is never bypassed, even by a
+  // zero-capital experiment. Everything else in filterCandidate is strategy or
+  // statistical evidence and is useful to observe rather than censor.
+  if (candidate?.contractSafety?.passed === false) {
+    return { allowed: false, softFailures: [] };
+  }
+
+  const failures = Array.isArray(filters.failures) ? filters.failures.map(String) : [];
+  const contractFailures = failures.filter(reason => reason.startsWith('contract safety:'));
+  if (contractFailures.length > 0) return { allowed: false, softFailures: [] };
+
+  const softFailures = failures.filter(reason => !reason.startsWith('contract safety:'));
+  if (softFailures.length > 0) {
+    candidate.researchFilterOverride = {
+      policy: 'zero_capital_soft_filter_override_v1',
+      softFailures,
+      originalPassed: filters.passed !== false,
+    };
+    candidate.riskFlags = candidate.riskFlags || [];
+    candidate.riskFlags.push({
+      type: 'research_filter_override',
+      severity: Math.min(4, Math.max(1, softFailures.length)),
+      reason: softFailures.slice(0, 4).join('; '),
+    });
+  }
+  return { allowed: true, softFailures };
 }
 
 function researchCapacity() {
@@ -98,8 +130,8 @@ async function _processCandidateFromSignals(signals) {
     console.log(`[research] observing adaptively-blocked route ${signals.route}; no capital is at risk`);
   }
 
-  // Duplicate checks stay strict for simultaneously open positions, but research
-  // uses a short experiment cooldown instead of inheriting live history/win bans.
+  // Same-mint concurrent positions are forbidden for unambiguous accounting.
+  // Research otherwise uses a short experiment cooldown rather than live bans.
   try {
     const openPos = db.prepare(
       `SELECT id FROM dry_run_positions
@@ -151,8 +183,7 @@ async function _processCandidateFromSignals(signals) {
     console.warn(`[agent] duplicate precheck degraded: ${err.message}`);
   }
 
-  // Prevent route fan-in races. Ten minutes is short enough for research while
-  // still preventing one mint from being processed concurrently from many feeds.
+  // Prevent route fan-in races.
   try {
     const recentCandidate = db.prepare(`
       SELECT id FROM candidates
@@ -168,7 +199,6 @@ async function _processCandidateFromSignals(signals) {
   }
 
   // Decision cache is an execution optimization, not a research truth source.
-  // Reusing an old WATCH/PASS in zero-capital research would suppress fresh data.
   if (!researchMode) {
     const cachedDecision = checkDecisionCache(signals.mint, signals.mcap || null, signals.holders || null);
     if (cachedDecision) {
@@ -188,8 +218,7 @@ async function _processCandidateFromSignals(signals) {
   const signature = signals.signature || null;
   const candidateId = upsertCandidate(candidate, signature);
 
-  // Symbol copycat history is a capital-protection heuristic. Research records
-  // it as context instead of suppressing otherwise valid zero-capital samples.
+  // Copycat history protects capital but should not censor zero-capital research.
   if (!researchMode) {
     try {
       const symbol = candidate.token?.symbol;
@@ -207,7 +236,11 @@ async function _processCandidateFromSignals(signals) {
     }
   }
 
-  if (!candidate.filters.passed) return;
+  const filterAdmission = researchFilterAdmission(candidate, researchMode);
+  if (!filterAdmission.allowed) return;
+  if (researchMode && filterAdmission.softFailures.length > 0) {
+    console.log(`[research] soft-filter override ${candidate.token.mint.slice(0, 8)}... ${filterAdmission.softFailures.slice(0, 3).join('; ')}`);
+  }
 
   const isTrackA = TRACK_A_ROUTES.has(signals.route);
   if (!isTrackA) {
@@ -216,12 +249,20 @@ async function _processCandidateFromSignals(signals) {
     candidate.filters.preScore = preScore.score;
     candidate.filters.preScorePreferred = preScore.passed;
     const preScoreVetoFloor = Number(strat.prescore_veto_floor ?? -50);
-    if (preScore.score <= preScoreVetoFloor) {
+    if (!researchMode && preScore.score <= preScoreVetoFloor) {
       console.log(`[prescore] catastrophic-veto ${candidate.token.mint.slice(0, 8)}... score ${preScore.score} <= ${preScoreVetoFloor}`);
       candidate.filters.passed = false;
       candidate.filters.failures.push(`prescore catastrophic veto: ${preScore.score} <= ${preScoreVetoFloor}`);
       updateCandidateSnapshot(candidateId, candidate, 'filtered');
       return;
+    }
+    if (researchMode && preScore.score <= preScoreVetoFloor) {
+      candidate.riskFlags = candidate.riskFlags || [];
+      candidate.riskFlags.push({
+        type: 'research_low_prescore',
+        severity: 3,
+        reason: `preScore ${preScore.score} <= legacy veto ${preScoreVetoFloor}`,
+      });
     }
 
     const momentumPreferred = Number(strat.momentum_threshold ?? 0.5);
@@ -275,9 +316,8 @@ async function _processCandidateFromSignals(signals) {
     batchId = storeBatchDecision(candidateId, rows, batchDecision);
   }
 
-  // In Research, LLM is advisory. If it does not select a BUY, deterministic
-  // Hunter policy may still open a zero-capital sample. Hard candidate and
-  // contract filters above remain authoritative.
+  // In Research, LLM is advisory. A deterministic Hunter policy may sample an
+  // otherwise contract-safe candidate when the LLM says WATCH/PASS.
   if (researchMode && (!batchDecision?.selected_row || batchDecision.verdict !== 'BUY')) {
     const selfRow = candidateById(candidateId);
     const prescore = Number(candidate.filters?.preScore);
@@ -403,9 +443,9 @@ export async function handleApprovedBuy(selectedRow, decision, batchId, rows = [
   const mint = selectedRow.candidate.token.mint;
   if (executingMints.has(mint)) return;
 
-  // Research is deliberately separated before market allocator, wallet reserve,
-  // transaction simulation, live risk budget, and live config checks. Its only
-  // "size" is a Jupiter quote probe; real capital, signing, and broadcast are 0.
+  // Research is separated before market allocator, wallet reserve, transaction
+  // simulation, live risk budget, and live config checks. Its only size is a
+  // Jupiter quote probe; real capital, signing, and broadcast are zero.
   if (isResearchSimulationMode()) {
     executingMints.add(mint);
     try {
@@ -507,8 +547,8 @@ export async function handleApprovedBuy(selectedRow, decision, batchId, rows = [
       return;
     }
 
-    // shadow_live is pre-live verification and intentionally remains wallet-aware.
-    // live retains all config approval, risk budget, reconciliation and circuit breakers.
+    // shadow_live is pre-live verification and remains wallet-aware. live keeps
+    // config approval, risk budget, reconciliation, and circuit breakers.
     await executeLiveBuy(freshSelectedRow, decision, batchId, executionRows, triggerCandidateId);
   } catch (err) {
     const mode = tradingMode();
