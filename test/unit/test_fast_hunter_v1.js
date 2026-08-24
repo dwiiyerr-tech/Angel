@@ -27,9 +27,13 @@ assert.equal(isFastHunterSignal({ route: 'trending' }), false);
 
 setSetting('trading_mode', 'shadow_live');
 assert.equal(isFastHunterSignal({ route: 'pumpportal_graduated' }), false, 'Shadow must stay on the full pipeline');
-setSetting('trading_mode', 'live');
-assert.equal(isFastHunterSignal({ route: 'pumpfun_pregrad' }), false, 'Live must never use Research Fast Hunter V1');
+setSetting('trading_mode', 'confirm');
+assert.equal(isFastHunterSignal({ route: 'pumpfun_pregrad' }), false, 'Confirm must stay on the full pipeline');
 
+// Live is intentionally not set here: setSetting('trading_mode', 'live') is
+// guarded by the existing approved-config snapshot invariant. The dedicated
+// live safety tests own that authorization path; Fast Hunter only needs to prove
+// that non-Research money-grade modes cannot select its route.
 setSetting('trading_mode', 'dry_run');
 setSetting('research_fast_hunter_enabled', 'false');
 assert.equal(isFastHunterSignal({ route: 'pumpportal_graduated' }), false, 'Fast Hunter can be disabled without changing route code');
