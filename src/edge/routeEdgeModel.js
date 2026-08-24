@@ -25,7 +25,8 @@ export function resetRouteEdgeCacheForTests() {
 }
 
 export function marketRegimeKey(candidate = {}) {
-  const momentum = finite(candidate?.filters?.momentumScore);
+  const rawMomentum = finite(candidate?.filters?.momentumScore);
+  const momentum = rawMomentum != null && rawMomentum >= 0 ? rawMomentum : null;
   const priceChange1h = finite(candidate?.jupiterAsset?.stats1h?.priceChange);
   const buyerNet = finite(candidate?.jupiterAsset?.stats5m?.numNetBuyers);
   const traders = finite(candidate?.jupiterAsset?.stats5m?.numTraders);
