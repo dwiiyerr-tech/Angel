@@ -19,14 +19,30 @@ export function combineEdgeAssessment({ quality, runner, route, momentumScore = 
   const runnerP = runner?.decisionEligible ? finite(runner.probability) : null;
   const routeP = route?.decisionEligible ? finite(route.pWin) : null;
 
-  // Missing models are neutral, never automatic vetoes. As Research accumulates
-  // evidence the probability layers progressively replace neutral priors.
-  const runnerEvidence = runnerP == null ? momentumNorm : runnerP;
-  const routeEvidence = routeP == null ? 0.5 : routeP;
-  const opportunityProbability = qualityNorm * 0.20
-    + momentumNorm * 0.20
-    + runnerEvidence * 0.35
-    + routeEvidence * 0.25;
+  // Runner already consumes momentum/quality/flow buckets, and route+regime also
+  // contains momentum/flow context. Do not pretend those correlated observations
+  // are four independent votes. Probability models replace their input evidence
+  // progressively as sufficient Research history becomes available.
+  let opportunityProbability;
+  let weights;
+  let method;
+  if (runnerP != null && routeP != null) {
+    opportunityProbability = runnerP * 0.65 + routeP * 0.35;
+    weights = { quality: 0, momentum: 0, runner: 0.65, route: 0.35 };
+    method = 'runner_route';
+  } else if (runnerP != null) {
+    opportunityProbability = runnerP;
+    weights = { quality: 0, momentum: 0, runner: 1, route: 0 };
+    method = 'runner_only';
+  } else if (routeP != null) {
+    opportunityProbability = routeP * 0.75 + qualityNorm * 0.25;
+    weights = { quality: 0.25, momentum: 0, runner: 0, route: 0.75 };
+    method = 'route_quality_fallback';
+  } else {
+    opportunityProbability = momentumNorm * 0.55 + qualityNorm * 0.45;
+    weights = { quality: 0.45, momentum: 0.55, runner: 0, route: 0 };
+    method = 'descriptive_fallback';
+  }
 
   const opportunityConfidence = clamp(opportunityProbability * 100);
   const availableModels = Number(runnerP != null) + Number(routeP != null);
@@ -41,12 +57,8 @@ export function combineEdgeAssessment({ quality, runner, route, momentumScore = 
     expectedR: route?.decisionEligible && finite(route?.expectedR) != null ? Number(route.expectedR) : null,
     evidenceQuality,
     decisionEligible: availableModels > 0,
-    weights: {
-      quality: 0.20,
-      momentum: 0.20,
-      runner: 0.35,
-      route: 0.25,
-    },
+    method,
+    weights,
   };
 }
 
