@@ -7,6 +7,7 @@ import { netBuyerRatio } from './qualityScore.js';
 const MODEL_VERSION = 'runner-path-bayes-v1';
 
 function finite(value) {
+  if (value === null || value === undefined || value === '') return null;
   const n = Number(value);
   return Number.isFinite(n) ? n : null;
 }
