@@ -6,7 +6,7 @@ import {
   runnerFeatureSnapshot,
 } from '../../src/edge/runnerModel.js';
 import { estimateRouteEdgeFromRecords, marketRegimeKey } from '../../src/edge/routeEdgeModel.js';
-import { combineEdgeAssessment } from '../../src/edge/edgeAssessment.js';
+import { combineEdgeAssessment, assessCandidateEdge } from '../../src/edge/edgeAssessment.js';
 
 const strongCandidate = {
   signals: { route: 'pumpportal_graduated' },
@@ -36,6 +36,16 @@ const weakQuality = qualityScoreCandidate(weakCandidate);
 assert.ok(strongQuality.score > weakQuality.score, 'market quality must rank stronger evidence higher');
 assert.equal(strongQuality.dataQuality, 'HIGH');
 assert.equal(qualityScoreCandidate({}).dataQuality, 'LOW', 'missing quality data must stay missing, not become zeros');
+
+// Integration invariant: whatever Research history happens to exist in the shared
+// test DB, the live assessment path must always return a finite opportunity state
+// and must degrade unavailable probability models instead of throwing/vetoing.
+const integrationAssessment = assessCandidateEdge(structuredClone(strongCandidate));
+assert.equal(integrationAssessment.quality.dataQuality, 'HIGH');
+assert.ok(Number.isFinite(integrationAssessment.combined.opportunityProbability));
+assert.ok(['LOW', 'MEDIUM', 'HIGH'].includes(integrationAssessment.combined.evidenceQuality));
+if (!integrationAssessment.runner.decisionEligible) assert.equal(integrationAssessment.runner.quality, 'LOW');
+if (!integrationAssessment.route.decisionEligible) assert.equal(integrationAssessment.route.quality, 'LOW');
 
 assert.deepEqual(
   runnerLabelFromPosition({ mfe_r: 4.2, mae_r: -0.4, time_to_mfe_ms: 600000 }),
