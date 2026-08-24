@@ -2,7 +2,7 @@ import { db } from '../db/connection.js';
 import { createLivePosition } from '../db/positions.js';
 import { updateExecutionOperation } from '../db/executionOperations.js';
 import { ensureLiveSafetySchema } from '../db/liveSafety.js';
-import { fetchFinalizedSwapReceipt, fetchLiveTokenBalance, liveWalletPubkey } from '../liveExecutor.js';
+import { fetchFinalizedSwapReceipt, liveWalletPubkey } from '../liveExecutor.js';
 import { WSOL_MINT } from '../config.js';
 import { now } from '../utils.js';
 
@@ -55,12 +55,8 @@ function restoreFailedSell(operation) {
 }
 
 async function reconcileFinalizedBuy(operation, receipt) {
-  let outputAmount = receipt.outputAmount;
-  if (!outputAmount || BigInt(outputAmount) <= 0n) {
-    const balance = await fetchLiveTokenBalance(operation.mint);
-    if (balance && BigInt(balance) > 0n) outputAmount = balance;
-  }
-  if (!outputAmount || BigInt(outputAmount) <= 0n) {
+  const outputText = String(receipt.outputAmount || '');
+  if (!/^\d+$/.test(outputText) || BigInt(outputText) <= 0n) {
     updateExecutionOperation(operation.id, 'outcome_unknown', {
       signature: operation.signature,
       finalizedAtMs: now(),
@@ -68,6 +64,7 @@ async function reconcileFinalizedBuy(operation, receipt) {
     });
     return { resolved: false, reason: 'buy_output_unknown' };
   }
+  const outputAmount = outputText;
 
   let position = operation.position_id
     ? db.prepare('SELECT * FROM dry_run_positions WHERE id = ?').get(operation.position_id)
@@ -119,7 +116,7 @@ async function reconcileFinalizedBuy(operation, receipt) {
         entry_signature = COALESCE(entry_signature, ?),
         entry_fee_sol = CASE WHEN COALESCE(entry_fee_sol, 0) = 0 THEN ? ELSE entry_fee_sol END
     WHERE id = ?
-  `).run(String(outputAmount), operation.signature, Number(receipt.feeSol || 0), position.id);
+  `).run(outputAmount, operation.signature, Number(receipt.feeSol || 0), position.id);
   updateExecutionOperation(operation.id, 'completed', {
     positionId: position.id,
     signature: operation.signature,
@@ -172,16 +169,16 @@ function settleFullFinalizedSell(operation, position, receipt) {
   return { finalPnlSol, finalPnlPercent };
 }
 
-async function settlePartialFinalizedSell(operation, position, receipt) {
+function settlePartialFinalizedSell(operation, position, receipt) {
   const beforeRaw = BigInt(position.token_amount_raw || operation.input_amount || '0');
   const soldRaw = BigInt(operation.input_amount || '0');
   if (beforeRaw <= 0n || soldRaw <= 0n || soldRaw > beforeRaw) {
     return { resolved: false, reason: 'invalid_partial_recovery_amount' };
   }
-  const currentBalance = await fetchLiveTokenBalance(position.mint);
-  const remainingRaw = currentBalance != null
-    ? BigInt(currentBalance)
-    : beforeRaw - soldRaw;
+  // Remaining position inventory is derived from the position ledger plus the
+  // finalized transaction input, not from the current wallet balance. External
+  // transfers therefore cannot silently become part of this position.
+  const remainingRaw = beforeRaw - soldRaw;
   const soldFraction = Math.min(1, Number(soldRaw.toString()) / Number(beforeRaw.toString()));
   const soldCostSol = Number(position.size_sol || 0) * soldFraction;
   const newSizeSol = Math.max(0, Number(position.size_sol || 0) - soldCostSol);
@@ -246,7 +243,7 @@ async function reconcileFinalizedSell(operation, receipt) {
     || (originalRaw > 0n && requestedRaw > 0n && requestedRaw < originalRaw);
 
   if (partial) {
-    const settled = await settlePartialFinalizedSell(operation, position, receipt);
+    const settled = settlePartialFinalizedSell(operation, position, receipt);
     if (!settled.resolved) {
       updateExecutionOperation(operation.id, 'outcome_unknown', {
         signature: operation.signature,
