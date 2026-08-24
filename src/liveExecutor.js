@@ -264,7 +264,7 @@ export function deriveFinalizedSwapReceipt(transaction, walletAddress, { inputMi
     };
   }
 
-  const keys = message.staticAccountKeys || [];
+  const keys = message.staticAccountKeys || message.accountKeys || [];
   const walletIndex = keys.findIndex(key => keyString(key) === walletAddress);
   const feeLamports = Number(meta.fee || 0);
   const preTokens = ownerMintTotal(meta.preTokenBalances, walletAddress, inputMint);
@@ -333,7 +333,7 @@ async function waitForFinalizedSwapReceipt(signature, mints, timeoutMs = 30_000)
   let last = null;
   while (Date.now() < deadline) {
     last = await fetchFinalizedSwapReceipt(signature, mints);
-    if (last.finalized) return last;
+    if (last.finalized && (last.success !== true || last.outputAmount)) return last;
     await new Promise(resolve => setTimeout(resolve, 750));
   }
   return last || { found: false, finalized: false, success: null, signature };
@@ -407,7 +407,7 @@ export async function executeJupiterSwap({ inputMint, outputMint, amount }) {
   if (!receipt?.finalized || receipt.success !== true) {
     const detail = receipt?.finalized && receipt.success === false
       ? `finalized with error ${JSON.stringify(receipt.error)}`
-      : 'did not reach finalized commitment before timeout';
+      : 'did not produce an authoritative finalized receipt before timeout';
     const error = new Error(`Swap signature ${signature} ${detail}`);
     error.swapOutcomeUnknown = true;
     error.swapSignature = signature;
@@ -417,6 +417,14 @@ export async function executeJupiterSwap({ inputMint, outputMint, amount }) {
 
   const executedOutput = executed?.outputAmountResult || executed?.totalOutputAmount || '';
   const outputAmount = String(executedOutput || receipt.outputAmount || '');
+  if (!/^\d+$/.test(outputAmount) || BigInt(outputAmount) <= 0n) {
+    const error = new Error(`Swap signature ${signature} finalized but authoritative output amount is unavailable.`);
+    error.swapOutcomeUnknown = true;
+    error.swapSignature = signature;
+    error.swapRequestId = order.requestId || null;
+    throw error;
+  }
+
   return {
     order,
     executed,
