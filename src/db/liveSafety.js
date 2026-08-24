@@ -51,6 +51,41 @@ export function ensureLiveSafetySchema() {
           released_at_ms = CAST(strftime('%s','now') AS INTEGER) * 1000
       WHERE operation_id = NEW.id AND status = 'active';
     END;
+
+    -- A finalized sell is not fully complete until its position-ledger mutation
+    -- commits. executeLiveSell records a recoverable pending-ledger operation;
+    -- this trigger completes it in the same SQLite transaction as the normal
+    -- full/partial position update. A crash before this update leaves the
+    -- operation unresolved for the finalized-signature reconciler.
+    CREATE TRIGGER IF NOT EXISTS trg_live_sell_operation_follow_position
+    AFTER UPDATE OF status, token_amount_raw, size_sol, partial_tp_done ON dry_run_positions
+    WHEN EXISTS (
+      SELECT 1 FROM execution_operations
+      WHERE position_id = NEW.id
+        AND side = 'sell'
+        AND status = 'outcome_unknown'
+        AND error = 'finalized_sell_pending_position_ledger'
+    ) AND (
+      NEW.status = 'closed'
+      OR (
+        NEW.status = 'open'
+        AND COALESCE(NEW.partial_tp_done, 0) = 1
+        AND (
+          COALESCE(OLD.partial_tp_done, 0) != COALESCE(NEW.partial_tp_done, 0)
+          OR COALESCE(OLD.token_amount_raw, '') != COALESCE(NEW.token_amount_raw, '')
+          OR COALESCE(OLD.size_sol, -1) != COALESCE(NEW.size_sol, -1)
+        )
+      )
+    )
+    BEGIN
+      UPDATE execution_operations
+      SET status = 'completed', error = NULL,
+          updated_at_ms = CAST(strftime('%s','now') AS INTEGER) * 1000
+      WHERE position_id = NEW.id
+        AND side = 'sell'
+        AND status = 'outcome_unknown'
+        AND error = 'finalized_sell_pending_position_ledger';
+    END;
   `);
 
   initialized = true;
