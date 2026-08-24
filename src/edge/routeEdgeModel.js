@@ -4,6 +4,7 @@ import { safeJson } from '../utils.js';
 import { ensureResearchSchema } from '../research/schema.js';
 
 const MODEL_VERSION = 'route-edge-bayes-v1';
+let historyCache = { at: 0, limit: 0, records: null };
 
 function finite(value) {
   if (value === null || value === undefined || value === '') return null;
@@ -13,6 +14,14 @@ function finite(value) {
 
 function clamp01(value) {
   return Math.max(0, Math.min(1, Number(value) || 0));
+}
+
+function historyCacheMs() {
+  return Math.max(0, Math.min(5 * 60_000, Math.floor(numSetting('edge_model_cache_ms', 30_000))));
+}
+
+export function resetRouteEdgeCacheForTests() {
+  historyCache = { at: 0, limit: 0, records: null };
 }
 
 export function marketRegimeKey(candidate = {}) {
@@ -104,6 +113,11 @@ export function estimateRouteEdgeFromRecords(records = [], {
 
 function researchEdgeRecords(limit = 2000) {
   ensureResearchSchema();
+  const ttl = historyCacheMs();
+  if (historyCache.records && historyCache.limit === limit && ttl > 0 && Date.now() - historyCache.at <= ttl) {
+    return historyCache.records;
+  }
+
   const rows = db.prepare(`
     SELECT id, realized_r, snapshot_json
     FROM dry_run_positions
@@ -112,7 +126,7 @@ function researchEdgeRecords(limit = 2000) {
     LIMIT ?
   `).all(limit);
 
-  return rows.map(row => {
+  const records = rows.map(row => {
     const snapshot = safeJson(row.snapshot_json, {});
     const candidate = snapshot?.candidate || {};
     return {
@@ -122,6 +136,8 @@ function researchEdgeRecords(limit = 2000) {
       regime: String(candidate?.edge?.route?.regime || marketRegimeKey(candidate)),
     };
   }).filter(row => Number.isFinite(row.realizedR));
+  historyCache = { at: Date.now(), limit, records };
+  return records;
 }
 
 export function estimateRouteEdge(candidate = {}) {
