@@ -9,6 +9,7 @@
     "test": "bash scripts/run-unit-tests.sh",
     "check": "npm run lint && npm test",
     "audit:edge": "node scripts/audit_dry_run_edge.mjs 3d",
+    "research:report": "node scripts/research_report.mjs",
     "dashboard:api": "node src/dashboard/server.js"
   },
   "dependencies": {
