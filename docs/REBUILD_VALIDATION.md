@@ -2,7 +2,7 @@
 
 PR: #6
 
-Validated on head immediately before release promotion:
+Validated on release head `7509149d5b9efc89ee5f42febb548f941df1375a`:
 
 - [x] Node 22 lint passes
 - [x] Existing unit tests pass
@@ -22,9 +22,11 @@ Validated on head immediately before release promotion:
 - [x] Manual Research refresh records R/MFE/MAE/realized-R
 - [x] `main` remained unchanged throughout feature development and validation
 
-CI evidence:
+CI evidence on final code/documentation state before this record-only commit:
 
-- Angel CI run `32766132871`: Node 22 lint + unit tests + Research report smoke test = success; Python syntax = success.
-- Dependency Security CI run `32766132830`: clean lockfile install + lint/unit tests + dependency audit + registry signature verification = success.
+- Angel CI run `32766251004`: Node 22 lint + unit tests + Research report smoke test = success; Python syntax = success.
+- Dependency Security CI run `32766251118`: clean lockfile install + lint/unit tests + dependency audit + registry signature verification = success.
+
+This file is documentation only. No source/runtime/test behavior is changed by this commit.
 
 Release rule remains unchanged: Research evidence does not automatically promote strategy changes into Live capital. Live promotion remains behind Shadow verification and the deterministic Safety Kernel.
