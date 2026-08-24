@@ -102,19 +102,39 @@ export function batchRevealSummary(batchId, rows, decision, triggerCandidateId =
   return lines.filter(Boolean).join('\n');
 }
 
+function fmtR(value) {
+  const n = Number(value);
+  if (!Number.isFinite(n)) return '—';
+  const sign = n > 0 ? '+' : '';
+  return `${sign}${n.toFixed(2)}R`;
+}
+
 export function formatPosition(position) {
   const pnl = position.pnl_percent != null
     ? Number(position.pnl_percent)
     : position.entry_mcap && position.high_water_mcap
       ? (Number(position.high_water_mcap) / Number(position.entry_mcap) - 1) * 100
       : 0;
+  const research = position.execution_mode === 'research';
+  const currentR = Number.isFinite(Number(position.realized_r))
+    ? Number(position.realized_r)
+    : (Number(position.initial_risk_sol) > 0 && Number.isFinite(Number(position.pnl_sol))
+      ? Number(position.pnl_sol) / Number(position.initial_risk_sol)
+      : null);
+
   return [
     `📍 <b>${escapeHtml(position.symbol || short(position.mint))}</b> #${position.id}`,
     `Token: <a href="${gmgnLink(position.mint)}">${short(position.mint)}</a>`,
     `Status: <b>${escapeHtml(position.status)}</b> · Mode: <b>${escapeHtml(position.execution_mode || 'dry_run')}</b> · Strategy: <b>${escapeHtml(position.strategy_id || 'sniper')}</b>`,
     position.entry_signature ? `Entry TX: <a href="${txLink(position.entry_signature)}">${short(position.entry_signature)}</a>` : null,
     `Entry mcap: ${fmtUsd(position.entry_mcap)} · High: ${fmtUsd(position.high_water_mcap)}`,
-    `Size: ${fmtSol(position.size_sol)} SOL · PnL: ${fmtPct(pnl)}`,
+    research
+      ? `Capital: <b>0 SOL</b> · Probe: ${fmtSol(position.sim_notional_sol ?? position.size_sol)} SOL · Virtual PnL: ${fmtPct(pnl)}`
+      : `Size: ${fmtSol(position.size_sol)} SOL · PnL: ${fmtPct(pnl)}`,
+    research
+      ? `R: ${fmtR(currentR)} · Planned R:R: ${Number.isFinite(Number(position.planned_rr)) ? `1:${Number(position.planned_rr).toFixed(2)}` : '—'} · MFE: ${fmtR(position.mfe_r)} · MAE: ${fmtR(position.mae_r)}`
+      : null,
+    research && position.research_data_quality ? `Data: ${escapeHtml(position.research_data_quality)}` : null,
     `TP: ${fmtPct(position.tp_percent)} · SL: ${fmtPct(position.sl_percent)} · Trail: ${position.trailing_enabled ? `${fmtPct(position.trailing_percent)}` : 'off'}`,
     position.exit_reason ? `Exit: ${escapeHtml(position.exit_reason)} at ${fmtUsd(position.exit_mcap)} (${fmtPct(position.pnl_percent)})` : null,
     position.exit_signature ? `Exit TX: <a href="${txLink(position.exit_signature)}">${short(position.exit_signature)}</a>` : null,

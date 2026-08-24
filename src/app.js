@@ -3,7 +3,8 @@ import { APP_NAME, SIGNAL_SERVER_URL, SIGNAL_POLL_MS, POSITION_CHECK_MS, PUMPPOR
 import { db, initDb } from './db/connection.js';
 import { initLiveExecution } from './liveExecutor.js';
 import { setupTelegram } from './telegram/commands.js';
-import { monitorPositions } from './execution/positions.js';
+import { monitorAllPositionsByMode } from './execution/modeMonitor.js';
+import { ensureResearchSchema } from './research/schema.js';
 import { processCandidateFromSignals, maybeProcessDegenCandidate } from './pipeline/orchestrator.js';
 import { sendTelegram } from './telegram/send.js';
 import { makeFailureTracker } from './utils.js';
@@ -77,68 +78,52 @@ function scheduleAfterCompletion(name, fn, intervalMs) {
 
 export async function startAngel() {
   initDb();
+  // Additive/idempotent research migration: existing Angel databases upgrade in
+  // place and retain all previous live/shadow history.
+  ensureResearchSchema();
   ensureSafeStartupMode();
-  // Liveness endpoints must come up before slow network enrichment. Initial
-  // signal batches can take minutes and previously made an online PM2 process
-  // look dead until all candidates finished sequentially.
+
   startHealthServer();
   startDeadMansSwitch();
   initLiveExecution();
   setupTelegram();
 
   if (SIGNAL_SERVER_URL) {
-    // ── Server mode: fetch signals from signal server ──────────────────────
     const { fetchServerSignals, setCandidateHandler, setDegenHandler } = await import('./signals/serverClient.js');
-
     setCandidateHandler(processCandidateFromSignals);
     setDegenHandler(maybeProcessDegenCandidate);
 
     const alert = (msg) => sendTelegram(msg);
     const trackServer = makeFailureTracker('server signals', alert);
     const trackDip = makeFailureTracker('dip monitor', alert);
-
-    // Start the next server poll only after the current enrichment batch has
-    // settled. setInterval caused an endless overlap storm whenever one batch
-    // legitimately took longer than the nominal poll interval.
     scheduleAfterCompletion('server signals', () => trackServer(() => fetchServerSignals()), SIGNAL_POLL_MS);
 
-    // GMGN Trenches polling (runs alongside server signals)
     const { fetchTrenches, setCandidateHandler: setTrenchesHandler } = await import('./signals/trenches.js');
     setTrenchesHandler(processCandidateFromSignals);
     const trackTrenches = makeFailureTracker('gmgn trenches', alert);
     fetchTrenches().catch(error => console.log(`[trenches] initial fetch failed: ${error.message}`));
-    // Reduced from 30s to 60s — pump.fun direct source is faster and more reliable
     setInterval(nonOverlapping('gmgn trenches', () => trackTrenches(() => fetchTrenches())), 60_000);
 
-    // Price monitor for dip buy strategy
-    const { monitorPriceAlerts, cleanupAlerts } = await import('./signals/priceMonitor.js');
-    const { setCandidateHandler: setAlertHandler } = await import('./signals/priceMonitor.js');
+    const { monitorPriceAlerts, cleanupAlerts, setCandidateHandler: setAlertHandler } = await import('./signals/priceMonitor.js');
     setAlertHandler(processCandidateFromSignals);
     setInterval(nonOverlapping('dip monitor', () => trackDip(() => monitorPriceAlerts())), 10_000);
     setInterval(() => cleanupAlerts(), 60 * 60 * 1000);
 
     console.log(`[bot] ${APP_NAME} started (server mode: ${SIGNAL_SERVER_URL})`);
   } else {
-    // ── Trenches-only mode: direct polling of GMGN trenches ─────────────────
     const { fetchTrenches, setCandidateHandler } = await import('./signals/trenches.js');
-
     setCandidateHandler(processCandidateFromSignals);
-
     fetchTrenches().catch(error => console.log(`[trenches] initial fetch failed: ${error.message}`));
-    // Reduced from 30s to 60s — pump.fun direct source is faster and more reliable
     setInterval(nonOverlapping('gmgn trenches', () => fetchTrenches().catch(error => console.log(`[trenches] ${error.message}`))), 60_000);
-
     console.log(`[bot] ${APP_NAME} started (trenches-only mode)`);
   }
 
-  // Graduation polling — runs in both modes (GMGN /v1/token/info based detection)
   const { startGraduationPolling, fetchGraduatedCoins } = await import('./signals/graduated.js');
   const trackGraduation = makeFailureTracker('graduation poll', (msg) => sendTelegram(msg));
   fetchGraduatedCoins().catch(err => console.log(`[graduated] initial fetch failed: ${err.message}`));
   setInterval(nonOverlapping('graduation endpoint', () => trackGraduation(() => fetchGraduatedCoins())), 60_000);
   Promise.resolve(startGraduationPolling()).catch(err => console.error(`[graduated] polling error: ${err.message}`));
 
-  // Trending polling — runs in both modes
   const { fetchGmgnTrending, setTrendingCandidateHandler } = await import('./signals/trending.js');
   setTrendingCandidateHandler(processCandidateFromSignals);
   const trackTrending = makeFailureTracker('trending poll', (msg) => sendTelegram(msg));
@@ -158,7 +143,10 @@ export async function startAngel() {
     Promise.resolve(startPumpportal()).catch(err => console.error(`[pumpportal] error: ${err.message}`));
   }
 
-  // Position monitoring runs in both modes
+  // One scheduler monitors every position according to the execution_mode stored
+  // on that position. A global mode switch therefore cannot orphan positions
+  // from the previous mode. Only live failures escape the mixed-mode monitor,
+  // preserving the existing circuit-breaker escalation semantics.
   const trackPositions = makeFailureTracker(
     'position monitor',
     (msg) => sendTelegram(msg),
@@ -169,7 +157,6 @@ export async function startAngel() {
 
   startLLMCalibrator();
 
-  // Check ML service health
   const mlPort = process.env.ML_SERVICE_PORT || 8001;
   setTimeout(() => {
     axios.get(`http://127.0.0.1:${mlPort}/health`, { timeout: 3000 })
@@ -181,13 +168,14 @@ export async function startAngel() {
     if (positionMonitorRunning) return;
     positionMonitorRunning = true;
     try {
-      await trackPositions(() => Promise.resolve().then(() => monitorPositions()));
+      await trackPositions(() => Promise.resolve().then(() => monitorAllPositionsByMode()));
     } finally {
       positionMonitorRunning = false;
     }
   }, POSITION_CHECK_MS);
 
-  // ── Durable weekly learning cycle ────────────────────────────────────
+  // Durable weekly learning remains advisory-only. Zero-capital research does
+  // not modify strategy/live configuration automatically.
   const LEARNING_INTERVAL_MS = 7 * 24 * 60 * 60 * 1000;
   const LEARNING_WINDOW_MS = 7 * 24 * 60 * 60 * 1000;
   async function runPeriodicLearning() {
@@ -214,8 +202,7 @@ export async function startAngel() {
   scheduleLearning(firstLearningDelay);
   console.log(`[bot] learning cycle scheduled in ${(firstLearningDelay / 3600000).toFixed(1)}h, then every 7 days (7-day evidence window)`);
 
-  // ── Cache Pruning ─────────────────────────────────────────────────
-  setInterval(pruneExpiredCache, 60 * 60 * 1000); // every hour
+  setInterval(pruneExpiredCache, 60 * 60 * 1000);
   setInterval(() => {
     try {
       const pruned = pruneOldFilteredCandidates();
@@ -228,9 +215,6 @@ export async function startAngel() {
     }
   }, 60 * 60 * 1000);
 
-  // ── Database Backup ───────────────────────────────────────────────
-  // Create a fresh backup at startup so health does not report a stale
-  // snapshot for the first four hours after a restart.
   void runBackup().then(() => console.log('[backup] startup SQLite backup created'))
     .catch(err => console.error(`[backup] startup backup failed: ${err.message}`));
   setInterval(nonOverlapping('database backup', async () => {
@@ -241,5 +225,5 @@ export async function startAngel() {
       console.error(`[backup] failed: ${err.message}`);
       await sendTelegram(`🔴 DATABASE BACKUP FAILED: ${err.message}`);
     }
-  }), 4 * 60 * 60 * 1000); // 4 hours
+  }), 4 * 60 * 60 * 1000);
 }

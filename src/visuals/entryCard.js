@@ -67,18 +67,22 @@ function drawBackground(ctx) {
 function drawHeader(ctx, position) {
   const symbol = position.symbol || position.mint?.slice(0, 8) || 'UNKNOWN';
 
-  // Token symbol left
   ctx.textBaseline = 'middle';
   ctx.font = '600 22px sans-serif';
   ctx.fillStyle = TEXT;
   ctx.textAlign = 'left';
   ctx.fillText(symbol, 32, 40);
 
-  // ENTRY badge right
   ctx.textAlign = 'right';
   ctx.font = '600 16px sans-serif';
   ctx.fillStyle = PROFIT;
-  const entryLabel = position.execution_mode === 'live' ? '\u2705 LIVE ENTRY' : '\u2705 ENTRY';
+  const entryLabel = position.execution_mode === 'live'
+    ? '\u2705 LIVE ENTRY'
+    : position.execution_mode === 'research'
+      ? '\ud83e\uddea RESEARCH · 0 SOL'
+      : position.execution_mode === 'shadow_live'
+        ? '\ud83d\udee1 SHADOW ENTRY'
+        : '\u2705 ENTRY';
   ctx.fillText(entryLabel, W - 32, 40);
 }
 
@@ -92,7 +96,6 @@ function drawDivider(ctx, y) {
 }
 
 function drawInfoRow(ctx, y, label1, value1, label2, value2) {
-  // Panel background
   roundedRect(ctx, 32, y - 14, W - 64, 36, 8);
   ctx.fillStyle = PANEL;
   ctx.fill();
@@ -100,7 +103,6 @@ function drawInfoRow(ctx, y, label1, value1, label2, value2) {
   ctx.textBaseline = 'middle';
   ctx.font = '11px sans-serif';
 
-  // Column 1
   ctx.textAlign = 'left';
   ctx.fillStyle = LABEL;
   ctx.fillText(label1, 48, y);
@@ -109,7 +111,6 @@ function drawInfoRow(ctx, y, label1, value1, label2, value2) {
   ctx.font = '600 13px sans-serif';
   ctx.fillText(value1, 48, y + 16);
 
-  // Column 2
   ctx.textAlign = 'right';
   ctx.font = '11px sans-serif';
   ctx.fillStyle = LABEL;
@@ -129,19 +130,23 @@ function drawColumns(ctx, position) {
   const candidate = snap?.candidate || {};
   const metrics = candidate.metrics || {};
   const signals = candidate.signals || {};
+  const research = position.execution_mode === 'research';
 
   const mcap = fmtUsd(position.entry_mcap || metrics.marketCapUsd);
   const price = fmtUsd(position.entry_price || metrics.priceUsd);
   const holders = metrics.holderCount ?? '\u2014';
   const liquidity = fmtUsd(metrics.liquidityUsd);
-  const size = `${fmtSol(position.size_sol)} SOL`;
+  const sizeLabel = research ? 'Capital / Probe' : 'Size';
+  const size = research
+    ? `0 SOL / ${fmtSol(position.sim_notional_sol ?? position.size_sol)} SOL`
+    : `${fmtSol(position.size_sol)} SOL`;
   const tp = position.tp_percent ? `${position.tp_percent >= 0 ? '+' : ''}${position.tp_percent}%` : '\u2014';
   const sl = position.sl_percent ? `${position.sl_percent}%` : '\u2014';
   const route = signals.route || 'trenches';
 
   drawInfoRow(ctx, 110, 'Market Cap', mcap, 'Price', price);
   drawInfoRow(ctx, 158, 'Holders', String(holders), 'Liquidity', liquidity);
-  drawInfoRow(ctx, 206, 'Size', size, 'TP', tp);
+  drawInfoRow(ctx, 206, sizeLabel, size, 'TP', tp);
   drawInfoRow(ctx, 254, 'Route', route, 'SL', sl);
 }
 
@@ -151,7 +156,6 @@ function drawSummary(ctx, position) {
     ? new Date(position.opened_at_ms).toISOString().slice(0, 19).replace('T', ' ')
     : '\u2014';
 
-  // Summary panel
   const panelX = 80;
   const panelW = W - 160;
   const panelY = 298;
@@ -164,14 +168,12 @@ function drawSummary(ctx, position) {
   ctx.lineWidth = 1;
   ctx.stroke();
 
-  // Mode badge left
   ctx.textBaseline = 'middle';
   ctx.font = '600 14px sans-serif';
   ctx.fillStyle = PROFIT;
   ctx.textAlign = 'center';
   ctx.fillText(mode, W / 2, panelY + 18);
 
-  // Timestamp
   ctx.font = '10px sans-serif';
   ctx.fillStyle = DIM;
   ctx.textAlign = 'center';

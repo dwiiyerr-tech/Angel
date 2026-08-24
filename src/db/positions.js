@@ -18,8 +18,19 @@ export function riskRewardBlockReason(tpPercent, slPercent) {
   return ratio >= minimum ? null : `risk/reward ${ratio.toFixed(2)} < ${minimum.toFixed(2)}`;
 }
 
+// Historical/reporting helper: intentionally returns every open position,
+// including zero-capital Research. Capital/risk code must use the execution-only
+// helpers below so virtual experiments never consume real-money slots.
 export function openPositions() {
   return db.prepare('SELECT * FROM dry_run_positions WHERE status = ? ORDER BY opened_at_ms DESC').all('open');
+}
+
+export function openExecutionPositions() {
+  return db.prepare(`
+    SELECT * FROM dry_run_positions
+    WHERE status = 'open' AND coalesce(execution_mode, 'dry_run') != 'research'
+    ORDER BY opened_at_ms DESC
+  `).all();
 }
 
 export let pendingPositionCount = 0;
@@ -32,18 +43,26 @@ export function decrementPendingPosition() {
   pendingPositionCount = Math.max(0, pendingPositionCount - 1);
 }
 
+function executionOpenCount() {
+  return Number(db.prepare(`
+    SELECT COUNT(*) AS count FROM dry_run_positions
+    WHERE status = 'open' AND coalesce(execution_mode, 'dry_run') != 'research'
+  `).get()?.count || 0);
+}
+
 export function tryReservePositionSlot() {
   const strat = activeStrategy();
   const max = strat.max_open_positions ?? numSetting('max_open_positions', 3);
-  const openCount = db.prepare('SELECT COUNT(*) AS count FROM dry_run_positions WHERE status = ?').get('open').count;
+  const openCount = executionOpenCount();
   if (max > 0 && openCount + pendingPositionCount >= max) return false;
   incrementPendingPosition();
   return true;
 }
 
+// Public legacy name now means capital-bearing/pre-live execution capacity only.
+// Research capacity lives in src/research/engine.js.
 export function openPositionCount() {
-  const count = db.prepare('SELECT COUNT(*) AS count FROM dry_run_positions WHERE status = ?').get('open').count;
-  return count + pendingPositionCount;
+  return executionOpenCount() + pendingPositionCount;
 }
 
 export function hasClosedPosition(mint) {
@@ -61,31 +80,43 @@ export function canOpenMorePositions() {
 }
 
 export function liveEntryBlockReason(mint, strat = activeStrategy()) {
+  // Concurrent exposure to the same mint is blocked even if the other position
+  // is Research; this keeps position identity/reconciliation unambiguous.
   const active = db.prepare(`
     SELECT status FROM dry_run_positions
     WHERE mint = ? AND status IN ('open', 'entry_unknown', 'exit_unknown', 'partial_exit_unknown')
     LIMIT 1
   `).get(mint);
   if (active) return `position_${active.status}`;
+
+  // Closed zero-capital experiments must never impose capital cooldowns.
   const recentClosed = db.prepare(`
-    SELECT id FROM dry_run_positions WHERE mint = ? AND status = 'closed' AND closed_at_ms > ? LIMIT 1
+    SELECT id FROM dry_run_positions
+    WHERE mint = ? AND status = 'closed'
+      AND coalesce(execution_mode, 'dry_run') != 'research'
+      AND closed_at_ms > ?
+    LIMIT 1
   `).get(mint, now() - 24 * 60 * 60 * 1000);
   if (recentClosed) return 'closed_within_24h';
+
   const blockDays = Number(strat.win_block_days ?? ({ sniper: 2, dip_buy: 5, smart_money: 3, degen: 1 }[strat.id] ?? 7));
   const pastWin = db.prepare(`
-    SELECT id FROM dry_run_positions WHERE mint = ? AND status = 'closed' AND pnl_percent > 0
-      AND closed_at_ms > ? LIMIT 1
+    SELECT id FROM dry_run_positions
+    WHERE mint = ? AND status = 'closed' AND pnl_percent > 0
+      AND coalesce(execution_mode, 'dry_run') != 'research'
+      AND closed_at_ms > ?
+    LIMIT 1
   `).get(mint, now() - blockDays * 24 * 60 * 60 * 1000);
   return pastWin ? 'recent_winning_trade' : null;
 }
 
 export function tradingMode() {
   const mode = setting('trading_mode', 'dry_run');
-  // Publicly dry-run and shadow-live are now one Simulation mode. Keep the
-  // historical shadow_live execution label internally so verified simulation
-  // data remains isolated from real-money live history and existing learning
-  // queries continue to work without a destructive migration.
-  if (mode === 'dry_run' || mode === 'simulation') return 'shadow_live';
+  // IMPORTANT: Research routing is handled by src/research/policy.js before any
+  // money-grade executor calls this legacy helper. For backwards compatibility,
+  // old dry_run/simulation values still resolve to shadow_live here so existing
+  // live/shadow execution code does not need a risky broad rewrite in this PR.
+  if (mode === 'dry_run' || mode === 'simulation' || mode === 'research') return 'shadow_live';
   return ['shadow_live', 'confirm', 'live'].includes(mode) ? mode : 'shadow_live';
 }
 
@@ -160,10 +191,14 @@ export function createDryRunPosition(candidateId, candidate, decision, reason = 
     if (existing) return { id: existing.id, isNew: false };
 
     const recentClosed = db.prepare(`
-      SELECT id FROM dry_run_positions WHERE mint = ? AND status = 'closed' AND closed_at_ms > ? LIMIT 1
+      SELECT id FROM dry_run_positions
+      WHERE mint = ? AND status = 'closed'
+        AND coalesce(execution_mode, 'dry_run') != 'research'
+        AND closed_at_ms > ?
+      LIMIT 1
     `).get(candidate.token.mint, now() - 86400000);
     if (recentClosed) {
-      console.log(`[positions] blocked re-entry ${candidate.token.symbol} (${candidate.token.mint.slice(0, 8)}) — closed <24h ago`);
+      console.log(`[positions] blocked re-entry ${candidate.token.symbol} (${candidate.token.mint.slice(0, 8)}) — execution position closed <24h ago`);
       return { id: recentClosed.id, isNew: false };
     }
 
@@ -173,11 +208,12 @@ export function createDryRunPosition(candidateId, candidate, decision, reason = 
     const pastWin = db.prepare(`
       SELECT id, pnl_sol, closed_at_ms FROM dry_run_positions
       WHERE mint = ? AND status = 'closed' AND pnl_percent > 0
+        AND coalesce(execution_mode, 'dry_run') != 'research'
         AND closed_at_ms > ?
       ORDER BY closed_at_ms DESC LIMIT 1
     `).get(candidate.token.mint, now() - WIN_BLOCK_DAYS * 86400000);
     if (pastWin) {
-      console.log(`[positions] blocked re-entry ${candidate.token.symbol} (${candidate.token.mint.slice(0, 8)}) — past WIN exists`);
+      console.log(`[positions] blocked re-entry ${candidate.token.symbol} (${candidate.token.mint.slice(0, 8)}) — past execution WIN exists`);
       return { id: pastWin.id, isNew: false, blockedBy: 'past_win', pastWinPnlSol: pastWin.pnl_sol, pastWinClosedAtMs: pastWin.closed_at_ms };
     }
 
@@ -227,12 +263,24 @@ export function createLivePosition(candidateId, candidate, decision, swap, reaso
   return db.transaction(() => {
     const existing = db.prepare(`SELECT id FROM dry_run_positions WHERE mint = ? AND status = 'open' LIMIT 1`).get(candidate.token.mint);
     if (existing) return { id: existing.id, isNew: false };
-    const recentClosed = db.prepare(`SELECT id FROM dry_run_positions WHERE mint = ? AND status = 'closed' AND closed_at_ms > ? LIMIT 1`).get(candidate.token.mint, now() - 86400000);
+    const recentClosed = db.prepare(`
+      SELECT id FROM dry_run_positions
+      WHERE mint = ? AND status = 'closed'
+        AND coalesce(execution_mode, 'dry_run') != 'research'
+        AND closed_at_ms > ?
+      LIMIT 1
+    `).get(candidate.token.mint, now() - 86400000);
     if (recentClosed) return { id: recentClosed.id, isNew: false };
     const WIN_BLOCK_DAYS_BY_STRATEGY = { sniper: 2, dip_buy: 5, smart_money: 3, degen: 1 };
     const stratId = strat.id || 'default';
     const WIN_BLOCK_DAYS = strat.win_block_days ?? WIN_BLOCK_DAYS_BY_STRATEGY[stratId] ?? numSetting('win_block_days', 7);
-    const pastWin = db.prepare(`SELECT id FROM dry_run_positions WHERE mint = ? AND status = 'closed' AND pnl_percent > 0 AND closed_at_ms > ? LIMIT 1`).get(candidate.token.mint, now() - WIN_BLOCK_DAYS * 86400000);
+    const pastWin = db.prepare(`
+      SELECT id FROM dry_run_positions
+      WHERE mint = ? AND status = 'closed' AND pnl_percent > 0
+        AND coalesce(execution_mode, 'dry_run') != 'research'
+        AND closed_at_ms > ?
+      LIMIT 1
+    `).get(candidate.token.mint, now() - WIN_BLOCK_DAYS * 86400000);
     if (pastWin) return { id: pastWin.id, isNew: false };
     const result = db.prepare(`
       INSERT INTO dry_run_positions (

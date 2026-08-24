@@ -2,8 +2,7 @@ import { bot } from './bot.js';
 import { TELEGRAM_CHAT_ID, TELEGRAM_TOPIC_ID } from '../config.js';
 import { now, json } from '../utils.js';
 import { db } from '../db/connection.js';
-import { escapeHtml, fmtPct, fmtSol, fmtUsd, short, gmgnLink } from '../format.js';
-import { numSetting } from '../db/settings.js';
+import { escapeHtml, fmtPct, fmtSol, short } from '../format.js';
 import { candidateSummary, compactCandidateLine, batchRevealSummary, formatPosition } from './format.js';
 import { candidateButtons, batchRevealButtons, positionButtons, intentButtons } from './menus.js';
 import { batchById } from '../db/decisions.js';
@@ -86,7 +85,13 @@ export async function sendBatch(chatId, batchId) {
 export async function sendPositionOpen(positionId) {
   const position = db.prepare('SELECT * FROM dry_run_positions WHERE id = ?').get(positionId);
   if (!position) return;
-  const label = position.execution_mode === 'live' ? 'Live buy executed' : 'Dry-run buy stored';
+  const label = position.execution_mode === 'live'
+    ? 'Live buy executed'
+    : position.execution_mode === 'research'
+      ? 'Zero-capital research opened'
+      : position.execution_mode === 'shadow_live'
+        ? 'Shadow-live verification opened'
+        : 'Dry-run buy stored';
   const text = `✅ <b>${label}</b>\n\n${formatPosition(position)}`;
   let photoSent = false;
   try {
@@ -111,7 +116,13 @@ export async function sendPositionOpen(positionId) {
 }
 
 export async function sendPositionExit(position) {
-  const label = position?.execution_mode === 'live' ? 'Live exit' : 'Dry-run exit';
+  const label = position?.execution_mode === 'live'
+    ? 'Live exit'
+    : position?.execution_mode === 'research'
+      ? 'Research exit'
+      : position?.execution_mode === 'shadow_live'
+        ? 'Shadow-live exit'
+        : 'Dry-run exit';
   const text = `🏁 <b>${label}: ${escapeHtml(position.exitReason)}</b>\n\n${formatPosition({ ...position, status: 'closed' })}`;
   let photoSent = false;
   try {
