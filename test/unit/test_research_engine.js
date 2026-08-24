@@ -76,6 +76,20 @@ assert.equal(row.initial_risk_percent, 15);
 assert.equal(row.planned_rr, 4);
 assert.equal(row.research_data_quality, 'entry_executable');
 
+// DB-level fail-safe: no future code path may turn a Research record into
+// capital-bearing or signed execution state.
+assert.throws(
+  () => db.prepare('UPDATE dry_run_positions SET real_capital_sol = 0.01 WHERE id = ?').run(created.id),
+  /research invariant/,
+);
+assert.throws(
+  () => db.prepare("UPDATE dry_run_positions SET entry_signature = 'fake-signature' WHERE id = ?").run(created.id),
+  /research invariant/,
+);
+row = db.prepare('SELECT * FROM dry_run_positions WHERE id = ?').get(created.id);
+assert.equal(row.real_capital_sol, 0);
+assert.equal(row.entry_signature, null);
+
 const observation = recordResearchObservation(created.id, {
   price: 0.000013,
   mcap: 13000,
@@ -119,4 +133,4 @@ assert.equal(row.real_capital_sol, 0);
 assert.ok(row.realized_r > 0);
 assert.equal(db.prepare('SELECT COUNT(*) AS count FROM research_observations WHERE position_id = ?').get(created.id).count, 2);
 
-console.log('[research-engine] zero-capital lifecycle invariants passed');
+console.log('[research-engine] zero-capital lifecycle and DB invariants passed');
