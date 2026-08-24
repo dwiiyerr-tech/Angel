@@ -35,6 +35,7 @@ const strongQuality = qualityScoreCandidate(strongCandidate);
 const weakQuality = qualityScoreCandidate(weakCandidate);
 assert.ok(strongQuality.score > weakQuality.score, 'market quality must rank stronger evidence higher');
 assert.equal(strongQuality.dataQuality, 'HIGH');
+assert.equal(qualityScoreCandidate({}).dataQuality, 'LOW', 'missing quality data must stay missing, not become zeros');
 
 assert.deepEqual(
   runnerLabelFromPosition({ mfe_r: 4.2, mae_r: -0.4, time_to_mfe_ms: 600000 }),
@@ -47,6 +48,11 @@ assert.deepEqual(
 assert.deepEqual(
   runnerLabelFromPosition({ mfe_r: 1.2, mae_r: -0.2, time_to_mfe_ms: 600000 }),
   { label: 'non_runner', isRunner: false },
+);
+assert.deepEqual(
+  runnerLabelFromPosition({ mfe_r: 4.2, mae_r: -0.4, time_to_mfe_ms: null }),
+  { label: 'unknown', isRunner: null },
+  'missing time-to-MFE must never be silently promoted to runner',
 );
 
 const strongFeatures = runnerFeatureSnapshot(strongCandidate, strongQuality);
