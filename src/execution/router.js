@@ -23,6 +23,7 @@ import { assertLiveConfigApproved } from '../db/liveConfig.js';
 import { pauseLiveEntries } from '../health/circuitBreaker.js';
 import { assertLossStreakAllowed } from './riskControls.js';
 import { assertContractSafetyForMoneyMode } from './contractSafetyGate.js';
+import { hasPositiveRawAmount, resolveTrackedSellAmount } from './liveInventoryGuard.js';
 
 const ENTRY_MAX_ATTEMPTS = 3;
 
@@ -142,21 +143,13 @@ export async function executeLiveBuy(selectedRow, decision, batchId, rows = [], 
     updateExecutionOperation(claim.operationId, 'failed', { error: 'wallet_fraction_cap' });
     throw new Error(`Position exceeds ${(LIVE_MAX_WALLET_FRACTION * 100).toFixed(0)}% wallet cap.`);
   }
-  const tokenBalanceBefore = await fetchLiveTokenBalance(candidate.token.mint);
+
   let swap = null;
   let lastError = null;
   for (let attempt = 1; attempt <= ENTRY_MAX_ATTEMPTS; attempt++) {
     try {
       assertLiveConfigApproved();
       swap = await executeJupiterSwap({ inputMint: WSOL_MINT, outputMint: candidate.token.mint, amount: amountLamports });
-      if (!swap.outputAmount) {
-        try {
-          const after = await fetchLiveTokenBalance(candidate.token.mint);
-          if (after != null && tokenBalanceBefore != null && BigInt(after) >= BigInt(tokenBalanceBefore)) swap.outputAmount = (BigInt(after) - BigInt(tokenBalanceBefore)).toString();
-        } catch (balErr) {
-          console.warn(`[executeLiveBuy] failed to fetch balance after swap, ignoring: ${balErr.message}`);
-        }
-      }
       lastError = null;
       break;
     } catch (err) {
@@ -166,13 +159,6 @@ export async function executeLiveBuy(selectedRow, decision, batchId, rows = [], 
       const fatalErrors = ['insufficient balance', 'insufficient funds', 'slippage'];
       if (err.message && fatalErrors.some(msg => err.message.toLowerCase().includes(msg))) break;
       if (attempt < ENTRY_MAX_ATTEMPTS) await new Promise(r => setTimeout(r, 1500 * attempt));
-    }
-  }
-  if (!swap && lastError?.swapOutcomeUnknown && tokenBalanceBefore != null) {
-    const after = await fetchLiveTokenBalance(candidate.token.mint);
-    if (after != null && BigInt(after) > BigInt(tokenBalanceBefore)) {
-      swap = { signature: lastError.swapSignature || null, inputAmount: String(amountLamports), outputAmount: (BigInt(after) - BigInt(tokenBalanceBefore)).toString(), recoveredFromBalance: true };
-      lastError = null;
     }
   }
   if (!swap) {
@@ -197,7 +183,7 @@ export async function executeLiveBuy(selectedRow, decision, batchId, rows = [], 
     await pauseLiveEntries(`swap succeeded but position was not newly recorded for ${candidate.token.mint}`);
     throw new Error('CRITICAL: swap succeeded but a new position was not created');
   }
-  const missingAmount = !swap.outputAmount || Number(swap.outputAmount) <= 0;
+  const missingAmount = !hasPositiveRawAmount(swap.outputAmount);
   updateExecutionOperation(claim.operationId, missingAmount ? 'outcome_unknown' : 'completed', { positionId, signature: swap.signature, outputAmount: swap.outputAmount, error: missingAmount ? 'received_token_amount_unknown' : null });
   if (missingAmount) await pauseLiveEntries(`buy succeeded but received token amount is unknown for ${candidate.token.mint}`);
   logDecisionEvent({ batchId, triggerCandidateId, selectedRow, rows, decision, mode: 'live', action: 'live_entry_executed', guardrails: { balanceLamports: balance, amountLamports, minReserveLamports: LIVE_MIN_SOL_RESERVE_LAMPORTS }, execution: { positionId, isNew, swap } });
@@ -205,14 +191,11 @@ export async function executeLiveBuy(selectedRow, decision, batchId, rows = [], 
 }
 
 export async function executeLiveSell(position, reason) {
-  let amount = position.token_amount_raw || position.token_amount_est;
-  if (!amount || Number(amount) <= 0) throw new Error('Live position has no token amount to sell.');
-  const tokenBalanceBefore = await fetchLiveTokenBalance(position.mint);
-  if (tokenBalanceBefore != null) {
-    if (!String(reason).includes('PARTIAL')) amount = tokenBalanceBefore;
-    else if (BigInt(amount) > BigInt(tokenBalanceBefore)) throw new Error('Partial sell amount exceeds confirmed wallet token balance.');
-  }
-  if (!amount || BigInt(amount) <= 0n) throw new Error('Confirmed wallet token balance is zero.');
+  const trackedAmount = position.token_amount_raw || position.token_amount_est;
+  if (!trackedAmount) throw new Error('Live position has no token amount to sell.');
+  const walletAmount = await fetchLiveTokenBalance(position.mint);
+  const amount = resolveTrackedSellAmount({ positionAmountRaw: trackedAmount, walletAmountRaw: walletAmount });
+
   const claim = claimExecutionOperation({ mint: position.mint, side: 'sell', positionId: position.id, inputAmount: amount });
   if (!claim.ok) throw new Error(`Live sell blocked: ${claim.reason}`);
   let lastError = null;
@@ -227,18 +210,10 @@ export async function executeLiveSell(position, reason) {
       if (attempt < 3) await new Promise(r => setTimeout(r, 1500 * attempt));
     }
   }
-  if (lastError?.swapOutcomeUnknown && tokenBalanceBefore != null) {
-    const after = await fetchLiveTokenBalance(position.mint);
-    const expectedDecrease = BigInt(amount);
-    if (after != null && BigInt(tokenBalanceBefore) - BigInt(after) >= expectedDecrease) {
-      updateExecutionOperation(claim.operationId, 'completed', { positionId: position.id, signature: lastError.swapSignature, outputAmount: null, error: 'recovered_from_token_balance_delta' });
-      return { signature: lastError.swapSignature || null, outputAmount: null, recoveredFromBalance: true };
-    }
-  }
   if (lastError?.swapOutcomeUnknown) {
     const unknownStatus = String(reason).includes('PARTIAL') ? 'partial_exit_unknown' : 'exit_unknown';
     db.prepare("UPDATE dry_run_positions SET status = ? WHERE id = ? AND status = 'open'").run(unknownStatus, position.id);
-    updateExecutionOperation(claim.operationId, 'outcome_unknown', { positionId: position.id, error: lastError.message });
+    updateExecutionOperation(claim.operationId, 'outcome_unknown', { positionId: position.id, signature: lastError.swapSignature, error: lastError.message });
     await pauseLiveEntries(`sell outcome unknown for ${position.mint}`);
   } else {
     updateExecutionOperation(claim.operationId, 'failed', { positionId: position.id, error: lastError?.message || 'unknown' });
@@ -298,23 +273,16 @@ export async function executeConfirmedIntent(chatId, intentId) {
       updateExecutionOperation(claim.operationId, 'failed', { error: 'wallet_fraction_cap' });
       throw new Error(`Position exceeds ${(LIVE_MAX_WALLET_FRACTION * 100).toFixed(0)}% wallet cap.`);
     }
-    const tokenBalanceBefore = await fetchLiveTokenBalance(freshRow.candidate.token.mint);
     assertLiveConfigApproved();
     const swap = await executeJupiterSwap({ inputMint: WSOL_MINT, outputMint: freshRow.candidate.token.mint, amount: amountLamports });
     completedSwap = swap;
-    if (!swap.outputAmount) {
-      try {
-        const after = await fetchLiveTokenBalance(freshRow.candidate.token.mint);
-        if (after != null && tokenBalanceBefore != null && BigInt(after) >= BigInt(tokenBalanceBefore)) swap.outputAmount = (BigInt(after) - BigInt(tokenBalanceBefore)).toString();
-      } catch (balErr) { console.warn(`[executeConfirmedIntent] failed to fetch balance after swap, ignoring: ${balErr.message}`); }
-    }
     const { id: positionId, isNew } = createLivePosition(intent.candidate_id, freshRow.candidate, decision, swap, `confirmed_intent_${intentId}`, scaledSizeSol);
     if (!isNew) {
       updateExecutionOperation(claim.operationId, 'outcome_unknown', { signature: swap.signature, outputAmount: swap.outputAmount, error: 'swap_succeeded_but_position_not_created' });
       await pauseLiveEntries(`confirmed swap succeeded but position was not newly recorded for ${freshRow.candidate.token.mint}`);
       throw new Error('CRITICAL: swap succeeded but a new position was not created');
     }
-    const missingAmount = !swap.outputAmount || Number(swap.outputAmount) <= 0;
+    const missingAmount = !hasPositiveRawAmount(swap.outputAmount);
     updateExecutionOperation(claim.operationId, missingAmount ? 'outcome_unknown' : 'completed', { positionId, signature: swap.signature, outputAmount: swap.outputAmount, error: missingAmount ? 'received_token_amount_unknown' : null });
     if (missingAmount) await pauseLiveEntries(`confirmed buy amount unknown for ${freshRow.candidate.token.mint}`);
     db.prepare('UPDATE trade_intents SET status = ?, updated_at_ms = ? WHERE id = ?').run('executed_live', now(), intentId);
@@ -322,7 +290,7 @@ export async function executeConfirmedIntent(chatId, intentId) {
     if (isNew) return sendPositionOpen(positionId);
   } catch (err) {
     if (operationId && (err.swapOutcomeUnknown || completedSwap)) {
-      updateExecutionOperation(operationId, 'outcome_unknown', { signature: completedSwap?.signature, outputAmount: completedSwap?.outputAmount, error: completedSwap ? `swap_succeeded_position_persist_failed: ${err.message}` : err.message });
+      updateExecutionOperation(operationId, 'outcome_unknown', { signature: completedSwap?.signature || err.swapSignature, outputAmount: completedSwap?.outputAmount, error: completedSwap ? `swap_succeeded_position_persist_failed: ${err.message}` : err.message });
       await pauseLiveEntries(`confirmed execution outcome uncertain: ${err.message}`);
     } else if (operationId) {
       const current = db.prepare('SELECT status FROM execution_operations WHERE id = ?').get(operationId);
