@@ -51,17 +51,23 @@ function reserveLiveBuyInsideTransaction({ mint, inputAmount, operationId, at })
   }
 
   const since = at - 24 * 60 * 60 * 1000;
-  const completedEntries = Number(db.prepare(`
-    SELECT COUNT(*) AS count FROM execution_operations
-    WHERE side = 'buy' AND COALESCE(execution_mode, 'live') = 'live'
-      AND status IN ('completed', 'outcome_unknown') AND created_at_ms >= ?
+  const settledOrUnreservedEntries = Number(db.prepare(`
+    SELECT COUNT(*) AS count
+    FROM execution_operations eo
+    WHERE eo.side = 'buy' AND COALESCE(eo.execution_mode, 'live') = 'live'
+      AND eo.status IN ('completed', 'outcome_unknown') AND eo.created_at_ms >= ?
+      AND NOT EXISTS (
+        SELECT 1 FROM live_capital_reservations r
+        WHERE r.operation_id = eo.id AND r.status = 'active'
+      )
   `).get(since)?.count || 0);
   const pendingEntries = Number(db.prepare(`
     SELECT COUNT(*) AS count FROM live_capital_reservations
     WHERE execution_mode = 'live' AND status = 'active' AND created_at_ms >= ?
   `).get(since)?.count || 0);
-  if (completedEntries + pendingEntries >= LIVE_MAX_DAILY_ENTRIES) {
-    throw new Error(`Hard daily live entry cap reached (${completedEntries + pendingEntries}/${LIVE_MAX_DAILY_ENTRIES}).`);
+  const dailyEntries = settledOrUnreservedEntries + pendingEntries;
+  if (dailyEntries >= LIVE_MAX_DAILY_ENTRIES) {
+    throw new Error(`Hard daily live entry cap reached (${dailyEntries}/${LIVE_MAX_DAILY_ENTRIES}).`);
   }
 
   const dailyPnlSol = Number(db.prepare(`
@@ -90,7 +96,7 @@ function reserveLiveBuyInsideTransaction({ mint, inputAmount, operationId, at })
     sizeSol,
     activeCountBefore: activeCount,
     exposureBeforeSol: exposureSol,
-    dailyEntriesBefore: completedEntries + pendingEntries,
+    dailyEntriesBefore: dailyEntries,
     dailyPnlSol,
   };
 }
