@@ -13,6 +13,7 @@
     "edge:report": "node scripts/edge_report.mjs",
     "control:report": "node scripts/control_plane_report.mjs",
     "fast:report": "node scripts/fast_hunter_report.mjs",
+    "chaos:report": "node scripts/live_chaos_report.mjs",
     "dashboard:api": "node src/dashboard/server.js"
   },
   "dependencies": {

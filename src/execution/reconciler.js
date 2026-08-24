@@ -266,9 +266,14 @@ async function reconcileFinalizedSell(operation, receipt) {
   return { resolved: true, action: partial ? 'partial_sell_recovered' : 'sell_recovered', positionId: position.id };
 }
 
-export async function reconcileUnknownExecutions({ limit = 20 } = {}) {
+export async function reconcileUnknownExecutions({
+  limit = 20,
+  receiptFetcher = fetchFinalizedSwapReceipt,
+  walletAvailable = null,
+} = {}) {
   ensureLiveSafetySchema();
-  if (!liveWalletPubkey()) return { checked: 0, resolved: 0, pending: 0, skipped: 'wallet_unavailable' };
+  const hasWallet = walletAvailable == null ? Boolean(liveWalletPubkey()) : Boolean(walletAvailable);
+  if (!hasWallet) return { checked: 0, resolved: 0, pending: 0, skipped: 'wallet_unavailable' };
 
   const operations = db.prepare(`
     SELECT * FROM execution_operations
@@ -293,7 +298,7 @@ export async function reconcileUnknownExecutions({ limit = 20 } = {}) {
       const mints = operation.side === 'buy'
         ? { inputMint: WSOL_MINT, outputMint: operation.mint }
         : { inputMint: operation.mint, outputMint: WSOL_MINT };
-      const receipt = await fetchFinalizedSwapReceipt(operation.signature, mints);
+      const receipt = await receiptFetcher(operation.signature, mints, operation);
       if (!receipt.finalized) {
         pending += 1;
         details.push({ id: operation.id, resolved: false, reason: 'not_finalized' });

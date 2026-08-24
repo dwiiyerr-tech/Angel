@@ -152,8 +152,36 @@ export function claimExecutionOperation({ mint, side, positionId = null, intentI
   })();
 }
 
+function sellLedgerHasCommitted(operation, positionId) {
+  if (!operation || operation.side !== 'sell' || !positionId) return true;
+  const position = db.prepare('SELECT status, partial_tp_done FROM dry_run_positions WHERE id = ?').get(positionId);
+  if (!position) return false;
+  if (position.status === 'closed') return true;
+  if (position.status !== 'open' || !Number(position.partial_tp_done || 0)) return false;
+
+  // A partial position mutation is followed by a sell audit row. The normal
+  // executor calls updateExecutionOperation before that mutation, while the
+  // reconciler calls it after the recovered trade row is persisted.
+  const trade = db.prepare(`
+    SELECT id FROM dry_run_trades
+    WHERE position_id = ? AND side = 'sell' AND at_ms > ?
+    ORDER BY id DESC LIMIT 1
+  `).get(positionId, Number(operation.created_at_ms || 0));
+  return Boolean(trade);
+}
+
 export function updateExecutionOperation(id, status, details = {}) {
   ensureLiveSafetySchema();
+  const existing = db.prepare('SELECT id, side, position_id, created_at_ms FROM execution_operations WHERE id = ?').get(id);
+  const positionId = details.positionId ?? existing?.position_id ?? null;
+  let effectiveStatus = status;
+  let effectiveError = details.error ?? null;
+
+  if (status === 'completed' && existing?.side === 'sell' && !sellLedgerHasCommitted(existing, positionId)) {
+    effectiveStatus = 'outcome_unknown';
+    effectiveError = 'finalized_sell_pending_position_ledger';
+  }
+
   db.prepare(`
     UPDATE execution_operations
     SET status = ?, position_id = COALESCE(?, position_id), output_amount = COALESCE(?, output_amount),
@@ -161,11 +189,11 @@ export function updateExecutionOperation(id, status, details = {}) {
         updated_at_ms = ?
     WHERE id = ?
   `).run(
-    status,
-    details.positionId ?? null,
+    effectiveStatus,
+    positionId,
     details.outputAmount == null ? null : String(details.outputAmount),
     details.signature ?? null,
-    details.error ?? null,
+    effectiveError,
     details.finalizedAtMs ?? null,
     now(),
     id,
