@@ -1,6 +1,7 @@
 import axios from 'axios';
 import { setting } from '../db/settings.js';
 import { assessCandidateEdge } from '../edge/edgeAssessment.js';
+import { decorateCandidateControlPlane } from '../controlPlane/challenger.js';
 
 const ML_SERVICE_PORT = process.env.ML_SERVICE_PORT || 8001;
 const ML_SERVICE_URL = `http://127.0.0.1:${ML_SERVICE_PORT}/predict`;
@@ -22,7 +23,6 @@ function attachEdgeEvidence(candidate, momentumScore) {
     candidate.filters.edgeOpportunityProbability = edge.combined.opportunityProbability;
     candidate.filters.edgeOpportunityConfidence = edge.combined.opportunityConfidence;
     candidate.filters.edgeEvidenceQuality = edge.combined.evidenceQuality;
-    return edge;
   } catch (error) {
     candidate.edge = {
       version: 'edge-assessment-v1',
@@ -32,8 +32,13 @@ function attachEdgeEvidence(candidate, momentumScore) {
       route: null,
       combined: { decisionEligible: false, evidenceQuality: 'LOW' },
     };
-    return candidate.edge;
   }
+  try {
+    decorateCandidateControlPlane(candidate);
+  } catch (error) {
+    candidate.controlPlane = { error: error.message, activeVersion: null, challengerVersion: null };
+  }
+  return candidate.edge;
 }
 
 /**
