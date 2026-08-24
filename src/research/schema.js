@@ -53,7 +53,51 @@ export function ensureResearchSchema() {
         ON research_observations(position_id, at_ms);
       CREATE INDEX IF NOT EXISTS idx_research_observations_mint_at
         ON research_observations(mint, at_ms);
+
+      CREATE TRIGGER IF NOT EXISTS trg_research_zero_capital_insert
+      BEFORE INSERT ON dry_run_positions
+      WHEN NEW.execution_mode = 'research'
+        AND (
+          COALESCE(NEW.real_capital_sol, 0) != 0
+          OR NEW.sim_notional_sol IS NULL
+          OR NEW.sim_notional_sol <= 0
+          OR NEW.entry_signature IS NOT NULL
+          OR NEW.exit_signature IS NOT NULL
+        )
+      BEGIN
+        SELECT RAISE(ABORT, 'research invariant: zero capital, positive probe, no signatures');
+      END;
+
+      CREATE TRIGGER IF NOT EXISTS trg_research_zero_capital_update
+      BEFORE UPDATE ON dry_run_positions
+      WHEN NEW.execution_mode = 'research'
+        AND (
+          COALESCE(NEW.real_capital_sol, 0) != 0
+          OR NEW.sim_notional_sol IS NULL
+          OR NEW.sim_notional_sol <= 0
+          OR NEW.entry_signature IS NOT NULL
+          OR NEW.exit_signature IS NOT NULL
+        )
+      BEGIN
+        SELECT RAISE(ABORT, 'research invariant: zero capital, positive probe, no signatures');
+      END;
     `);
+
+    const invalidResearch = db.prepare(`
+      SELECT id FROM dry_run_positions
+      WHERE execution_mode = 'research'
+        AND (
+          COALESCE(real_capital_sol, 0) != 0
+          OR sim_notional_sol IS NULL
+          OR sim_notional_sol <= 0
+          OR entry_signature IS NOT NULL
+          OR exit_signature IS NOT NULL
+        )
+      LIMIT 1
+    `).get();
+    if (invalidResearch) {
+      throw new Error(`research invariant violated by existing position #${invalidResearch.id}`);
+    }
   })();
 
   initialized = true;
