@@ -118,6 +118,9 @@ export function ensureControlPlaneSchema() {
       OR NEW.runner_model_version != OLD.runner_model_version
       OR NEW.route_edge_model_version != OLD.route_edge_model_version
       OR NEW.simulator_version != OLD.simulator_version
+      OR COALESCE(NEW.evidence_window_ms, -1) != COALESCE(OLD.evidence_window_ms, -1)
+      OR COALESCE(NEW.evidence_sample, -1) != COALESCE(OLD.evidence_sample, -1)
+      OR NEW.evidence_json != OLD.evidence_json
     BEGIN
       SELECT RAISE(ABORT, 'config version payload is immutable');
     END;
