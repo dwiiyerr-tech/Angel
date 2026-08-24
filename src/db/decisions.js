@@ -1,6 +1,7 @@
 import { db } from './connection.js';
 import { now, safeJson, json } from '../utils.js';
 import { numSetting } from './settings.js';
+import { recordChallengerObservation } from '../controlPlane/challenger.js';
 
 export function storeDecision(candidateId, candidate, decision) {
   const result = db.prepare(`
@@ -38,6 +39,14 @@ export function storeDecision(candidateId, candidate, decision) {
       candidate.metrics?.holderCount || null,
       candidate.metrics?.liquidityUsd || null,
     );
+  }
+
+  // The challenger is observational only. A control-plane write failure must
+  // never change the trading decision or become an execution veto.
+  try {
+    recordChallengerObservation(candidateId, candidate, decision);
+  } catch (error) {
+    console.warn(`[control-plane] challenger observation degraded: ${error.message}`);
   }
   
   return Number(result.lastInsertRowid);
