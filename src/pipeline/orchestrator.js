@@ -3,12 +3,12 @@ import { numSetting, boolSetting, setting } from '../db/settings.js';
 import { db } from '../db/connection.js';
 import { upsertCandidate, updateCandidateStatus, updateCandidateSnapshot, recentEligibleCandidates, candidateById } from '../db/candidates.js';
 import { storeDecision, storeBatchDecision, logDecisionEvent, checkDecisionCache } from '../db/decisions.js';
-import { buildCandidate, filterCandidate, signalLabel } from './candidateBuilder.js';
+import { buildCandidate } from './candidateBuilder.js';
 import { preScoreCandidate } from './preScorer.js';
 import { momentumFilter } from './momentumFilter.js';
 import { decideCandidateBatch } from './llm.js';
 import { activeStrategy } from '../db/settings.js';
-import { calculatePositionSizeSol, createDryRunPosition, createLivePosition, canOpenMorePositions, openPositionCount, tradingMode, tryReservePositionSlot, decrementPendingPosition } from '../db/positions.js';
+import { calculatePositionSizeSol, canOpenMorePositions, openPositionCount, tradingMode, tryReservePositionSlot, decrementPendingPosition } from '../db/positions.js';
 import { sendBatchReveal, sendTelegram, sendPositionOpen, sendTradeIntent } from '../telegram/send.js';
 import { candidateSummary } from '../telegram/format.js';
 import { createTradeIntent } from '../db/intents.js';
@@ -18,14 +18,20 @@ import { executeLiveBuy } from '../execution/router.js';
 import { graduated } from '../signals/graduated.js';
 import { setDegenHandler } from '../signals/trending.js';
 import { setCandidateHandler } from '../signals/feeClaim.js';
-import { short } from '../format.js';
-import { escapeHtml } from '../format.js';
-import { fetchDryRunEntryQuote } from '../enrichment/jupiter.js';
+import { short, escapeHtml } from '../format.js';
 import { evaluateMarketAllocator, allocationAllowsCandidate } from '../execution/marketAllocator.js';
 import { applyContractSafetyGate } from '../execution/contractSafetyGate.js';
+import { isResearchSimulationMode, requiresMoneyGradeEvidence } from '../research/policy.js';
+import {
+  executeResearchEntry,
+  canOpenResearchPosition,
+  openResearchPositionCount,
+  researchPositionCap,
+} from '../research/engine.js';
+import { hunterPolicy } from './hunterPolicy.js';
 
-// Track A: High-conviction routes that bypass PreScorer/ML/LLM for sub-second execution
-// User requested full pipeline (ML + LLM) for all routes, so this is empty.
+// Keep fast-track disabled: research aggression comes from explicit Hunter policy,
+// never from bypassing the established candidate safety/enrichment pipeline.
 const TRACK_A_ROUTES = new Set([]);
 
 export const seenSignalCandidates = new Map();
@@ -34,6 +40,30 @@ export const executingMints = new Set();
 
 setDegenHandler(maybeProcessDegenCandidate);
 setCandidateHandler(processCandidateFromSignals);
+
+function candidateRiskSeverity(candidate) {
+  return (candidate?.riskFlags || []).reduce((sum, flag) => sum + Math.max(0, Number(flag?.severity) || 0), 0);
+}
+
+function researchCapacity() {
+  return {
+    allowed: canOpenResearchPosition(),
+    open: openResearchPositionCount(),
+    max: researchPositionCap(),
+  };
+}
+
+function executionCapacity() {
+  return {
+    allowed: canOpenMorePositions(),
+    open: openPositionCount(),
+    max: numSetting('max_open_positions', 3),
+  };
+}
+
+function activeCapacity(researchMode) {
+  return researchMode ? researchCapacity() : executionCapacity();
+}
 
 export async function processCandidateFromSignals(signals) {
   recordSignalProcessed();
@@ -48,89 +78,108 @@ export async function processCandidateFromSignals(signals) {
 }
 
 async function _processCandidateFromSignals(signals) {
-  // Skip if max positions reached — don't waste enrichment/LLM calls
-  if (!canOpenMorePositions()) {
-    const max = numSetting('max_open_positions', 3);
-    console.log(`[agent] max positions reached (${openPositionCount()}/${max}), skipping ${signals.mint.slice(0, 8)}...`);
+  const researchMode = isResearchSimulationMode();
+  const capacity = activeCapacity(researchMode);
+  if (!capacity.allowed) {
+    console.log(`[agent] ${researchMode ? 'research' : 'execution'} max positions reached (${capacity.open}/${capacity.max}), skipping ${signals.mint.slice(0, 8)}...`);
     return;
   }
 
-  // Load strategy early — needed for duplicate checks below
   const strat = activeStrategy();
   const blockedRoutes = (() => {
     try { return JSON.parse(setting('blocked_routes', '[]')); } catch { return []; }
   })();
-  if (blockedRoutes.some(route => String(signals.route || '').includes(route))) {
+  const adaptivelyBlockedRoute = blockedRoutes.some(route => String(signals.route || '').includes(route));
+  if (adaptivelyBlockedRoute && !researchMode) {
     console.log(`[agent] blocked route ${signals.route} for ${signals.mint.slice(0, 8)}...`);
     return;
   }
+  if (adaptivelyBlockedRoute && researchMode) {
+    console.log(`[research] observing adaptively-blocked route ${signals.route}; no capital is at risk`);
+  }
 
-  // DUPLICATE CHECKS — all run BEFORE enrichment to save API calls
+  // Duplicate checks stay strict for simultaneously open positions, but research
+  // uses a short experiment cooldown instead of inheriting live history/win bans.
   try {
-    const recentMs = Date.now() - 2 * 3600000; // 2 hours
-
-    // 1. Open position exists
     const openPos = db.prepare(
-      'SELECT id FROM dry_run_positions WHERE mint = ? AND status = ? LIMIT 1'
-    ).get(signals.mint, 'open');
+      `SELECT id FROM dry_run_positions
+       WHERE mint = ? AND status IN ('open', 'entry_unknown', 'exit_unknown', 'partial_exit_unknown')
+       LIMIT 1`
+    ).get(signals.mint);
     if (openPos) {
-      console.log(`[agent] skipping ${signals.mint.slice(0, 8)}... — already has open position`);
+      console.log(`[agent] skipping ${signals.mint.slice(0, 8)}... — already has active position`);
       return;
     }
 
-    // 2. Recently closed position (<4h) — allow re-entries after 4h cooldown
-    const closedPos = db.prepare(
-      'SELECT id, exit_reason, closed_at_ms FROM dry_run_positions WHERE mint = ? AND status = ? AND closed_at_ms > ? ORDER BY closed_at_ms DESC LIMIT 1'
-    ).get(signals.mint, 'closed', Date.now() - 4 * 60 * 60 * 1000);
-    if (closedPos) {
-      const hoursAgo = ((Date.now() - closedPos.closed_at_ms) / 3600000).toFixed(1);
-      console.log(`[agent] skipping ${signals.mint.slice(0, 8)}... — recently closed (${hoursAgo}h ago, exit: ${closedPos.exit_reason})`);
-      return;
-    }
-
-    // 3. LLM decision cache — only relevant when strategy uses LLM
-    if (strat.use_llm) {
-      const recentDecision = db.prepare(`
-        SELECT id FROM llm_decisions
-        WHERE mint = ? AND created_at_ms > ?
-        LIMIT 1
-      `).get(signals.mint, recentMs);
-      if (recentDecision) {
-        console.log(`[agent] skipping ${signals.mint.slice(0, 8)}... — LLM decision exists (<2h)`);
+    if (researchMode) {
+      const researchCooldownMs = Math.max(0, numSetting('research_reentry_cooldown_minutes', 30)) * 60_000;
+      if (researchCooldownMs > 0) {
+        const recentResearch = db.prepare(`
+          SELECT id, exit_reason, closed_at_ms FROM dry_run_positions
+          WHERE mint = ? AND execution_mode = 'research' AND status = 'closed' AND closed_at_ms > ?
+          ORDER BY closed_at_ms DESC LIMIT 1
+        `).get(signals.mint, Date.now() - researchCooldownMs);
+        if (recentResearch) {
+          console.log(`[research] skipping ${signals.mint.slice(0, 8)}... — research cooldown active`);
+          return;
+        }
+      }
+    } else {
+      const recentMs = Date.now() - 2 * 3600000;
+      const closedPos = db.prepare(
+        'SELECT id, exit_reason, closed_at_ms FROM dry_run_positions WHERE mint = ? AND status = ? AND closed_at_ms > ? ORDER BY closed_at_ms DESC LIMIT 1'
+      ).get(signals.mint, 'closed', Date.now() - 4 * 60 * 60 * 1000);
+      if (closedPos) {
+        const hoursAgo = ((Date.now() - closedPos.closed_at_ms) / 3600000).toFixed(1);
+        console.log(`[agent] skipping ${signals.mint.slice(0, 8)}... — recently closed (${hoursAgo}h ago, exit: ${closedPos.exit_reason})`);
         return;
+      }
+
+      if (strat.use_llm) {
+        const recentDecision = db.prepare(`
+          SELECT id FROM llm_decisions
+          WHERE mint = ? AND created_at_ms > ?
+          LIMIT 1
+        `).get(signals.mint, recentMs);
+        if (recentDecision) {
+          console.log(`[agent] skipping ${signals.mint.slice(0, 8)}... — LLM decision exists (<2h)`);
+          return;
+        }
       }
     }
   } catch (err) {
-    // DB check failed — proceed anyway
+    console.warn(`[agent] duplicate precheck degraded: ${err.message}`);
   }
 
-  // Bidirectional dedup — skip ANY route if this mint already has a recent candidate entry within 10 minutes
-  // (prevents same token processed via pumpportal_graduated, pumpfun_pregrad, fee_trending, dual_source, etc. simultaneously)
+  // Prevent route fan-in races. Ten minutes is short enough for research while
+  // still preventing one mint from being processed concurrently from many feeds.
   try {
     const recentCandidate = db.prepare(`
       SELECT id FROM candidates
       WHERE mint = ? AND created_at_ms > ?
       LIMIT 1
-    `).get(signals.mint, Date.now() - 600000); // 10 minutes
+    `).get(signals.mint, Date.now() - 600000);
     if (recentCandidate) {
       console.log(`[agent] skipping ${signals.mint.slice(0, 8)}... — recent candidate (<10min) for any route`);
       return;
     }
   } catch (err) {
-    // DB check failed — proceed anyway
+    console.warn(`[agent] candidate dedup degraded: ${err.message}`);
   }
 
-  // FIX #1: Check decision cache BEFORE expensive buildCandidate() API calls
-  // Lightweight check with just mint — full enrichment happens only if cache miss
-  const cachedDecision = checkDecisionCache(signals.mint, signals.mcap || null, signals.holders || null);
-  if (cachedDecision) {
-    const ageMin = ((now() - cachedDecision.cachedAt) / 60000).toFixed(1);
-    console.log(`[cache-hit] ${signals.mint.slice(0, 8)}... — verdict ${cachedDecision.verdict} (cached ${ageMin}m ago, reason: ${cachedDecision.reason?.slice(0, 60) || 'n/a'})`);
-    return;
+  // Decision cache is an execution optimization, not a research truth source.
+  // Reusing an old WATCH/PASS in zero-capital research would suppress fresh data.
+  if (!researchMode) {
+    const cachedDecision = checkDecisionCache(signals.mint, signals.mcap || null, signals.holders || null);
+    if (cachedDecision) {
+      const ageMin = ((now() - cachedDecision.cachedAt) / 60000).toFixed(1);
+      console.log(`[cache-hit] ${signals.mint.slice(0, 8)}... — verdict ${cachedDecision.verdict} (cached ${ageMin}m ago, reason: ${cachedDecision.reason?.slice(0, 60) || 'n/a'})`);
+      return;
+    }
   }
 
-  let candidate = await buildCandidate(signals);
-  const moneyMode = tradingMode() !== 'dry_run';
+  const candidate = await buildCandidate(signals);
+  const moneyMode = requiresMoneyGradeEvidence();
   await applyContractSafetyGate(candidate, {
     moneyMode,
     stage: 'screening',
@@ -139,64 +188,53 @@ async function _processCandidateFromSignals(signals) {
   const signature = signals.signature || null;
   const candidateId = upsertCandidate(candidate, signature);
 
-  // Symbol-based dedup — skip copycat tokens with same symbol traded in last 24h
-  try {
-    const symbol = candidate.token?.symbol;
-    if (symbol) {
-      const symbolPos = db.prepare(
-        'SELECT id FROM dry_run_positions WHERE symbol = ? AND closed_at_ms > ? LIMIT 1'
-      ).get(symbol, Date.now() - 86400000);
-      if (symbolPos) {
-        console.log(`[agent] skipping ${symbol} (${candidate.token.mint.slice(0, 8)}) — same symbol traded <24h ago`);
-        return;
+  // Symbol copycat history is a capital-protection heuristic. Research records
+  // it as context instead of suppressing otherwise valid zero-capital samples.
+  if (!researchMode) {
+    try {
+      const symbol = candidate.token?.symbol;
+      if (symbol) {
+        const symbolPos = db.prepare(
+          'SELECT id FROM dry_run_positions WHERE symbol = ? AND closed_at_ms > ? LIMIT 1'
+        ).get(symbol, Date.now() - 86400000);
+        if (symbolPos) {
+          console.log(`[agent] skipping ${symbol} (${candidate.token.mint.slice(0, 8)}) — same symbol traded <24h ago`);
+          return;
+        }
       }
+    } catch (err) {
+      console.warn(`[agent] symbol dedup degraded: ${err.message}`);
     }
-  } catch (err) {
-    // DB check failed — proceed anyway
   }
 
-  if (!candidate.filters.passed) {
-    // filterCandidate already emits the complete rejection record.
-    return;
-  }
+  if (!candidate.filters.passed) return;
 
-  // ── DUAL-TRACK PIPELINE ─────────────────────────────────────────────────
-  // Track A (pumpportal_graduated, trenches_completed): bypass PreScorer/ML/LLM
-  //   → pure Kaiser filter gate → direct BUY verdict → instant execution
-  // Track B (all other routes): full pipeline PreScorer → Momentum ML → LLM
   const isTrackA = TRACK_A_ROUTES.has(signals.route);
-
   if (!isTrackA) {
-    // ── Track B: Full analytical pipeline ──────────────────────────────────
-    // Pre-score: rule-based check before LLM (saves LLM credits)
     const preScoreHardFloor = Number(strat.prescore_hard_floor ?? 35);
     const preScore = preScoreCandidate(candidate, preScoreHardFloor);
     candidate.filters.preScore = preScore.score;
     candidate.filters.preScorePreferred = preScore.passed;
     const preScoreVetoFloor = Number(strat.prescore_veto_floor ?? -50);
     if (preScore.score <= preScoreVetoFloor) {
-      console.log(`[prescore] safety-veto ${candidate.token.mint.slice(0, 8)}... score ${preScore.score} <= ${preScoreVetoFloor} (${preScore.reasons.slice(0, 2).join('; ')})`);
+      console.log(`[prescore] catastrophic-veto ${candidate.token.mint.slice(0, 8)}... score ${preScore.score} <= ${preScoreVetoFloor}`);
       candidate.filters.passed = false;
       candidate.filters.failures.push(`prescore catastrophic veto: ${preScore.score} <= ${preScoreVetoFloor}`);
       updateCandidateSnapshot(candidateId, candidate, 'filtered');
       return;
     }
-    console.log(`[prescore] ranked ${candidate.token.mint.slice(0, 8)}... score ${preScore.score} (preferred ${preScore.threshold}, veto ${preScoreVetoFloor})`);
 
-    // Momentum filter — ML-based prediction of runner vs sideways
-    // The current model is only weakly predictive, so use the configured
-    // threshold as a preference and veto only clearly weak momentum.
     const momentumPreferred = Number(strat.momentum_threshold ?? 0.5);
     const momentumVetoFloor = Number(strat.momentum_veto_floor ?? 0.1);
     const momentumResult = await momentumFilter(candidate, momentumVetoFloor);
     const isFreshRoute = ['pumpportal_graduated', 'pumpfun_pregrad'].includes(signals.route);
     const mlUnavailable = Number(momentumResult.score) < 0;
-    const liveMlUnavailable = tradingMode() !== 'dry_run' && mlUnavailable;
-    const catastrophicMomentum = !isFreshRoute && !mlUnavailable && Number(momentumResult.score) < momentumVetoFloor;
+    const liveMlUnavailable = requiresMoneyGradeEvidence() && mlUnavailable;
+    const catastrophicMomentum = !researchMode && !isFreshRoute && !mlUnavailable && Number(momentumResult.score) < momentumVetoFloor;
     if (liveMlUnavailable || catastrophicMomentum) {
       candidate.filters.passed = false;
       candidate.filters.failures.push(liveMlUnavailable
-        ? 'momentum unavailable for money mode'
+        ? 'momentum unavailable for money-grade mode'
         : `momentum catastrophic veto ${momentumResult.score} < ${momentumVetoFloor}`);
       candidate.filters.momentumScore = momentumResult.score;
       console.log(`[momentum] safety-veto ${candidate.token.mint.slice(0, 8)}... score ${momentumResult.score}`);
@@ -205,16 +243,15 @@ async function _processCandidateFromSignals(signals) {
     }
     candidate.filters.momentumScore = momentumResult.score;
     candidate.filters.momentumPreferred = momentumResult.score < 0 || momentumResult.score >= momentumPreferred;
-  } else {
-    console.log(`[track-a] ⚡ ${candidate.token.mint.slice(0, 8)}... FAST-TRACK via ${signals.route} — bypassing PreScorer/ML/LLM`);
   }
 
   updateCandidateSnapshot(candidateId, candidate);
 
-  let rows, batchDecision, batchId;
+  let rows;
+  let batchDecision;
+  let batchId;
 
   if (!strat.use_llm || isTrackA) {
-    // Track A / Rule-based: direct BUY verdict, no LLM latency
     const selfRow = candidateById(candidateId);
     rows = selfRow ? [selfRow] : [];
     batchId = null;
@@ -225,19 +262,54 @@ async function _processCandidateFromSignals(signals) {
       selected_mint: candidate.token.mint,
       selected_row: selfRow,
       reason: isTrackA
-        ? `⚡ Track A Direct: ${signals.route} — Kaiser filters passed, bypassed LLM/ML.`
-        : `Strategy '${strat.id}' is rule-based (use_llm: false); filters passed.`,
+        ? `Track A Direct: ${signals.route} — deterministic filters passed.`
+        : `Strategy '${strat.id}' is rule-based; deterministic filters passed.`,
       risks: [],
       suggested_tp_percent: strat.tp_percent ?? numSetting('default_tp_percent', 50),
       suggested_sl_percent: isTrackA ? -15 : (strat.sl_percent ?? numSetting('default_sl_percent', -25)),
       raw: null,
     };
   } else {
-    // Track B: LLM batch evaluation
     rows = recentEligibleCandidates(numSetting('llm_candidate_pick_count', 10));
     batchDecision = await decideCandidateBatch(rows, candidateId);
     batchId = storeBatchDecision(candidateId, rows, batchDecision);
   }
+
+  // In Research, LLM is advisory. If it does not select a BUY, deterministic
+  // Hunter policy may still open a zero-capital sample. Hard candidate and
+  // contract filters above remain authoritative.
+  if (researchMode && (!batchDecision?.selected_row || batchDecision.verdict !== 'BUY')) {
+    const selfRow = candidateById(candidateId);
+    const prescore = Number(candidate.filters?.preScore);
+    const momentum = Number(candidate.filters?.momentumScore);
+    const derivedConfidence = Math.max(
+      numSetting('research_min_confidence', 30),
+      Math.min(100, Number.isFinite(prescore) ? prescore : 50),
+    );
+    const policy = hunterPolicy({
+      confidence: derivedConfidence,
+      preScore: prescore,
+      momentum,
+      totalSoftRiskSeverity: candidateRiskSeverity(candidate),
+      catastrophic: false,
+    });
+    if (policy.action === 'TRADE' && selfRow) {
+      batchDecision = {
+        ...batchDecision,
+        verdict: 'BUY',
+        confidence: Math.max(30, Math.min(100, policy.score)),
+        selected_candidate_id: candidateId,
+        selected_mint: candidate.token.mint,
+        selected_row: selfRow,
+        reason: `Research Hunter ${policy.tier}: LLM advisory did not veto zero-capital sampling. ${batchDecision?.reason || ''}`.trim(),
+        risks: batchDecision?.risks || [],
+        suggested_tp_percent: Number(batchDecision?.suggested_tp_percent ?? strat.tp_percent ?? numSetting('default_tp_percent', 50)),
+        suggested_sl_percent: Number(batchDecision?.suggested_sl_percent ?? strat.sl_percent ?? numSetting('default_sl_percent', -25)),
+        research_hunter_policy: policy,
+      };
+    }
+  }
+
   const selectedRow = batchDecision.selected_row;
   const selectedThisCandidate = selectedRow?.id === candidateId;
   const currentDecision = selectedThisCandidate
@@ -263,20 +335,18 @@ async function _processCandidateFromSignals(signals) {
 
   if (batchId) await sendBatchReveal(batchId, rows, batchDecision, candidateId);
 
-  // #6: Buy the LLM's selected candidate regardless of which candidate triggered the batch
-  // FIX: Tighten confidence required during US Session (12:00 - 18:00 UTC)
   const currentUTCHourExecute = new Date().getUTCHours();
   const isUsSessionExecute = currentUTCHourExecute >= 12 && currentUTCHourExecute <= 18;
-  const configuredConfidence = numSetting('llm_min_confidence');
+  const configuredConfidence = numSetting('llm_min_confidence', 40);
   const sessionConfidenceFloor = 60;
-  const requiredConfidence = isUsSessionExecute
-    ? Math.max(configuredConfidence, sessionConfidenceFloor)
-    : configuredConfidence;
+  const requiredConfidence = researchMode
+    ? Math.max(0, numSetting('research_min_confidence', 30))
+    : (isUsSessionExecute ? Math.max(configuredConfidence, sessionConfidenceFloor) : configuredConfidence);
 
   if (selectedRow && boolSetting('agent_enabled', true) && batchDecision.verdict === 'BUY' && batchDecision.confidence >= requiredConfidence) {
-    if (!canOpenMorePositions()) {
-      const max = numSetting('max_open_positions', 3);
-      console.log(`[agent] max open positions reached (${openPositionCount()}/${max}), skipping buy ${selectedRow.candidate.token.mint}`);
+    const freshCapacity = activeCapacity(researchMode);
+    if (!freshCapacity.allowed) {
+      console.log(`[agent] ${researchMode ? 'research' : 'execution'} capacity reached (${freshCapacity.open}/${freshCapacity.max}), skipping ${selectedRow.candidate.token.mint}`);
       logDecisionEvent({
         batchId,
         triggerCandidateId: candidateId,
@@ -284,7 +354,7 @@ async function _processCandidateFromSignals(signals) {
         rows,
         decision: batchDecision,
         action: 'entry_skipped_max_positions',
-        guardrails: { maxOpenPositions: max, openPositions: openPositionCount() },
+        guardrails: { researchMode, maxOpenPositions: freshCapacity.max, openPositions: freshCapacity.open },
       });
       return;
     }
@@ -299,10 +369,10 @@ async function _processCandidateFromSignals(signals) {
         rows,
         decision: batchDecision,
         action: 'handle_buy_error',
-        guardrails: { error: err.message, stack: err.stack?.slice(0, 500) },
+        guardrails: { researchMode, error: err.message, stack: err.stack?.slice(0, 500) },
       });
       await sendTelegram([
-        '🛑 <b>Buy execution failed</b>',
+        `🛑 <b>${researchMode ? 'Research entry' : 'Buy execution'} failed</b>`,
         '',
         candidateSummary(selectedRow.candidate, batchDecision),
         '',
@@ -310,6 +380,7 @@ async function _processCandidateFromSignals(signals) {
       ].join('\n')).catch(e => console.error(e));
     }
   } else {
+    const currentCapacity = activeCapacity(researchMode);
     logDecisionEvent({
       batchId,
       triggerCandidateId: candidateId,
@@ -318,10 +389,11 @@ async function _processCandidateFromSignals(signals) {
       decision: batchDecision,
       action: selectedRow ? 'entry_not_approved' : 'no_candidate_selected',
       guardrails: {
+        researchMode,
         agentEnabled: boolSetting('agent_enabled', true),
         confidenceThreshold: requiredConfidence,
-        openPositions: openPositionCount(),
-        maxOpenPositions: numSetting('max_open_positions', 3),
+        openPositions: currentCapacity.open,
+        maxOpenPositions: currentCapacity.max,
       },
     });
   }
@@ -330,6 +402,38 @@ async function _processCandidateFromSignals(signals) {
 export async function handleApprovedBuy(selectedRow, decision, batchId, rows = [], triggerCandidateId = null) {
   const mint = selectedRow.candidate.token.mint;
   if (executingMints.has(mint)) return;
+
+  // Research is deliberately separated before market allocator, wallet reserve,
+  // transaction simulation, live risk budget, and live config checks. Its only
+  // "size" is a Jupiter quote probe; real capital, signing, and broadcast are 0.
+  if (isResearchSimulationMode()) {
+    executingMints.add(mint);
+    try {
+      const result = await executeResearchEntry(selectedRow, decision, `research_batch_${batchId ?? 'rule'}`);
+      logDecisionEvent({
+        batchId,
+        triggerCandidateId,
+        selectedRow,
+        rows,
+        decision,
+        mode: 'research',
+        action: result.isNew ? 'research_entry_simulated' : `research_blocked_${result.blockedBy || 'duplicate'}`,
+        guardrails: {
+          realCapitalSol: 0,
+          simNotionalSol: result.simNotionalSol ?? null,
+          broadcast: false,
+          walletRequired: false,
+          plannedRr: result.plannedRr ?? null,
+          hunterPolicy: result.hunterPolicy ?? decision.research_hunter_policy ?? null,
+        },
+        execution: { positionId: result.id, isNew: result.isNew },
+      });
+      if (result.isNew && result.id) await sendPositionOpen(result.id);
+      return result;
+    } finally {
+      executingMints.delete(mint);
+    }
+  }
 
   const allocation = evaluateMarketAllocator();
   if (!allocationAllowsCandidate(selectedRow.candidate, allocation)) {
@@ -352,52 +456,21 @@ export async function handleApprovedBuy(selectedRow, decision, batchId, rows = [
   executingMints.add(mint);
   try {
     const mode = tradingMode();
-  // Fire-and-forget refresh — start now, await later. Wrapped so a refresh failure
-  // doesn't kill the trade — we just fall back to the unrefreshed row.
-  const refreshPromise = refreshCandidateForExecution(selectedRow).catch(err => {
-    console.error('[handleApprovedBuy] refresh failed, rejecting execution:', err.message);
-    return { ...selectedRow, refreshError: err.message, candidate: { ...selectedRow.candidate, filters: { passed: false, failures: ['refresh failed: ' + err.message] } } };
-  });
-  const freshSelectedRow = await refreshPromise;
-  const executionRows = rows.map(row => row.id === freshSelectedRow.id ? freshSelectedRow : row);
-  if (!freshSelectedRow.candidate.filters?.passed) {
-    const failures = freshSelectedRow.candidate.filters?.failures || ['fresh execution guard failed'];
-    console.warn(`[fresh-check-rejected] ${mint} entry cancelled: ${failures.join('; ')}`);
-    logDecisionEvent({
-      batchId,
-      triggerCandidateId,
-      selectedRow: freshSelectedRow,
-      rows: executionRows,
-      decision,
-      mode,
-      action: 'entry_rejected_stale',
-      guardrails: { failures },
-      execution: { rejectedBeforeEntry: true },
+    const freshSelectedRow = await refreshCandidateForExecution(selectedRow).catch(err => {
+      console.error('[handleApprovedBuy] refresh failed, rejecting execution:', err.message);
+      return {
+        ...selectedRow,
+        refreshError: err.message,
+        candidate: {
+          ...selectedRow.candidate,
+          filters: { passed: false, failures: [`refresh failed: ${err.message}`] },
+        },
+      };
     });
-    return;
-  }
-
-  if (mode === 'dry_run') {
-    // FIX #3: Wrap position creation in try-catch to capture execution failures
-    
-    let positionId, isNew, pastWinPnlSol, pastWinClosedAtMs, blockedBy;
-    try {
-      const drySizeSol = calculatePositionSizeSol(freshSelectedRow.candidate, decision);
-      const entryQuote = await fetchDryRunEntryQuote(
-        freshSelectedRow.candidate.token.mint,
-        drySizeSol,
-        freshSelectedRow.candidate.jupiterAsset?.decimals,
-        freshSelectedRow.candidate.metrics?.priceUsd,
-        freshSelectedRow.candidate.metrics?.marketCapUsd,
-      );
-      const result = await createDryRunPosition(freshSelectedRow.id, freshSelectedRow.candidate, decision, `llm_batch_${batchId}`, entryQuote);
-      positionId = result.id;
-      isNew = result.isNew;
-      pastWinPnlSol = result.pastWinPnlSol;
-      pastWinClosedAtMs = result.pastWinClosedAtMs;
-      blockedBy = result.blockedBy;
-    } catch (err) {
-      console.error(`[orchestrator] createDryRunPosition failed for ${freshSelectedRow.candidate.token.mint}: ${err.message}`);
+    const executionRows = rows.map(row => row.id === freshSelectedRow.id ? freshSelectedRow : row);
+    if (!freshSelectedRow.candidate.filters?.passed) {
+      const failures = freshSelectedRow.candidate.filters?.failures || ['fresh execution guard failed'];
+      console.warn(`[fresh-check-rejected] ${mint} entry cancelled: ${failures.join('; ')}`);
       logDecisionEvent({
         batchId,
         triggerCandidateId,
@@ -405,122 +478,63 @@ export async function handleApprovedBuy(selectedRow, decision, batchId, rows = [
         rows: executionRows,
         decision,
         mode,
-        action: 'dry_run_position_create_failed',
-        guardrails: {
-          maxOpenPositions: numSetting('max_open_positions', 3),
-          openPositions: openPositionCount(),
-        },
-        execution: { 
-          error: err.message,
-          stack: err.stack?.slice(0, 500),
-        },
+        action: 'entry_rejected_stale',
+        guardrails: { failures },
+        execution: { rejectedBeforeEntry: true },
       });
-      await sendTelegram([
-        '🛑 <b>Position creation failed</b>',
-        '',
-        candidateSummary(freshSelectedRow.candidate, decision),
-        '',
-        `Error: ${escapeHtml(err.message)}`,
-      ].join('\n'));
       return;
     }
-    
-    // FIX #4: Enhanced past-win guard logging with context
-    const guardrails = {
-      maxOpenPositions: numSetting('max_open_positions', 3),
-      openPositions: openPositionCount(),
-      pastWinPnlSol: pastWinPnlSol ?? null,
-      pastWinClosedAtMs: pastWinClosedAtMs ?? null,
-    };
-    
-    if (!isNew && pastWinClosedAtMs) {
-      // Fetch past position details for audit
-      try {
-        const pastPos = db.prepare(`
-          SELECT exit_reason, opened_at_ms, closed_at_ms, entry_mcap, pnl_percent 
-          FROM dry_run_positions 
-          WHERE mint = ? AND closed_at_ms = ?
-          LIMIT 1
-        `).get(freshSelectedRow.candidate.token.mint, pastWinClosedAtMs);
-        
-        if (pastPos) {
-          const holdDurationMin = pastPos.closed_at_ms && pastPos.opened_at_ms ? ((pastPos.closed_at_ms - pastPos.opened_at_ms) / 60000).toFixed(1) : 0;
-          const currentMcap = freshSelectedRow.candidate.metrics?.marketCapUsd || 0;
-          guardrails.pastWinExitReason = pastPos.exit_reason;
-          guardrails.pastWinHoldDurationMin = Number(holdDurationMin);
-          guardrails.pastWinPnlPercent = pastPos.pnl_percent;
-          guardrails.wouldHaveBeenProfit = currentMcap > (pastPos.entry_mcap || 0);
-        }
-      } catch (err) {
-        // Past position lookup failed — proceed with basic guardrails
+
+    if (mode === 'confirm') {
+      const approvedSizeSol = calculatePositionSizeSol(freshSelectedRow.candidate, decision, activeStrategy());
+      if (approvedSizeSol <= 0) {
+        console.warn(`[agent] confirm entry rejected: calculated size below economic minimum for ${mint}`);
+        return;
       }
-    }
-    
-    logDecisionEvent({
-      batchId,
-      triggerCandidateId,
-      selectedRow: freshSelectedRow,
-      rows: executionRows,
-      decision,
-      mode,
-      action: isNew ? 'dry_run_entry' : `dry_run_blocked_${blockedBy || 'duplicate'}`,
-      guardrails,
-      execution: { positionId, isNew },
-    });
-    if (isNew) {
-      await sendPositionOpen(positionId);
-    } else if (pastWinClosedAtMs) {
-      const daysAgo = Math.max(0, Math.floor((now() - (pastWinClosedAtMs || now())) / 86400000));
-      await sendTelegram(`⏸️ Re-entry blocked: ${escapeHtml(freshSelectedRow.candidate.token.symbol)} won +${pastWinPnlSol ?? '?'} SOL ${daysAgo}d ago — guard prevented new position`);
-    }
-    return;
-  }
-
-  if (mode === 'confirm') {
-    const approvedSizeSol = calculatePositionSizeSol(freshSelectedRow.candidate, decision, activeStrategy());
-    if (approvedSizeSol <= 0) {
-      console.warn(`[agent] confirm entry rejected: calculated size below economic minimum for ${mint}`);
+      const intentId = createTradeIntent(freshSelectedRow.id, freshSelectedRow.candidate, decision, mode, 'pending_confirmation', 'buy', approvedSizeSol);
+      logDecisionEvent({
+        batchId,
+        triggerCandidateId,
+        selectedRow: freshSelectedRow,
+        rows: executionRows,
+        decision,
+        mode,
+        action: 'confirm_intent_created',
+        guardrails: { maxOpenPositions: numSetting('max_open_positions', 3), openPositions: openPositionCount() },
+        execution: { intentId },
+      });
+      await sendTradeIntent(intentId, freshSelectedRow.candidate, decision, approvedSizeSol);
       return;
     }
-    const intentId = createTradeIntent(freshSelectedRow.id, freshSelectedRow.candidate, decision, mode, 'pending_confirmation', 'buy', approvedSizeSol);
-    logDecisionEvent({
-      batchId,
-      triggerCandidateId,
-      selectedRow: freshSelectedRow,
-      rows: executionRows,
-      decision,
-      mode,
-      action: 'confirm_intent_created',
-      guardrails: { maxOpenPositions: numSetting('max_open_positions', 3), openPositions: openPositionCount() },
-      execution: { intentId },
-    });
-    await sendTradeIntent(intentId, freshSelectedRow.candidate, decision, approvedSizeSol);
-    return;
-  }
 
-  try {
+    // shadow_live is pre-live verification and intentionally remains wallet-aware.
+    // live retains all config approval, risk budget, reconciliation and circuit breakers.
     await executeLiveBuy(freshSelectedRow, decision, batchId, executionRows, triggerCandidateId);
   } catch (err) {
-    const intentId = createTradeIntent(freshSelectedRow.id, freshSelectedRow.candidate, decision, mode, 'execution_failed');
-    logDecisionEvent({
-      batchId,
-      triggerCandidateId,
-      selectedRow: freshSelectedRow,
-      rows: executionRows,
-      decision,
-      mode,
-      action: 'live_entry_failed',
-      guardrails: { maxOpenPositions: numSetting('max_open_positions', 3), openPositions: openPositionCount() },
-      execution: { intentId, error: err.message },
-    });
-    await sendTelegram([
-      '🛑 <b>Live trade failed</b>',
-      '',
-      candidateSummary(freshSelectedRow.candidate, decision),
-      '',
-      `Intent #${intentId} stored.`,
-    ].join('\n')).catch(e => console.error(e));
-  }
+    const mode = tradingMode();
+    if (mode === 'live') {
+      const intentId = createTradeIntent(selectedRow.id, selectedRow.candidate, decision, mode, 'execution_failed');
+      logDecisionEvent({
+        batchId,
+        triggerCandidateId,
+        selectedRow,
+        rows,
+        decision,
+        mode,
+        action: 'live_entry_failed',
+        guardrails: { maxOpenPositions: numSetting('max_open_positions', 3), openPositions: openPositionCount() },
+        execution: { intentId, error: err.message },
+      });
+      await sendTelegram([
+        '🛑 <b>Live trade failed</b>',
+        '',
+        candidateSummary(selectedRow.candidate, decision),
+        '',
+        `Intent #${intentId} stored.`,
+      ].join('\n')).catch(e => console.error(e));
+      return;
+    }
+    throw err;
   } finally {
     decrementPendingPosition();
     executingMints.delete(mint);
