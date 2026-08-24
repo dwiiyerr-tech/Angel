@@ -12,7 +12,7 @@ export function ensureControlPlaneSchema() {
       created_at_ms INTEGER NOT NULL,
       created_by TEXT NOT NULL,
       status TEXT NOT NULL,
-      config_hash TEXT NOT NULL UNIQUE,
+      config_hash TEXT NOT NULL,
       config_json TEXT NOT NULL,
       prompt_set_version TEXT NOT NULL,
       momentum_model_hash TEXT,
@@ -95,6 +95,10 @@ export function ensureControlPlaneSchema() {
 
     CREATE INDEX IF NOT EXISTS idx_config_versions_status
       ON config_versions(status, version);
+    CREATE UNIQUE INDEX IF NOT EXISTS idx_config_versions_single_active
+      ON config_versions(status) WHERE status = 'active';
+    CREATE INDEX IF NOT EXISTS idx_config_versions_hash
+      ON config_versions(config_hash);
     CREATE INDEX IF NOT EXISTS idx_strategy_proposals_status
       ON strategy_proposals(status, created_at_ms);
     CREATE INDEX IF NOT EXISTS idx_challenger_observations_proposal
