@@ -53,7 +53,8 @@ export function runnerLabelFromPosition(position, {
 }
 
 export function runnerFeatureSnapshot(candidate = {}, quality = null) {
-  const momentum = finite(candidate?.filters?.momentumScore);
+  const rawMomentum = finite(candidate?.filters?.momentumScore);
+  const momentum = rawMomentum != null && rawMomentum >= 0 ? rawMomentum : null;
   const preScore = finite(candidate?.filters?.preScore);
   const qualityScore = finite(quality?.score ?? candidate?.filters?.qualityScore ?? candidate?.edge?.quality?.score);
   const liquidityUsd = finite(candidate?.metrics?.liquidityUsd ?? candidate?.jupiterAsset?.liquidity);
@@ -128,7 +129,7 @@ export function estimateRunnerProbabilityFromRecords(records = [], featureSnapsh
 
   const probability = weighted / totalWeight;
   const sample = labeled.length;
-  const quality = sample >= Math.max(60, minSample * 3) ? 'HIGH' : sample >= minSample ? 'MEDIUM' : 'LOW';
+  const modelQuality = sample >= Math.max(60, minSample * 3) ? 'HIGH' : sample >= minSample ? 'MEDIUM' : 'LOW';
   return {
     version: MODEL_VERSION,
     probability: Number(probability.toFixed(4)),
@@ -136,7 +137,7 @@ export function estimateRunnerProbabilityFromRecords(records = [], featureSnapsh
     sample,
     minimumSample: minSample,
     decisionEligible: sample >= minSample,
-    quality,
+    quality: modelQuality,
     evidence,
   };
 }
