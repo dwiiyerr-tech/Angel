@@ -27,7 +27,10 @@ assert.equal(
   Number(sizeImpactPct({ effectivePriceUsd: 1.03 }, { effectivePriceUsd: 1 }).toFixed(4)),
   3,
 );
-assert.equal(expectedFailureFeeOverheadSol(0.00001, 0.1, 2), 0.000002);
+assert.equal(
+  Number(expectedFailureFeeOverheadSol(0.00001, 0.1, 2).toFixed(9)),
+  0.000002,
+);
 
 const overlay = applyModeledExitFee({
   result: { pnlSol: 0.01 },
