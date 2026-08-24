@@ -2,9 +2,10 @@ import { db } from '../db/connection.js';
 import { numSetting } from '../db/settings.js';
 import { safeJson } from '../utils.js';
 import { ensureResearchSchema } from '../research/schema.js';
-import { netBuyerRatio } from './qualityScore.js';
+import { netBuyerRatio, qualityScoreCandidate } from './qualityScore.js';
 
 const MODEL_VERSION = 'runner-path-bayes-v1';
+let historyCache = { at: 0, key: '', records: null };
 
 function finite(value) {
   if (value === null || value === undefined || value === '') return null;
@@ -25,6 +26,14 @@ function bucket(value, cuts, labels) {
   return labels[labels.length - 1];
 }
 
+function historyCacheMs() {
+  return Math.max(0, Math.min(5 * 60_000, Math.floor(numSetting('edge_model_cache_ms', 30_000))));
+}
+
+export function resetRunnerModelCacheForTests() {
+  historyCache = { at: 0, key: '', records: null };
+}
+
 export function runnerLabelFromPosition(position, {
   runnerMfeR = 3,
   maxMaeR = 1,
@@ -36,8 +45,9 @@ export function runnerLabelFromPosition(position, {
   if (mfeR == null || maeR == null) return { label: 'unknown', isRunner: null };
 
   const reachedRunnerMove = mfeR >= runnerMfeR;
-  const reachedInTime = maxTimeToMfeMs <= 0 || timeToMfeMs == null || timeToMfeMs <= maxTimeToMfeMs;
-  if (!reachedRunnerMove || !reachedInTime) return { label: 'non_runner', isRunner: false };
+  if (!reachedRunnerMove) return { label: 'non_runner', isRunner: false };
+  if (maxTimeToMfeMs > 0 && timeToMfeMs == null) return { label: 'unknown', isRunner: null };
+  if (maxTimeToMfeMs > 0 && timeToMfeMs > maxTimeToMfeMs) return { label: 'non_runner', isRunner: false };
   if (maeR < -Math.abs(maxMaeR)) return { label: 'messy_runner', isRunner: false };
   return { label: 'runner', isRunner: true };
 }
@@ -133,6 +143,12 @@ export function estimateRunnerProbabilityFromRecords(records = [], featureSnapsh
 
 function recordsFromResearchHistory({ runnerMfeR, maxMaeR, maxTimeToMfeMs, limit }) {
   ensureResearchSchema();
+  const key = `${runnerMfeR}|${maxMaeR}|${maxTimeToMfeMs}|${limit}`;
+  const ttl = historyCacheMs();
+  if (historyCache.records && historyCache.key === key && ttl > 0 && Date.now() - historyCache.at <= ttl) {
+    return historyCache.records;
+  }
+
   const rows = db.prepare(`
     SELECT id, mfe_r, mae_r, time_to_mfe_ms, snapshot_json
     FROM dry_run_positions
@@ -142,10 +158,11 @@ function recordsFromResearchHistory({ runnerMfeR, maxMaeR, maxTimeToMfeMs, limit
     LIMIT ?
   `).all(limit);
 
-  return rows.map(row => {
+  const records = rows.map(row => {
     const snapshot = safeJson(row.snapshot_json, {});
     const candidate = snapshot?.candidate || {};
-    const features = runnerFeatureSnapshot(candidate, candidate?.edge?.quality || null);
+    const historicalQuality = candidate?.edge?.quality || qualityScoreCandidate(candidate);
+    const features = runnerFeatureSnapshot(candidate, historicalQuality);
     const label = runnerLabelFromPosition(row, { runnerMfeR, maxMaeR, maxTimeToMfeMs });
     return {
       id: Number(row.id),
@@ -161,6 +178,8 @@ function recordsFromResearchHistory({ runnerMfeR, maxMaeR, maxTimeToMfeMs, limit
       },
     };
   });
+  historyCache = { at: Date.now(), key, records };
+  return records;
 }
 
 export function estimateRunnerProbability(candidate, quality = null) {
