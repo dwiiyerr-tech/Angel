@@ -3,9 +3,7 @@ import { APP_NAME, SIGNAL_SERVER_URL, SIGNAL_POLL_MS, POSITION_CHECK_MS, PUMPPOR
 import { db, initDb } from './db/connection.js';
 import { initLiveExecution } from './liveExecutor.js';
 import { setupTelegram } from './telegram/commands.js';
-import { monitorPositions } from './execution/positions.js';
-import { monitorResearchPositions } from './research/monitor.js';
-import { isResearchSimulationMode } from './research/policy.js';
+import { monitorAllPositionsByMode } from './execution/modeMonitor.js';
 import { ensureResearchSchema } from './research/schema.js';
 import { processCandidateFromSignals, maybeProcessDegenCandidate } from './pipeline/orchestrator.js';
 import { sendTelegram } from './telegram/send.js';
@@ -80,12 +78,11 @@ function scheduleAfterCompletion(name, fn, intervalMs) {
 
 export async function startAngel() {
   initDb();
-  // Idempotent additive migration. Keeping research fields out of the legacy
-  // base schema lets older databases upgrade without a destructive rebuild.
+  // Additive/idempotent research migration: existing Angel databases upgrade in
+  // place and retain all previous live/shadow history.
   ensureResearchSchema();
   ensureSafeStartupMode();
 
-  // Liveness endpoints must come up before slow network enrichment.
   startHealthServer();
   startDeadMansSwitch();
   initLiveExecution();
@@ -146,17 +143,15 @@ export async function startAngel() {
     Promise.resolve(startPumpportal()).catch(err => console.error(`[pumpportal] error: ${err.message}`));
   }
 
+  // One scheduler monitors every position according to the execution_mode stored
+  // on that position. A global mode switch therefore cannot orphan positions
+  // from the previous mode. Only live failures escape the mixed-mode monitor,
+  // preserving the existing circuit-breaker escalation semantics.
   const trackPositions = makeFailureTracker(
     'position monitor',
     (msg) => sendTelegram(msg),
     3,
-    (error) => {
-      // Research failures cannot put capital at risk and therefore must never
-      // latch the live circuit breaker. Money-grade monitor failures still do.
-      if (!isResearchSimulationMode()) return pauseLiveEntries(`position monitor failed repeatedly: ${error.message}`);
-      console.error(`[research] repeated monitor failure: ${error.message}`);
-      return null;
-    },
+    (error) => pauseLiveEntries(`position monitor failed repeatedly: ${error.message}`),
   );
   let positionMonitorRunning = false;
 
@@ -173,17 +168,14 @@ export async function startAngel() {
     if (positionMonitorRunning) return;
     positionMonitorRunning = true;
     try {
-      // Mode routing is evaluated every cycle instead of only at startup so a
-      // Telegram/config mode change cannot keep invoking the wrong monitor.
-      const monitor = isResearchSimulationMode() ? monitorResearchPositions : monitorPositions;
-      await trackPositions(() => Promise.resolve().then(() => monitor()));
+      await trackPositions(() => Promise.resolve().then(() => monitorAllPositionsByMode()));
     } finally {
       positionMonitorRunning = false;
     }
   }, POSITION_CHECK_MS);
 
-  // Durable weekly learning remains advisory-only. Research v1 is intentionally
-  // not auto-promoted into live configuration by this loop.
+  // Durable weekly learning remains advisory-only. Zero-capital research does
+  // not modify strategy/live configuration automatically.
   const LEARNING_INTERVAL_MS = 7 * 24 * 60 * 60 * 1000;
   const LEARNING_WINDOW_MS = 7 * 24 * 60 * 60 * 1000;
   async function runPeriodicLearning() {
