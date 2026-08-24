@@ -4,8 +4,7 @@ import { now, json } from '../utils.js';
 import { escapeHtml, fmtPct } from '../format.js';
 import { db } from '../db/connection.js';
 import { numSetting, boolSetting, setSetting, activeStrategy, setActiveStrategy, strategyById, updateStrategyConfig } from '../db/settings.js';
-import { candidateById, latestCandidateByMint, updateCandidateStatus } from '../db/candidates.js';
-import { storeDecision } from '../db/decisions.js';
+import { candidateById, latestCandidateByMint } from '../db/candidates.js';
 import {
   menuKeyboard,
   filtersText,
@@ -352,7 +351,10 @@ export async function sendPosition(chatId, id, query = null) {
       console.log(`[position] refresh ${id} ${err.message}`);
       return null;
     });
-    if (refreshed) row = { ...row, ...refreshed };
+    if (refreshed) {
+      if (row.execution_mode === 'research') recordResearchObservation(row.id, refreshed);
+      row = { ...row, ...refreshed };
+    }
   }
   const buttons = row.status === 'open' ? positionButtons(id) : {};
   if (query) return editMenuMessage(query, formatPosition(row), buttons);
