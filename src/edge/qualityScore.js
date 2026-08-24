@@ -39,18 +39,28 @@ export function netBuyerRatio(candidate = {}) {
 export function qualityScoreCandidate(candidate = {}) {
   const liquidityUsd = finite(candidate?.metrics?.liquidityUsd ?? candidate?.jupiterAsset?.liquidity);
   const holderCount = finite(candidate?.metrics?.holderCount ?? candidate?.jupiterAsset?.holderCount);
-  const organicScore = finite(candidate?.trending?.organic_score ?? candidate?.jupiterAsset?.organicScore);
-  const priceChange1h = finite(candidate?.jupiterAsset?.stats1h?.priceChange);
-  const buyerRatio = netBuyerRatio(candidate);
   const botPct = finite(candidate?.jupiterAsset?.audit?.botHoldersPercentage);
   const topPct = finite(candidate?.jupiterAsset?.audit?.topHoldersPercentage);
   const devPct = finite(candidate?.jupiterAsset?.audit?.devBalancePercentage);
   const bundlerRate = finite(candidate?.trending?.bundler_rate);
 
+  // Flow and narrative are surfaced for downstream Edge features but deliberately
+  // excluded from the Quality score so the same momentum evidence is not counted
+  // again in Quality -> Runner -> Combined Edge.
+  const priceChange1h = finite(candidate?.jupiterAsset?.stats1h?.priceChange);
+  const buyerRatio = netBuyerRatio(candidate);
+  const organicScore = finite(candidate?.trending?.organic_score ?? candidate?.jupiterAsset?.organicScore);
+
   const market = averageKnown([
     logScale(liquidityUsd, 2_000, 30_000),
     logScale(holderCount, 20, 1_200),
-    organicScore == null ? null : clamp(organicScore),
+  ]);
+
+  const structure = averageKnown([
+    botPct == null ? null : 100 - scale(botPct, 10, 70),
+    topPct == null ? null : 100 - scale(topPct, 15, 55),
+    devPct == null ? null : 100 - scale(devPct, 5, 25),
+    bundlerRate == null ? null : 100 - scale(bundlerRate, 0.1, 0.7),
   ]);
 
   const flow = averageKnown([
@@ -58,20 +68,13 @@ export function qualityScoreCandidate(candidate = {}) {
     buyerRatio == null ? null : scale(buyerRatio, -0.5, 0.75),
   ]);
 
-  const audit = averageKnown([
-    botPct == null ? null : 100 - scale(botPct, 10, 70),
-    topPct == null ? null : 100 - scale(topPct, 15, 55),
-    devPct == null ? null : 100 - scale(devPct, 5, 25),
-    bundlerRate == null ? null : 100 - scale(bundlerRate, 0.1, 0.7),
-  ]);
-
-  const knownInputs = [liquidityUsd, holderCount, organicScore, priceChange1h, buyerRatio, botPct, topPct, devPct, bundlerRate]
+  const structuralInputs = [liquidityUsd, holderCount, botPct, topPct, devPct, bundlerRate]
     .filter(value => value != null).length;
-  const dataQuality = knownInputs >= 7 ? 'HIGH' : knownInputs >= 4 ? 'MEDIUM' : 'LOW';
+  const dataQuality = structuralInputs >= 5 ? 'HIGH' : structuralInputs >= 3 ? 'MEDIUM' : 'LOW';
 
-  // Quality deliberately does not decide safety or alpha. Contract Safety remains
-  // a separate pass/reject authority; Momentum/Runner/Route models own edge.
-  const score = clamp(market * 0.50 + flow * 0.25 + audit * 0.25);
+  // Safety remains a separate binary authority. Quality only describes whether
+  // a safe-enough market is structurally tradable; it never overrides Safety.
+  const score = clamp(market * 0.65 + structure * 0.35);
 
   return {
     version: 'quality-v1',
@@ -79,19 +82,19 @@ export function qualityScoreCandidate(candidate = {}) {
     dataQuality,
     components: {
       market: Number(market.toFixed(2)),
-      flow: Number(flow.toFixed(2)),
-      audit: Number(audit.toFixed(2)),
+      structure: Number(structure.toFixed(2)),
+      flowDiagnostic: Number(flow.toFixed(2)),
     },
     features: {
       liquidityUsd,
       holderCount,
-      organicScore,
-      priceChange1h,
-      netBuyerRatio5m: buyerRatio,
       botHoldersPct: botPct,
       topHoldersPct: topPct,
       devBalancePct: devPct,
       bundlerRate,
+      priceChange1h,
+      netBuyerRatio5m: buyerRatio,
+      organicScore,
     },
   };
 }
