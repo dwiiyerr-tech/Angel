@@ -131,8 +131,8 @@ async function reconcileFinalizedBuy(operation, receipt) {
 }
 
 function settleFullFinalizedSell(operation, position, receipt) {
-  const outputLamports = Number(receipt.outputAmount || 0);
-  const receivedSol = outputLamports > 0 ? outputLamports / 1_000_000_000 : 0;
+  const outputLamports = Number(receipt.outputAmount);
+  const receivedSol = outputLamports / 1_000_000_000;
   const feeSol = Number(receipt.feeSol || 0);
   const finalPnlSol = Number(position.realized_pnl_sol || 0)
     + receivedSol
@@ -185,7 +185,7 @@ async function settlePartialFinalizedSell(operation, position, receipt) {
   const soldFraction = Math.min(1, Number(soldRaw.toString()) / Number(beforeRaw.toString()));
   const soldCostSol = Number(position.size_sol || 0) * soldFraction;
   const newSizeSol = Math.max(0, Number(position.size_sol || 0) - soldCostSol);
-  const receivedSol = Number(receipt.outputAmount || 0) / 1_000_000_000;
+  const receivedSol = Number(receipt.outputAmount) / 1_000_000_000;
   const feeSol = Number(receipt.feeSol || 0);
   const realizedDelta = receivedSol - soldCostSol - feeSol;
   const at = now();
@@ -218,6 +218,16 @@ async function settlePartialFinalizedSell(operation, position, receipt) {
 }
 
 async function reconcileFinalizedSell(operation, receipt) {
+  const outputText = String(receipt.outputAmount || '');
+  if (!/^\d+$/.test(outputText) || BigInt(outputText) <= 0n) {
+    updateExecutionOperation(operation.id, 'outcome_unknown', {
+      signature: operation.signature,
+      finalizedAtMs: now(),
+      error: 'finalized_sell_output_amount_unresolved',
+    });
+    return { resolved: false, reason: 'sell_output_unknown' };
+  }
+
   const position = operation.position_id
     ? db.prepare('SELECT * FROM dry_run_positions WHERE id = ?').get(operation.position_id)
     : activePositionForMint(operation.mint);
