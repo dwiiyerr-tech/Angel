@@ -7,6 +7,7 @@ function clamp(value, min = 0, max = 100) {
 }
 
 function finite(value) {
+  if (value === null || value === undefined || value === '') return null;
   const n = Number(value);
   return Number.isFinite(n) ? n : null;
 }
@@ -51,8 +52,33 @@ export function combineEdgeAssessment({ quality, runner, route, momentumScore = 
 
 export function assessCandidateEdge(candidate = {}) {
   const quality = qualityScoreCandidate(candidate);
-  const runner = estimateRunnerProbability(candidate, quality);
-  const route = estimateRouteEdge(candidate);
+  let runner;
+  let route;
+  try {
+    runner = estimateRunnerProbability(candidate, quality);
+  } catch (error) {
+    runner = {
+      version: 'runner-path-bayes-v1',
+      probability: null,
+      sample: 0,
+      decisionEligible: false,
+      quality: 'LOW',
+      error: error.message,
+    };
+  }
+  try {
+    route = estimateRouteEdge(candidate);
+  } catch (error) {
+    route = {
+      version: 'route-edge-bayes-v1',
+      pWin: null,
+      expectedR: null,
+      routeSample: 0,
+      decisionEligible: false,
+      quality: 'LOW',
+      error: error.message,
+    };
+  }
   const combined = combineEdgeAssessment({
     quality,
     runner,
