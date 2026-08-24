@@ -1,3 +1,4 @@
+import fs from 'node:fs';
 import { db, initDb } from '../../src/db/connection.js';
 import { ensureLiveSafetySchema } from '../../src/db/liveSafety.js';
 import { claimExecutionOperation, updateExecutionOperation } from '../../src/db/executionOperations.js';
@@ -19,7 +20,7 @@ if (stage === 'after_signature') {
   });
 }
 
-process.stdout.write(`${JSON.stringify({ operationId: claim.operationId, stage })}\n`);
+fs.writeSync(1, `${JSON.stringify({ operationId: claim.operationId, stage })}\n`);
 // Deliberately do not perform graceful shutdown. better-sqlite3 writes above are
 // committed synchronously; the parent test verifies the ledger survives this.
 process.exit(91);
