@@ -1,6 +1,7 @@
 import { db } from '../db/connection.js';
 import { numSetting } from '../db/settings.js';
 import { safeJson } from '../utils.js';
+import { ensureResearchSchema } from '../research/schema.js';
 
 const MODEL_VERSION = 'route-edge-bayes-v1';
 
@@ -101,6 +102,7 @@ export function estimateRouteEdgeFromRecords(records = [], {
 }
 
 function researchEdgeRecords(limit = 2000) {
+  ensureResearchSchema();
   const rows = db.prepare(`
     SELECT id, realized_r, snapshot_json
     FROM dry_run_positions
