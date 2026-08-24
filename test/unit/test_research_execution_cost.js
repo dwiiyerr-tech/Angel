@@ -1,6 +1,7 @@
 import assert from 'node:assert/strict';
 import {
   percentile,
+  selectPriorityFeeSamples,
   priorityFeeSolFromMicroLamportsPerCu,
   quoteDeteriorationPct,
   roundTripExecutableSpreadPct,
@@ -11,6 +12,20 @@ import {
 
 assert.equal(percentile([0, 100, 200, 300], 0.75), 200);
 assert.equal(percentile([], 0.75), null);
+
+const preferred = selectPriorityFeeSamples([0, 0, 100, 200, 300], 3);
+assert.deepEqual(preferred.samples, [100, 200, 300]);
+assert.equal(preferred.mode, 'nonzero_preferred');
+assert.equal(preferred.sampleCount, 5);
+assert.equal(preferred.positiveSampleCount, 3);
+
+const sparse = selectPriorityFeeSamples([0, 0, 100], 3);
+assert.deepEqual(sparse.samples, [0, 0, 100]);
+assert.equal(sparse.mode, 'mixed_floor');
+assert.equal(sparse.positiveSampleCount, 1);
+
+const zeroFloor = selectPriorityFeeSamples([0, 0, 0], 3);
+assert.equal(zeroFloor.mode, 'zero_floor');
 
 // 2,500 micro-lamports/CU * 400k CU = 1,000 lamports = 0.000001 SOL.
 assert.equal(priorityFeeSolFromMicroLamportsPerCu(2500, 400000), 0.000001);
