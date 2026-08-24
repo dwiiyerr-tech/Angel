@@ -6,8 +6,13 @@ import { fetchDryRunEntryQuote } from '../enrichment/jupiter.js';
 import { ensureResearchSchema } from './schema.js';
 import { initialRiskSol, plannedRiskReward, nextExcursionState, rMultiple } from './rr.js';
 import { hunterPolicy } from '../pipeline/hunterPolicy.js';
+import {
+  applyModeledExitFee,
+  fetchResearchEntryExecutionProfile,
+  sizeImpactPct,
+} from './executionCost.js';
 
-export const RESEARCH_SIMULATOR_VERSION = 'zero_capital_quote_v1';
+export const RESEARCH_SIMULATOR_VERSION = 'zero_capital_execution_cost_v2';
 
 let pendingResearchPositionCount = 0;
 
@@ -15,6 +20,10 @@ function boundedPositive(value, fallback, min = 0.001, max = 1) {
   const n = Number(value);
   if (!Number.isFinite(n) || n <= 0) return fallback;
   return Math.max(min, Math.min(max, n));
+}
+
+function safeParse(value, fallback = null) {
+  try { return JSON.parse(value); } catch { return fallback; }
 }
 
 export function researchReferenceNotionalSol() {
@@ -87,10 +96,21 @@ export async function fetchResearchQuoteLadder(candidate, referenceNotional = re
   const mint = candidate?.token?.mint;
   if (!mint) throw new Error('Research simulation requires token mint.');
 
+  const executionProfile = await fetchResearchEntryExecutionProfile({
+    mint,
+    notionalSol: referenceNotional,
+    decimals,
+    referencePriceUsd: candidate.metrics?.priceUsd,
+    referenceMcapUsd: candidate.metrics?.marketCapUsd,
+  });
+
   const ladder = researchQuoteLadder(referenceNotional);
   const quotes = [];
-  // Sequential by design: research should not burst the entry/exit quote limiter.
   for (const notionalSol of ladder) {
+    if (Math.abs(notionalSol - referenceNotional) < 1e-9) {
+      quotes.push({ notionalSol, quote: executionProfile.fillQuote });
+      continue;
+    }
     const quote = await fetchDryRunEntryQuote(
       mint,
       notionalSol,
@@ -101,11 +121,14 @@ export async function fetchResearchQuoteLadder(candidate, referenceNotional = re
     quotes.push({ notionalSol, quote: quote || null });
   }
 
-  const primary = quotes.find(item => Math.abs(item.notionalSol - referenceNotional) < 1e-9)?.quote || null;
-  if (!primary?.outputAmountRaw) {
-    throw new Error(`Research simulation requires an executable ${referenceNotional} SOL reference quote.`);
-  }
-  return { referenceNotional, primary, quotes };
+  const baselineQuote = quotes.find(item => item.quote?.effectivePriceUsd)?.quote || executionProfile.fillQuote;
+  executionProfile.sizeImpactPct = sizeImpactPct(executionProfile.fillQuote, baselineQuote);
+  return {
+    referenceNotional,
+    primary: executionProfile.fillQuote,
+    quotes,
+    executionProfile,
+  };
 }
 
 function riskSeverity(candidate) {
@@ -124,9 +147,11 @@ export function createResearchPosition(candidateId, candidate, decision, quoteBu
   const tp = Number(decision?.suggested_tp_percent ?? strat.tp_percent ?? numSetting('default_tp_percent', 50));
   const sl = Number(decision?.suggested_sl_percent ?? strat.sl_percent ?? numSetting('default_sl_percent', -25));
   const plannedRr = plannedRiskReward(tp, sl);
-  const entryFeeSol = Math.max(0, numSetting('dry_run_network_fee_sol', DRY_RUN_NETWORK_FEE_SOL))
+  const executionProfile = quoteBundle?.executionProfile || null;
+  const fallbackEntryFeeSol = Math.max(0, numSetting('dry_run_network_fee_sol', DRY_RUN_NETWORK_FEE_SOL))
     + Math.max(0, numSetting('dry_run_priority_fee_sol', DRY_RUN_PRIORITY_FEE_SOL));
-  const expectedExitFeeSol = entryFeeSol;
+  const entryFeeSol = Math.max(0, Number(executionProfile?.entryFees?.totalFeeSol ?? fallbackEntryFeeSol));
+  const expectedExitFeeSol = Math.max(0, Number(executionProfile?.expectedExitFees?.totalFeeSol ?? entryFeeSol));
   const riskSol = initialRiskSol({
     notionalSol,
     stopPercent: sl,
@@ -177,8 +202,9 @@ export function createResearchPosition(candidateId, candidate, decision, quoteBu
       researchSimulation: true,
       realCapitalSol: 0,
       simNotionalSol: notionalSol,
-      entryQuoteMode: 'position_sized',
+      entryQuoteMode: executionProfile ? 'latency_requoted_position_sized' : 'position_sized',
       quoteLadder: quoteBundle.quotes,
+      executionCost: executionProfile,
       llmConfidence: decision?.confidence ?? null,
       signalRoute: candidate.signals?.route ?? null,
       hunterPolicy: policy,
@@ -204,7 +230,7 @@ export function createResearchPosition(candidateId, candidate, decision, quoteBu
       candidate.token.mint,
       candidate.token.symbol,
       now(),
-      notionalSol, // legacy accounting notional; real_capital_sol remains zero.
+      notionalSol,
       entryPrice,
       entryMcap,
       Number(entryQuote.tokenAmount) > 0 ? Number(entryQuote.tokenAmount) : null,
@@ -225,11 +251,30 @@ export function createResearchPosition(candidateId, candidate, decision, quoteBu
       plannedRr,
       entryPrice,
       entryMcap,
-      'entry_executable',
+      executionProfile?.quality || 'entry_executable',
       json(quoteBundle.quotes),
     );
 
     const positionId = Number(result.lastInsertRowid);
+    if (executionProfile) {
+      db.prepare(`
+        UPDATE dry_run_positions
+        SET research_execution_cost_json = ?, entry_latency_ms = ?,
+            entry_quote_deterioration_pct = ?, entry_roundtrip_spread_pct = ?,
+            entry_size_impact_pct = ?, entry_priority_fee_sol = ?, entry_jito_tip_sol = ?
+        WHERE id = ?
+      `).run(
+        json(executionProfile),
+        executionProfile.measuredQuoteToFillLatencyMs ?? null,
+        executionProfile.quoteDeteriorationPct ?? null,
+        executionProfile.roundTripSpreadPct ?? null,
+        executionProfile.sizeImpactPct ?? null,
+        executionProfile.entryFees?.priorityFeeSol ?? 0,
+        executionProfile.entryFees?.jitoTipSol ?? 0,
+        positionId,
+      );
+    }
+
     db.prepare(`
       INSERT INTO dry_run_trades (position_id, mint, side, at_ms, price, mcap, size_sol, token_amount_est, reason, payload_json)
       VALUES (?, ?, 'buy', ?, ?, ?, ?, ?, ?, ?)
@@ -249,6 +294,7 @@ export function createResearchPosition(candidateId, candidate, decision, quoteBu
         simNotionalSol: notionalSol,
         entryQuote,
         quoteLadder: quoteBundle.quotes,
+        executionCost: executionProfile,
         hunterPolicy: policy,
       }),
     );
@@ -264,6 +310,7 @@ export function createResearchPosition(candidateId, candidate, decision, quoteBu
       simNotionalSol: notionalSol,
       plannedRr,
       initialRiskSol: riskSol,
+      executionCost: executionProfile,
       hunterPolicy: policy,
     };
   })();
@@ -282,13 +329,41 @@ export async function executeResearchEntry(selectedRow, decision, reason = 'rese
   }
 }
 
-export function recordResearchObservation(positionId, result) {
+export function recordResearchObservation(positionId, result, { exitFees = null } = {}) {
   ensureResearchSchema();
   const row = db.prepare('SELECT * FROM dry_run_positions WHERE id = ?').get(positionId);
   if (!row || row.execution_mode !== 'research' || !result) return null;
 
-  const pnlPercent = Number(result.pnl_percent ?? result.pnlPercent);
-  const pnlSol = Number(result.pnl_sol ?? result.pnlSol);
+  const executionCost = safeParse(row.research_execution_cost_json, null);
+  const expectedExitFees = exitFees || executionCost?.expectedExitFees || executionCost?.entryFees || null;
+  const rawPnlPercent = Number(result.pnl_percent ?? result.pnlPercent);
+  const rawPnlSol = Number(result.pnl_sol ?? result.pnlSol);
+  const closed = row.status === 'closed' || result.status === 'closed' || Boolean(result.exitReason || result.exit_reason);
+
+  let pnlSol = rawPnlSol;
+  let pnlPercent = rawPnlPercent;
+  let modeledExitFeeSol = Math.max(0, Number(expectedExitFees?.totalFeeSol || 0));
+
+  if (closed) {
+    const overlay = applyModeledExitFee({ result, row, exitFees: expectedExitFees });
+    if (overlay) {
+      pnlSol = overlay.modeledPnlSol;
+      pnlPercent = overlay.modeledPnlPercent;
+      modeledExitFeeSol = overlay.modeledExitFeeSol;
+      db.prepare(`
+        UPDATE dry_run_positions
+        SET pnl_sol = ?, pnl_percent = ?, exit_fee_sol = ?,
+            modeled_exit_fee_sol = ?, modeled_net_pnl_sol = ?, modeled_net_pnl_percent = ?
+        WHERE id = ?
+      `).run(pnlSol, pnlPercent, modeledExitFeeSol, modeledExitFeeSol, pnlSol, pnlPercent, positionId);
+    }
+  } else if (Number.isFinite(rawPnlSol)) {
+    const entryFeeSol = Math.max(0, Number(row.entry_fee_sol || 0));
+    const costBasis = Math.max(0, Number(row.sim_notional_sol || row.size_sol || 0)) + entryFeeSol + modeledExitFeeSol;
+    pnlSol = rawPnlSol - entryFeeSol - modeledExitFeeSol;
+    pnlPercent = costBasis > 0 ? pnlSol / costBasis * 100 : rawPnlPercent;
+  }
+
   const riskSol = Number(row.initial_risk_sol || 0);
   const ageMs = Math.max(0, now() - Number(row.opened_at_ms || now()));
   const excursion = nextExcursionState({
@@ -303,11 +378,10 @@ export function recordResearchObservation(positionId, result) {
     previousTimeToMaeMs: row.time_to_mae_ms,
     ageMs,
   });
-  const realizedR = row.status === 'closed' ? rMultiple(row.pnl_sol, riskSol) : null;
-  // refreshPosition is quote-first for non-live positions. Until it exposes the
-  // exact quote source in its return object, keep this label honest rather than
-  // claiming every observation was definitely executable-quote sourced.
-  const dataQuality = row.token_amount_raw ? 'entry_executable_exit_quote_preferred' : 'degraded';
+  const realizedR = closed ? rMultiple(pnlSol, riskSol) : null;
+  const dataQuality = executionCost?.quality
+    ? `execution_cost_v2_${executionCost.quality}`
+    : (row.token_amount_raw ? 'entry_executable_exit_quote_preferred' : 'degraded');
 
   db.prepare(`
     UPDATE dry_run_positions
@@ -324,6 +398,8 @@ export function recordResearchObservation(positionId, result) {
         mfe_percent = ?, mae_percent = ?, mfe_r = ?, mae_r = ?,
         time_to_mfe_ms = ?, time_to_mae_ms = ?,
         realized_r = COALESCE(?, realized_r),
+        modeled_exit_fee_sol = COALESCE(?, modeled_exit_fee_sol),
+        modeled_net_pnl_sol = ?, modeled_net_pnl_percent = ?,
         research_data_quality = ?
     WHERE id = ?
   `).run(
@@ -340,6 +416,9 @@ export function recordResearchObservation(positionId, result) {
     excursion.timeToMfeMs,
     excursion.timeToMaeMs,
     realizedR,
+    modeledExitFeeSol || null,
+    Number.isFinite(pnlSol) ? pnlSol : null,
+    Number.isFinite(pnlPercent) ? pnlPercent : null,
     dataQuality,
     positionId,
   );
@@ -360,13 +439,15 @@ export function recordResearchObservation(positionId, result) {
     excursion.currentR,
     dataQuality,
     json({
-      status: row.status,
+      status: closed ? 'closed' : row.status,
       exitReason: result.exitReason || result.exit_reason || null,
       highWaterMcap: result.high_water_mcap ?? result.highWaterMcap ?? null,
       realCapitalSol: 0,
       simNotionalSol: row.sim_notional_sol,
+      modeledExitFeeSol,
+      executionCostVersion: executionCost?.version || null,
     }),
   );
 
-  return { ...excursion, realizedR, dataQuality };
+  return { ...excursion, realizedR, dataQuality, pnlSol, pnlPercent, modeledExitFeeSol };
 }
