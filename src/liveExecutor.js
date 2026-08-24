@@ -415,9 +415,8 @@ export async function executeJupiterSwap({ inputMint, outputMint, amount }) {
     throw error;
   }
 
-  const executedOutput = executed?.outputAmountResult || executed?.totalOutputAmount || '';
-  const outputAmount = String(executedOutput || receipt.outputAmount || '');
-  if (!/^\d+$/.test(outputAmount) || BigInt(outputAmount) <= 0n) {
+  const receiptOutput = String(receipt.outputAmount || '');
+  if (!/^\d+$/.test(receiptOutput) || BigInt(receiptOutput) <= 0n) {
     const error = new Error(`Swap signature ${signature} finalized but authoritative output amount is unavailable.`);
     error.swapOutcomeUnknown = true;
     error.swapSignature = signature;
@@ -425,12 +424,37 @@ export async function executeJupiterSwap({ inputMint, outputMint, amount }) {
     throw error;
   }
 
+  // For token -> SOL exits, verify the finalized wallet token debit equals the
+  // signed request. This prevents a ledger close from accepting a receipt that
+  // belongs to an unexpected token delta.
+  if (inputMint !== WSOL_MINT) {
+    const debit = String(receipt.inputDebitAmount || '');
+    const requested = String(amount);
+    if (!/^\d+$/.test(debit) || BigInt(debit) !== BigInt(requested)) {
+      const error = new Error(`Swap signature ${signature} finalized with input debit ${debit || 'unknown'}, expected ${requested}.`);
+      error.swapOutcomeUnknown = true;
+      error.swapSignature = signature;
+      error.swapRequestId = order.requestId || null;
+      throw error;
+    }
+  }
+
+  const providerOutput = String(executed?.outputAmountResult || executed?.totalOutputAmount || '');
+  const providerOutputMismatch = /^\d+$/.test(providerOutput)
+    && BigInt(providerOutput) > 0n
+    && BigInt(providerOutput) !== BigInt(receiptOutput);
+  if (providerOutputMismatch) {
+    console.warn(`[live] provider output ${providerOutput} disagrees with finalized receipt ${receiptOutput} for ${signature.slice(0, 10)}...; receipt wins`);
+  }
+
   return {
     order,
     executed,
     signature,
     inputAmount: String(amount),
-    outputAmount,
+    outputAmount: receiptOutput,
+    providerOutputAmount: providerOutput || null,
+    providerOutputMismatch,
     feeLamports: Number(receipt.feeLamports || 0),
     feeSol: Number(receipt.feeSol || 0),
     finalized: true,
