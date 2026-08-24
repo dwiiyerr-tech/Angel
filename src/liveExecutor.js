@@ -20,6 +20,7 @@ import {
   walletTokenBalancesFromAccounts,
 } from './execution/swapValidation.js';
 import { ensureLiveSafetySchema } from './db/liveSafety.js';
+import { db } from './db/connection.js';
 
 let liveWallet = null;
 let solanaConnection = null;
@@ -113,6 +114,37 @@ function signTransaction(transactionBase64) {
   if (!feePayer || !feePayer.equals(liveWallet.publicKey)) throw new Error('Refusing swap transaction with an unexpected fee payer.');
   tx.sign([liveWallet]);
   return { tx, base64: Buffer.from(tx.serialize()).toString('base64') };
+}
+
+export function localTransactionSignature(tx) {
+  const signature = tx?.signatures?.[0];
+  if (!signature || signature.length !== 64) throw new Error('Signed transaction is missing its primary signature.');
+  return bs58.encode(signature);
+}
+
+function executionIdentity(inputMint, outputMint) {
+  if (inputMint === WSOL_MINT && outputMint && outputMint !== WSOL_MINT) return { side: 'buy', mint: outputMint };
+  if (outputMint === WSOL_MINT && inputMint && inputMint !== WSOL_MINT) return { side: 'sell', mint: inputMint };
+  return null;
+}
+
+function journalExecutionSignature(signature, { inputMint, outputMint, finalized = false } = {}) {
+  ensureLiveSafetySchema();
+  const identity = executionIdentity(inputMint, outputMint);
+  if (!identity || !signature) return false;
+  const at = Date.now();
+  const result = db.prepare(`
+    UPDATE execution_operations
+    SET signature = COALESCE(signature, ?),
+        finalized_at_ms = CASE WHEN ? THEN COALESCE(finalized_at_ms, ?) ELSE finalized_at_ms END,
+        updated_at_ms = ?
+    WHERE id = (
+      SELECT id FROM execution_operations
+      WHERE mint = ? AND side = ? AND status IN ('pending', 'outcome_unknown')
+      ORDER BY id DESC LIMIT 1
+    )
+  `).run(signature, finalized ? 1 : 0, at, at, identity.mint, identity.side);
+  return result.changes === 1;
 }
 
 async function transactionValidationAddresses(tx) {
@@ -242,7 +274,9 @@ export function deriveFinalizedSwapReceipt(transaction, walletAddress, { inputMi
 
   let inputDebitAmount = null;
   if (inputMint === nativeMint) {
-    if (walletIndex >= 0) {
+    if (preTokens > postTokens) {
+      inputDebitAmount = (preTokens - postTokens).toString();
+    } else if (walletIndex >= 0) {
       const nativeDebit = Math.max(0, Number(meta.preBalances?.[walletIndex] || 0) - Number(meta.postBalances?.[walletIndex] || 0));
       inputDebitAmount = String(Math.max(0, nativeDebit - feeLamports));
     }
@@ -251,14 +285,12 @@ export function deriveFinalizedSwapReceipt(transaction, walletAddress, { inputMi
   }
 
   let outputAmount = null;
-  if (outputMint === nativeMint) {
-    if (walletIndex >= 0) {
-      const net = Number(meta.postBalances?.[walletIndex] || 0) - Number(meta.preBalances?.[walletIndex] || 0);
-      const grossOutput = net + feeLamports;
-      if (Number.isSafeInteger(grossOutput) && grossOutput > 0) outputAmount = String(grossOutput);
-    }
-  } else if (postOutputTokens > preOutputTokens) {
+  if (postOutputTokens > preOutputTokens) {
     outputAmount = (postOutputTokens - preOutputTokens).toString();
+  } else if (outputMint === nativeMint && walletIndex >= 0) {
+    const net = Number(meta.postBalances?.[walletIndex] || 0) - Number(meta.preBalances?.[walletIndex] || 0);
+    const grossOutput = net + feeLamports;
+    if (Number.isSafeInteger(grossOutput) && grossOutput > 0) outputAmount = String(grossOutput);
   }
 
   return {
@@ -328,15 +360,38 @@ export async function executeJupiterSwap({ inputMint, outputMint, amount }) {
   if (!transaction) throw new Error('Jupiter order did not include a transaction.');
   const signed = signTransaction(transaction);
   await simulateAndValidateTransaction(signed.tx, { inputMint, outputMint, amount });
-  const executed = JITO_ENABLED ? await jitoSendTransaction(signed.base64) : await jupiterExecute(order, signed.base64);
-  if (executed?.status && executed.status !== 'Success') throw new Error(`Jupiter execute failed: ${executed.error || executed.code || executed.status}`);
-  const signature = executed?.signature || executed?.txid || executed?.transactionId || null;
-  if (!signature) {
-    const error = new Error(`Jupiter execute returned no signature (status: ${executed?.status || 'unknown'})`);
+
+  // The first Solana transaction signature is deterministic after signing. It
+  // is durably journaled before broadcast so a process crash during/after the
+  // HTTP send still leaves enough identity for restart reconciliation.
+  const localSignature = localTransactionSignature(signed.tx);
+  journalExecutionSignature(localSignature, { inputMint, outputMint });
+
+  let executed;
+  try {
+    executed = JITO_ENABLED ? await jitoSendTransaction(signed.base64) : await jupiterExecute(order, signed.base64);
+  } catch (error) {
     error.swapOutcomeUnknown = true;
+    error.swapSignature = error.swapSignature || localSignature;
+    error.swapRequestId = error.swapRequestId || order.requestId || null;
+    throw error;
+  }
+  if (executed?.status && executed.status !== 'Success') {
+    const error = new Error(`Jupiter execute failed: ${executed.error || executed.code || executed.status}`);
+    error.swapOutcomeUnknown = true;
+    error.swapSignature = localSignature;
     error.swapRequestId = order.requestId || null;
     throw error;
   }
+  const remoteSignature = executed?.signature || executed?.txid || executed?.transactionId || null;
+  if (remoteSignature && remoteSignature !== localSignature) {
+    const error = new Error(`Execution provider returned signature ${remoteSignature} but locally signed signature is ${localSignature}.`);
+    error.swapOutcomeUnknown = true;
+    error.swapSignature = localSignature;
+    error.swapRequestId = order.requestId || null;
+    throw error;
+  }
+  const signature = remoteSignature || localSignature;
 
   let receipt;
   try {
@@ -348,6 +403,7 @@ export async function executeJupiterSwap({ inputMint, outputMint, amount }) {
     error.swapRequestId = order.requestId || null;
     throw error;
   }
+  if (receipt?.finalized) journalExecutionSignature(signature, { inputMint, outputMint, finalized: true });
   if (!receipt?.finalized || receipt.success !== true) {
     const detail = receipt?.finalized && receipt.success === false
       ? `finalized with error ${JSON.stringify(receipt.error)}`
