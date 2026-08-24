@@ -6,6 +6,7 @@ import { ensureResearchSchema } from '../research/schema.js';
 const MODEL_VERSION = 'route-edge-bayes-v1';
 
 function finite(value) {
+  if (value === null || value === undefined || value === '') return null;
   const n = Number(value);
   return Number.isFinite(n) ? n : null;
 }
