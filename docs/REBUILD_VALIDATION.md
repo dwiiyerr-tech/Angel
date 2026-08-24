@@ -2,16 +2,29 @@
 
 PR: #6
 
-Before merge:
+Validated on head immediately before release promotion:
 
-- [ ] Node lint passes
-- [ ] Existing unit tests pass
-- [ ] Research mode/policy tests pass
-- [ ] Zero-capital research lifecycle integration test passes
-- [ ] Python syntax checks pass
-- [ ] No live Safety Kernel invariant is removed
-- [ ] Research Telegram/card shows Capital = 0 SOL and Probe separately
-- [ ] Research and live/shadow positions remain independently monitorable
-- [ ] `main` remains unchanged until review/validation completes
+- [x] Node 22 lint passes
+- [x] Existing unit tests pass
+- [x] Research mode/policy tests pass
+- [x] Zero-capital research lifecycle integration test passes
+- [x] Research report smoke test passes
+- [x] Python syntax checks pass
+- [x] Clean install from committed lockfile passes
+- [x] Dependency audit passes
+- [x] Registry signature verification passes
+- [x] No live Safety Kernel invariant is removed
+- [x] Research Telegram/card shows Capital = 0 SOL and Probe separately
+- [x] Research and live/shadow positions remain independently monitorable
+- [x] Research capacity is isolated from execution capacity and async reservations are race-safe
+- [x] SQLite enforces Research zero-capital / positive-probe / unsigned invariants
+- [x] Manual Research buy cannot fall through to Shadow/Live executor
+- [x] Manual Research refresh records R/MFE/MAE/realized-R
+- [x] `main` remained unchanged throughout feature development and validation
 
-If GitHub Actions is unavailable, this checklist must remain incomplete and the PR must stay draft until the same checks are run in a compatible Node 22 environment.
+CI evidence:
+
+- Angel CI run `32766132871`: Node 22 lint + unit tests + Research report smoke test = success; Python syntax = success.
+- Dependency Security CI run `32766132830`: clean lockfile install + lint/unit tests + dependency audit + registry signature verification = success.
+
+Release rule remains unchanged: Research evidence does not automatically promote strategy changes into Live capital. Live promotion remains behind Shadow verification and the deterministic Safety Kernel.
