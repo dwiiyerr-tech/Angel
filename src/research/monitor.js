@@ -3,6 +3,7 @@ import { refreshPosition } from '../execution/positions.js';
 import { sendPositionExit } from '../telegram/send.js';
 import { ensureResearchSchema } from './schema.js';
 import { recordResearchObservation } from './engine.js';
+import { estimateResearchTransactionFees } from './executionCost.js';
 
 export async function monitorResearchPositions() {
   ensureResearchSchema();
@@ -17,15 +18,27 @@ export async function monitorResearchPositions() {
   for (const position of positions) {
     checked += 1;
     try {
-      // Reuse the mature position/exit implementation. Research mode differs in
-      // capital/wallet semantics, not in how a hypothetical position experiences
-      // the market. This prevents a second exit engine from drifting over time.
+      // Reuse the mature position/exit implementation. Execution Cost V2 is an
+      // accounting overlay around it, so research never forks the trading logic.
       const result = await refreshPosition(position, { autoExit: true, jupiterPnl: null });
       if (!result) continue;
-      recordResearchObservation(position.id, result);
+      const exitFees = result.exitReason
+        ? await estimateResearchTransactionFees('exit')
+        : null;
+      const observation = recordResearchObservation(position.id, result, { exitFees });
       if (result.exitReason) {
+        const reported = observation
+          ? {
+              ...result,
+              pnlSol: observation.pnlSol,
+              pnl_sol: observation.pnlSol,
+              pnlPercent: observation.pnlPercent,
+              pnl_percent: observation.pnlPercent,
+              executionCost: { exitFees, modeledExitFeeSol: observation.modeledExitFeeSol },
+            }
+          : result;
         try {
-          await sendPositionExit({ ...result, execution_mode: 'research' });
+          await sendPositionExit({ ...reported, execution_mode: 'research' });
         } catch (error) {
           console.error(`[research] sendPositionExit failed for ${position.id}: ${error.message}`);
         }
