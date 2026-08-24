@@ -1,16 +1,19 @@
 import { escapeHtml, fmtPct, fmtSol, fmtUsd } from '../format.js';
 import { numSetting, boolSetting, setting, activeStrategy, allStrategies } from '../db/settings.js';
-import { openPositionCount, tradingMode, allPositions } from '../db/positions.js';
+import { openPositionCount, allPositions } from '../db/positions.js';
 import { savedWallets } from '../enrichment/wallets.js';
 import { gmgnStatusText } from '../enrichment/gmgn.js';
 import { formatPosition } from './format.js';
 import { ENABLE_LLM, LLM_API_KEY } from '../config.js';
+import { configuredTradingMode } from '../research/policy.js';
+import { openResearchPositionCount, researchPositionCap, researchReferenceNotionalSol } from '../research/engine.js';
 
 function modeMeta() {
-  const mode = tradingMode();
+  const mode = configuredTradingMode();
   if (mode === 'live') return { key: 'live', icon: '🔴', name: 'LIVE', detail: 'Real funds', safety: 'Broadcast enabled' };
   if (mode === 'confirm') return { key: 'confirm', icon: '🟠', name: 'CONFIRM', detail: 'Manual approval', safety: 'Broadcast only after approval' };
-  return { key: 'simulation', icon: '🟢', name: 'SIMULATION', detail: 'Verified no-broadcast', safety: 'Broadcast disabled' };
+  if (mode === 'shadow_live') return { key: 'shadow_live', icon: '🔵', name: 'SHADOW', detail: 'Wallet-aware pre-live verification', safety: 'Transaction simulation only; no broadcast' };
+  return { key: 'research', icon: '🟢', name: 'RESEARCH', detail: '0 SOL capital paper trading', safety: 'Real market quotes; no wallet, signing, or broadcast' };
 }
 
 function enabledText(value) {
@@ -140,6 +143,9 @@ export function agentText() {
   const mode = modeMeta();
   const agentEnabled = boolSetting('agent_enabled', true);
   const llmReady = Boolean(strat.use_llm && ENABLE_LLM && LLM_API_KEY);
+  const researchOpen = openResearchPositionCount();
+  const researchMax = researchPositionCap();
+  const executionOpen = openPositionCount();
   return [
     '🤖 <b>Angel Execution Console</b>',
     '',
@@ -152,9 +158,14 @@ export function agentText() {
     `• Intelligence: <b>${llmReady ? 'LLM READY' : strat.use_llm ? 'LLM NOT CONFIGURED' : 'RULE-BASED'}</b>`,
     `• Confidence floor: ${fmtPct(strat.llm_min_confidence || numSetting('llm_min_confidence'))}`,
     '',
-    '<b>Risk envelope</b>',
-    `• Position size: ${fmtSol(strat.position_size_sol)} SOL`,
-    `• Open positions: ${openPositionCount()}/${strat.max_open_positions || '∞'}`,
+    '<b>Research laboratory</b>',
+    `• Real capital: <b>0 SOL</b>`,
+    `• Quote probe: ${fmtSol(researchReferenceNotionalSol())} SOL`,
+    `• Research positions: ${researchOpen}/${researchMax}`,
+    '',
+    '<b>Capital execution envelope</b>',
+    `• Strategy size: ${fmtSol(strat.position_size_sol)} SOL`,
+    `• Execution positions: ${executionOpen}/${strat.max_open_positions || '∞'}`,
     `• TP / SL: ${fmtPct(strat.tp_percent)} / ${fmtPct(strat.sl_percent)}`,
     `• Trailing: ${strat.trailing_enabled ? fmtPct(strat.trailing_percent) : 'OFF'}`,
     '',
@@ -170,14 +181,27 @@ export function agentKeyboard() {
       inline_keyboard: [
         [{ text: boolSetting('agent_enabled', true) ? '⏸ Pause Agent' : '▶️ Start Agent', callback_data: 'toggle:agent' }],
         [
-          { text: selectedModeLabel('simulation', 'Simulation'), callback_data: 'set:trading_mode:simulation' },
+          { text: selectedModeLabel('research', 'Research'), callback_data: 'set:trading_mode:research' },
+          { text: selectedModeLabel('shadow_live', 'Shadow'), callback_data: 'set:trading_mode:shadow_live' },
+        ],
+        [
           { text: selectedModeLabel('confirm', 'Confirm'), callback_data: 'set:trading_mode:confirm' },
           { text: selectedModeLabel('live', 'Live'), callback_data: 'set:trading_mode:live' },
         ],
         [
-          { text: 'Max 1', callback_data: 'set:max_open_positions:1' },
-          { text: 'Max 3', callback_data: 'set:max_open_positions:3' },
-          { text: 'Max 5', callback_data: 'set:max_open_positions:5' },
+          { text: 'Probe .01', callback_data: 'set:research_notional_sol:0.01' },
+          { text: 'Probe .05', callback_data: 'set:research_notional_sol:0.05' },
+          { text: 'Probe .10', callback_data: 'set:research_notional_sol:0.1' },
+        ],
+        [
+          { text: 'Research 6', callback_data: 'set:research_max_open_positions:6' },
+          { text: 'Research 12', callback_data: 'set:research_max_open_positions:12' },
+          { text: 'Research 24', callback_data: 'set:research_max_open_positions:24' },
+        ],
+        [
+          { text: 'Exec Max 1', callback_data: 'set:max_open_positions:1' },
+          { text: 'Exec Max 3', callback_data: 'set:max_open_positions:3' },
+          { text: 'Exec Max 5', callback_data: 'set:max_open_positions:5' },
         ],
         [
           { text: 'Batch 5', callback_data: 'set:llm_candidate_pick_count:5' },
@@ -216,7 +240,8 @@ export function mainMenuText() {
     `${mode.icon} Mode: <b>${mode.name}</b>`,
     `🤖 Agent: <b>${enabledText(agentEnabled)}</b>`,
     `🎯 Strategy: <b>${escapeHtml(strat.name)}</b>`,
-    `📍 Positions: <b>${openPositionCount()}/${strat.max_open_positions || '∞'}</b>`,
+    `🧪 Research: <b>${openResearchPositionCount()}/${researchPositionCap()}</b> · Capital: <b>0 SOL</b>`,
+    `📍 Execution: <b>${openPositionCount()}/${strat.max_open_positions || '∞'}</b>`,
     '',
     `🛡️ <i>${mode.safety}</i>`,
     '',
@@ -407,12 +432,12 @@ export function batchRevealButtons(batchId, rows, decision, triggerCandidateId =
 }
 
 export function positionButtons(positionId) {
-  const simulation = modeMeta().key === 'simulation';
+  const noBroadcast = modeMeta().key === 'research' || modeMeta().key === 'shadow_live';
   return {
     reply_markup: {
       inline_keyboard: [
         [
-          { text: simulation ? '🧪 Close Simulation' : '🚪 Close Position', callback_data: `sell:${positionId}` },
+          { text: noBroadcast ? '🧪 Close Simulation' : '🚪 Close Position', callback_data: `sell:${positionId}` },
           { text: '🔄 Refresh', callback_data: `pos:${positionId}` },
         ],
         [
