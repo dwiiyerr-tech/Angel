@@ -8,6 +8,7 @@ on:
       - 'feat/**'
       - 'fix/**'
       - 'refactor/**'
+      - 'test/**'
 
 permissions:
   contents: read
@@ -56,6 +57,11 @@ jobs:
         env:
           DB_PATH: /tmp/angel-fast-hunter-report.sqlite
         run: npm run fast:report
+
+      - name: Live safety chaos report smoke test
+        env:
+          DB_PATH: /tmp/angel-live-chaos-report.sqlite
+        run: npm run chaos:report
 
   python-syntax:
     name: Python syntax
