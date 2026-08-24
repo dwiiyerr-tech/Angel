@@ -1,6 +1,7 @@
 import { db } from '../db/connection.js';
 import { numSetting } from '../db/settings.js';
 import { safeJson } from '../utils.js';
+import { ensureResearchSchema } from '../research/schema.js';
 import { netBuyerRatio } from './qualityScore.js';
 
 const MODEL_VERSION = 'runner-path-bayes-v1';
@@ -130,6 +131,7 @@ export function estimateRunnerProbabilityFromRecords(records = [], featureSnapsh
 }
 
 function recordsFromResearchHistory({ runnerMfeR, maxMaeR, maxTimeToMfeMs, limit }) {
+  ensureResearchSchema();
   const rows = db.prepare(`
     SELECT id, mfe_r, mae_r, time_to_mfe_ms, snapshot_json
     FROM dry_run_positions
