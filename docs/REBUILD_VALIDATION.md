@@ -24,7 +24,7 @@ Validated release code and tests before merge.
 
 CI evidence:
 
-- Angel CI run `32766371257`: Node 22 lint + unit tests + Research report smoke test = success; Python syntax = success.
-- Dependency Security CI run `32766371281`: clean lockfile install + lint/unit tests + dependency audit + registry signature verification = success.
+- Angel CI: Node 22 lint + unit tests + Research report smoke test = success; Python syntax = success.
+- Dependency Security CI: clean lockfile install + lint/unit tests + dependency audit + registry signature verification = success.
 
 Release rule remains unchanged: Research evidence does not automatically promote strategy changes into Live capital. Live promotion remains behind Shadow verification and the deterministic Safety Kernel.
