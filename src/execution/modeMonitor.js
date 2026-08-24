@@ -1,10 +1,10 @@
 import { db } from '../db/connection.js';
-import { now } from '../utils.js';
 import { refreshPosition } from './positions.js';
 import { monitorResearchPositions } from '../research/monitor.js';
 import { fetchJupiterWalletPnl } from '../enrichment/jupiter.js';
-import { fetchLiveTokenBalance, liveWalletPubkey } from '../liveExecutor.js';
+import { liveWalletPubkey } from '../liveExecutor.js';
 import { sendPositionExit } from '../telegram/send.js';
+import { reconcileUnknownExecutions } from './reconciler.js';
 
 async function monitorExecutionPositions() {
   const positions = db.prepare(`
@@ -24,20 +24,9 @@ async function monitorExecutionPositions() {
   for (const position of positions) {
     checked += 1;
     try {
-      if (position.execution_mode === 'live' && !position.token_amount_raw) {
-        const recoveredAmount = await fetchLiveTokenBalance(position.mint);
-        if (recoveredAmount && BigInt(recoveredAmount) > 0n) {
-          db.prepare('UPDATE dry_run_positions SET token_amount_raw = ? WHERE id = ?')
-            .run(String(recoveredAmount), position.id);
-          position.token_amount_raw = String(recoveredAmount);
-          db.prepare(`
-            UPDATE execution_operations
-            SET output_amount = ?, status = 'completed', error = NULL, updated_at_ms = ?
-            WHERE position_id = ? AND side = 'buy' AND status = 'outcome_unknown'
-          `).run(String(recoveredAmount), now(), position.id);
-        }
-      }
-
+      // Missing/ambiguous live token amounts are resolved only by the durable
+      // finalized-signature reconciler. Position monitoring must not infer a
+      // completed swap from a current wallet balance alone.
       const jupiterPnl = position.execution_mode === 'live'
         ? (walletPnlData[position.mint]?.pnl || null)
         : null;
@@ -62,6 +51,11 @@ async function monitorExecutionPositions() {
 }
 
 export async function monitorAllPositionsByMode() {
+  // Reconcile money-grade UNKNOWN operations first. A finalized failure can
+  // restore an unknown sell to open; a finalized success can recover an orphan
+  // buy/exit. Irreducibly ambiguous operations remain latched and block Live.
+  const reconciliation = await reconcileUnknownExecutions();
+
   // Research monitor catches and reports its own quote/data failures because no
   // money can be lost. Execution monitor throws only for live-position failures,
   // which keeps the existing circuit-breaker escalation semantics intact.
@@ -73,5 +67,8 @@ export async function monitorAllPositionsByMode() {
     researchFailures: Number(research.failures || 0),
     executionChecked: Number(execution.checked || 0),
     liveFailures: Number(execution.liveFailures || 0),
+    reconciliationChecked: Number(reconciliation.checked || 0),
+    reconciliationResolved: Number(reconciliation.resolved || 0),
+    reconciliationPending: Number(reconciliation.pending || 0),
   };
 }
