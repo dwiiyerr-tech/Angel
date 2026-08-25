@@ -16,6 +16,11 @@ function parseJson(value, fallback = {}) {
   }
 }
 
+function finiteNumber(value, fallback = 0) {
+  const n = Number(value);
+  return Number.isFinite(n) ? n : fallback;
+}
+
 function finiteNonNegative(value, fallback = 0) {
   const n = Number(value);
   return Number.isFinite(n) && n >= 0 ? n : fallback;
@@ -71,11 +76,12 @@ export function partialResearchExitAccounting({
   const cost = finiteNonNegative(soldCostSol, NaN);
   const output = finiteNonNegative(fillOutSol, NaN);
   const fee = finiteNonNegative(exitFeeSol, 0);
+  const baselinePnl = finiteNumber(baselineRealizedPnlSol, 0);
   if (!Number.isFinite(cost) || cost <= 0 || !Number.isFinite(output)) return null;
   const legNetPnlSol = output - cost - fee;
   return {
     legNetPnlSol,
-    realizedPnlSol: finiteNonNegative(baselineRealizedPnlSol, 0) + legNetPnlSol,
+    realizedPnlSol: baselinePnl + legNetPnlSol,
     realizedFeeSol: finiteNonNegative(baselineRealizedFeeSol, 0) + fee,
     soldCostSol: cost,
     fillOutSol: output,
@@ -98,7 +104,7 @@ export function finalResearchExitAccounting({
   const priorFees = finiteNonNegative(realizedFeeSol, 0);
   const exitFee = finiteNonNegative(exitFeeSol, 0);
   const priorCost = finiteNonNegative(realizedCostSol, 0);
-  const priorPnl = Number(baselineRealizedPnlSol);
+  const priorPnl = finiteNumber(baselineRealizedPnlSol, NaN);
   if (!Number.isFinite(priorPnl) || !Number.isFinite(remainingCost) || remainingCost <= 0 || !Number.isFinite(output)) return null;
 
   const pnlSol = priorPnl + output - remainingCost - entryFee - exitFee;
@@ -244,10 +250,10 @@ function insertPendingSettlement({
     trade.reason || null,
     String(rawAmount),
     soldCostSol,
-    baselineRealizedPnlSol,
-    baselineRealizedFeeSol,
-    legacyPnlDeltaSol,
-    legacyFeeDeltaSol,
+    finiteNumber(baselineRealizedPnlSol, 0),
+    finiteNonNegative(baselineRealizedFeeSol, 0),
+    finiteNumber(legacyPnlDeltaSol, 0),
+    finiteNumber(legacyFeeDeltaSol, 0),
     JSON.stringify(payload),
     at,
     at,
@@ -309,107 +315,112 @@ async function completePendingSettlement(row, { quoteFn, feeFn, sleepFn } = {}) 
   let adjustedResult = null;
   let accounting = null;
 
-  db.transaction(() => {
-    const current = db.prepare('SELECT status FROM research_exit_settlements WHERE id = ?').get(row.id);
-    if (current?.status !== 'pending') return;
+  try {
+    db.transaction(() => {
+      const current = db.prepare('SELECT status FROM research_exit_settlements WHERE id = ?').get(row.id);
+      if (current?.status !== 'pending') return;
 
-    if (row.kind === 'partial') {
-      accounting = partialResearchExitAccounting({
-        baselineRealizedPnlSol: row.baseline_realized_pnl_sol,
-        baselineRealizedFeeSol: row.baseline_realized_fee_sol,
-        soldCostSol: row.sold_cost_sol,
-        fillOutSol: profile.fillOutSol,
-        exitFeeSol,
-      });
-      if (!accounting) throw new Error('Invalid Research Exit V3 partial accounting inputs.');
-      db.prepare(`
-        UPDATE dry_run_positions
-        SET realized_pnl_sol = ?, realized_fee_sol = ?, research_data_quality = ?
-        WHERE id = ? AND execution_mode = 'research'
-      `).run(accounting.realizedPnlSol, accounting.realizedFeeSol, profile.quality, position.id);
-    } else {
-      accounting = finalResearchExitAccounting({
-        baselineRealizedPnlSol: row.baseline_realized_pnl_sol,
-        realizedCostSol: position.realized_cost_sol,
-        remainingCostSol: row.sold_cost_sol,
-        entryFeeSol: position.entry_fee_sol,
-        realizedFeeSol: row.baseline_realized_fee_sol,
-        fillOutSol: profile.fillOutSol,
-        exitFeeSol,
-      });
-      if (!accounting) throw new Error('Invalid Research Exit V3 final accounting inputs.');
-      const ratio = Number(row.sold_cost_sol) > 0 ? Number(profile.fillOutSol) / Number(row.sold_cost_sol) : null;
-      const exitPrice = Number.isFinite(ratio) && Number(position.entry_price) > 0 ? Number(position.entry_price) * ratio : position.exit_price;
-      const exitMcap = Number.isFinite(ratio) && Number(position.entry_mcap) > 0 ? Number(position.entry_mcap) * ratio : position.exit_mcap;
-      db.prepare(`
-        UPDATE dry_run_positions
-        SET exit_price = ?, exit_mcap = ?, pnl_sol = ?, pnl_percent = ?, exit_fee_sol = ?,
-            modeled_exit_fee_sol = ?, modeled_net_pnl_sol = ?, modeled_net_pnl_percent = ?,
-            research_data_quality = ?
-        WHERE id = ? AND execution_mode = 'research' AND status = 'closed'
-      `).run(
-        exitPrice,
-        exitMcap,
-        accounting.pnlSol,
-        accounting.pnlPercent,
-        exitFeeSol,
-        exitFeeSol,
-        accounting.pnlSol,
-        accounting.pnlPercent,
-        profile.quality,
-        position.id,
-      );
-      db.prepare('UPDATE dry_run_trades SET price = ?, mcap = ? WHERE id = ?').run(exitPrice, exitMcap, trade.id);
-      adjustedResult = {
-        ...position,
-        status: 'closed',
-        exitReason: position.exit_reason || trade.reason,
-        exit_reason: position.exit_reason || trade.reason,
-        exit_price: exitPrice,
-        exit_mcap: exitMcap,
-        price: exitPrice,
-        mcap: exitMcap,
-        pnlSol: accounting.pnlSol,
-        pnl_sol: accounting.pnlSol,
-        pnlPercent: accounting.pnlPercent,
-        pnl_percent: accounting.pnlPercent,
+      if (row.kind === 'partial') {
+        accounting = partialResearchExitAccounting({
+          baselineRealizedPnlSol: row.baseline_realized_pnl_sol,
+          baselineRealizedFeeSol: row.baseline_realized_fee_sol,
+          soldCostSol: row.sold_cost_sol,
+          fillOutSol: profile.fillOutSol,
+          exitFeeSol,
+        });
+        if (!accounting) throw new Error('Invalid Research Exit V3 partial accounting inputs.');
+        db.prepare(`
+          UPDATE dry_run_positions
+          SET realized_pnl_sol = ?, realized_fee_sol = ?, research_data_quality = ?
+          WHERE id = ? AND execution_mode = 'research'
+        `).run(accounting.realizedPnlSol, accounting.realizedFeeSol, profile.quality, position.id);
+      } else {
+        accounting = finalResearchExitAccounting({
+          baselineRealizedPnlSol: row.baseline_realized_pnl_sol,
+          realizedCostSol: position.realized_cost_sol,
+          remainingCostSol: row.sold_cost_sol,
+          entryFeeSol: position.entry_fee_sol,
+          realizedFeeSol: row.baseline_realized_fee_sol,
+          fillOutSol: profile.fillOutSol,
+          exitFeeSol,
+        });
+        if (!accounting) throw new Error('Invalid Research Exit V3 final accounting inputs.');
+        const ratio = Number(row.sold_cost_sol) > 0 ? Number(profile.fillOutSol) / Number(row.sold_cost_sol) : null;
+        const exitPrice = Number.isFinite(ratio) && Number(position.entry_price) > 0 ? Number(position.entry_price) * ratio : position.exit_price;
+        const exitMcap = Number.isFinite(ratio) && Number(position.entry_mcap) > 0 ? Number(position.entry_mcap) * ratio : position.exit_mcap;
+        db.prepare(`
+          UPDATE dry_run_positions
+          SET exit_price = ?, exit_mcap = ?, pnl_sol = ?, pnl_percent = ?, exit_fee_sol = ?,
+              modeled_exit_fee_sol = ?, modeled_net_pnl_sol = ?, modeled_net_pnl_percent = ?,
+              research_data_quality = ?
+          WHERE id = ? AND execution_mode = 'research' AND status = 'closed'
+        `).run(
+          exitPrice,
+          exitMcap,
+          accounting.pnlSol,
+          accounting.pnlPercent,
+          exitFeeSol,
+          exitFeeSol,
+          accounting.pnlSol,
+          accounting.pnlPercent,
+          profile.quality,
+          position.id,
+        );
+        db.prepare('UPDATE dry_run_trades SET price = ?, mcap = ? WHERE id = ?').run(exitPrice, exitMcap, trade.id);
+        adjustedResult = {
+          ...position,
+          status: 'closed',
+          exitReason: position.exit_reason || trade.reason,
+          exit_reason: position.exit_reason || trade.reason,
+          exit_price: exitPrice,
+          exit_mcap: exitMcap,
+          price: exitPrice,
+          mcap: exitMcap,
+          pnlSol: accounting.pnlSol,
+          pnl_sol: accounting.pnlSol,
+          pnlPercent: accounting.pnlPercent,
+          pnl_percent: accounting.pnlPercent,
+        };
+      }
+
+      const settlementPayload = {
+        version: RESEARCH_EXIT_SIMULATOR_VERSION,
+        kind: row.kind,
+        reason: row.reason,
+        accounting,
+        profile,
+        replacedLegacy: {
+          pnlDeltaSol: Number(row.legacy_pnl_delta_sol || 0),
+          feeDeltaSol: Number(row.legacy_fee_delta_sol || 0),
+        },
       };
-    }
-
-    const settlementPayload = {
-      version: RESEARCH_EXIT_SIMULATOR_VERSION,
-      kind: row.kind,
-      reason: row.reason,
-      accounting,
-      profile,
-      replacedLegacy: {
-        pnlDeltaSol: Number(row.legacy_pnl_delta_sol || 0),
-        feeDeltaSol: Number(row.legacy_fee_delta_sol || 0),
-      },
-    };
-    updateTradePayload(trade.id, settlementPayload);
-    db.prepare(`
-      UPDATE research_exit_settlements
-      SET status = 'completed', signal_at_ms = ?, fill_at_ms = ?, configured_latency_ms = ?,
-          measured_latency_ms = ?, signal_out_sol = ?, fill_out_sol = ?, quote_deterioration_pct = ?,
-          fee_sol = ?, quality = ?, attempt_count = attempt_count + 1, next_retry_at_ms = 0,
-          last_error = NULL, payload_json = ?, updated_at_ms = ?
-      WHERE id = ?
-    `).run(
-      profile.signalAtMs,
-      profile.fillAtMs,
-      profile.configuredLatencyMs,
-      profile.measuredQuoteToFillLatencyMs,
-      profile.signalOutSol,
-      profile.fillOutSol,
-      profile.quoteDeteriorationPct,
-      exitFeeSol,
-      profile.quality,
-      JSON.stringify(settlementPayload),
-      now(),
-      row.id,
-    );
-  })();
+      updateTradePayload(trade.id, settlementPayload);
+      db.prepare(`
+        UPDATE research_exit_settlements
+        SET status = 'completed', signal_at_ms = ?, fill_at_ms = ?, configured_latency_ms = ?,
+            measured_latency_ms = ?, signal_out_sol = ?, fill_out_sol = ?, quote_deterioration_pct = ?,
+            fee_sol = ?, quality = ?, attempt_count = attempt_count + 1, next_retry_at_ms = 0,
+            last_error = NULL, payload_json = ?, updated_at_ms = ?
+        WHERE id = ?
+      `).run(
+        profile.signalAtMs,
+        profile.fillAtMs,
+        profile.configuredLatencyMs,
+        profile.measuredQuoteToFillLatencyMs,
+        profile.signalOutSol,
+        profile.fillOutSol,
+        profile.quoteDeteriorationPct,
+        exitFeeSol,
+        profile.quality,
+        JSON.stringify(settlementPayload),
+        now(),
+        row.id,
+      );
+    })();
+  } catch (error) {
+    markSettlementError(row, error);
+    return { ok: false, pending: true, settlementId: row.id, error: error.message };
+  }
 
   return {
     ok: true,
@@ -446,12 +457,12 @@ export async function settleResearchPartialExitV3({ beforePosition, cycleStarted
   `).get(beforePosition.id, Number(cycleStartedAtMs || 0));
   if (!trade) return null;
 
-  const baselinePnl = finiteNonNegative(beforePosition.realized_pnl_sol, 0);
+  const baselinePnl = finiteNumber(beforePosition.realized_pnl_sol, 0);
   const baselineFee = finiteNonNegative(beforePosition.realized_fee_sol, 0);
   const baselineCost = finiteNonNegative(beforePosition.realized_cost_sol, 0);
-  const afterPnl = Number(after.realized_pnl_sol || 0);
-  const afterFee = Number(after.realized_fee_sol || 0);
-  const afterCost = Number(after.realized_cost_sol || 0);
+  const afterPnl = finiteNumber(after.realized_pnl_sol, 0);
+  const afterFee = finiteNonNegative(after.realized_fee_sol, 0);
+  const afterCost = finiteNonNegative(after.realized_cost_sol, 0);
   const soldCostSol = afterCost - baselineCost;
   if (!Number.isFinite(soldCostSol) || soldCostSol <= 0) return null;
 
@@ -490,9 +501,9 @@ export async function settleResearchFinalExitV3({ beforePosition, result, quoteF
     kind: 'final',
     rawAmount,
     soldCostSol: Number(beforePosition.size_sol),
-    baselineRealizedPnlSol: finiteNonNegative(beforePosition.realized_pnl_sol, 0),
+    baselineRealizedPnlSol: finiteNumber(beforePosition.realized_pnl_sol, 0),
     baselineRealizedFeeSol: finiteNonNegative(beforePosition.realized_fee_sol, 0),
-    legacyPnlDeltaSol: Number(result.pnlSol ?? result.pnl_sol ?? 0),
+    legacyPnlDeltaSol: finiteNumber(result.pnlSol ?? result.pnl_sol, 0),
     legacyFeeDeltaSol: finiteNonNegative(beforePosition.exit_fee_sol, 0),
     payload: { exitReason: result.exitReason },
   });
