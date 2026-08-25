@@ -47,9 +47,14 @@ function maxDrawdownR(values) {
   return worst;
 }
 
-function realizedRForRow(row) {
+export function positionRealizedR(row = {}, executionMode = 'research') {
   const stored = finite(row.realized_r);
   if (stored != null) return { value: stored, source: 'stored_realized_r' };
+
+  // Research has a native realized-R pipeline. Missing Research R is missing
+  // evidence and must reduce coverage rather than being silently reconstructed.
+  // Shadow predates native R persistence, so transparent derivation is allowed.
+  if (executionMode !== 'shadow_live') return { value: null, source: 'unavailable' };
 
   const pnlSol = finite(row.pnl_sol);
   let riskSol = finite(row.initial_risk_sol);
@@ -80,7 +85,7 @@ function performanceForMode(executionMode, sinceMs) {
     ORDER BY COALESCE(closed_at_ms, opened_at_ms) ASC, id ASC
   `).all(executionMode, sinceMs);
 
-  const rRows = rows.map(row => realizedRForRow(row));
+  const rRows = rows.map(row => positionRealizedR(row, executionMode));
   const realized = clean(rRows.map(row => row.value));
   const winners = realized.filter(value => value > 0);
   const losers = realized.filter(value => value <= 0);
@@ -105,6 +110,9 @@ function performanceForMode(executionMode, sinceMs) {
     nativeRealizedRSample,
     derivedRealizedRSample,
     realizedRCoverage: ratio(realized.length, rows.length),
+    rEvidenceMethod: executionMode === 'shadow_live'
+      ? 'stored realized_r, else pnl_sol/risk, else pnl_percent/abs(SL)'
+      : 'native realized_r only',
     evidenceSpanHours: firstAt != null && lastAt != null && lastAt >= firstAt ? (lastAt - firstAt) / 3_600_000 : 0,
     wins: winners.length,
     losses: losers.length,
@@ -170,7 +178,7 @@ function decisionQualitySnapshot(sinceMs) {
     FROM decision_receipts r
     LEFT JOIN decision_execution_probes p ON p.receipt_id = r.id
     LEFT JOIN decision_outcomes o ON o.receipt_id = r.id
-    WHERE r.created_at_ms >= ?
+    WHERE r.created_at_ms >= ? AND r.mode = 'research'
     ORDER BY r.id ASC
   `).all(sinceMs);
 
@@ -353,14 +361,14 @@ export function evaluateReadinessEvidence(evidence, thresholds = readinessThresh
     check('research_span', 'Research evidence span', Number(research.evidenceSpanHours) >= thresholds.researchMinSpanHours, { value: research.evidenceSpanHours, threshold: `>=${thresholds.researchMinSpanHours}h` }),
     check('research_expectancy', 'Research expectancy', finite(research.expectancyR) != null && Number(research.expectancyR) >= thresholds.researchMinExpectancyR, { value: research.expectancyR, threshold: `>=${thresholds.researchMinExpectancyR}R` }),
     check('research_profit_factor', 'Research profit factor', finite(research.profitFactorR) != null && Number(research.profitFactorR) >= thresholds.researchMinProfitFactor, { value: research.profitFactorR, threshold: `>=${thresholds.researchMinProfitFactor}` }),
-    check('research_r_coverage', 'Realized-R coverage', finite(research.realizedRCoverage) != null && Number(research.realizedRCoverage) >= thresholds.researchMinRealizedCoverage, { value: research.realizedRCoverage, threshold: `>=${thresholds.researchMinRealizedCoverage}` }),
+    check('research_r_coverage', 'Research native realized-R coverage', finite(research.realizedRCoverage) != null && Number(research.realizedRCoverage) >= thresholds.researchMinRealizedCoverage, { value: research.realizedRCoverage, threshold: `>=${thresholds.researchMinRealizedCoverage}` }),
     check('entry_execution_coverage', 'Executable entry evidence coverage', finite(execution.entryExecutionCoverage) != null && Number(execution.entryExecutionCoverage) >= thresholds.researchMinEntryExecutionCoverage, { value: execution.entryExecutionCoverage, threshold: `>=${thresholds.researchMinEntryExecutionCoverage}` }),
     check('exit_v3_coverage', 'Exit Simulator V3 coverage', finite(execution.exitV3Coverage) != null && Number(execution.exitV3Coverage) >= thresholds.researchMinExitV3Coverage, { value: execution.exitV3Coverage, threshold: `>=${thresholds.researchMinExitV3Coverage}` }),
     check('pending_research_exit', 'No pending Research exit settlements', Number(execution.pendingExitSettlements || 0) === 0, { value: execution.pendingExitSettlements || 0, threshold: '=0' }),
     check('research_drawdown', 'Research max drawdown', finite(research.maxDrawdownR) != null && Number(research.maxDrawdownR) <= thresholds.researchMaxDrawdownR, { value: research.maxDrawdownR, threshold: `<=${thresholds.researchMaxDrawdownR}R`, hard: false }),
     check('quote_deterioration', 'Median entry quote deterioration', finite(execution.medianEntryQuoteDeteriorationPct) == null || Number(execution.medianEntryQuoteDeteriorationPct) <= thresholds.maxMedianQuoteDeteriorationPct, { value: execution.medianEntryQuoteDeteriorationPct, threshold: `<=${thresholds.maxMedianQuoteDeteriorationPct}%`, hard: false }),
     check('roundtrip_spread', 'Median executable roundtrip spread', finite(execution.medianRoundtripSpreadPct) == null || Number(execution.medianRoundtripSpreadPct) <= thresholds.maxMedianRoundtripSpreadPct, { value: execution.medianRoundtripSpreadPct, threshold: `<=${thresholds.maxMedianRoundtripSpreadPct}%`, hard: false }),
-    check('decision_finalized', 'Decision Intelligence finalized sample', Number(decisions.finalizedOutcomes || 0) >= thresholds.decisionMinFinalized, { value: decisions.finalizedOutcomes || 0, threshold: `>=${thresholds.decisionMinFinalized}`, hard: false }),
+    check('decision_finalized', 'Research Decision Intelligence finalized sample', Number(decisions.finalizedOutcomes || 0) >= thresholds.decisionMinFinalized, { value: decisions.finalizedOutcomes || 0, threshold: `>=${thresholds.decisionMinFinalized}`, hard: false }),
     check('probe_ready_rate', 'Decision executable-probe coverage', finite(decisions.probeReadyRate) != null && Number(decisions.probeReadyRate) >= thresholds.decisionMinProbeReadyRate, { value: decisions.probeReadyRate, threshold: `>=${thresholds.decisionMinProbeReadyRate}`, hard: false }),
     check('missed_runner_rate', 'Missed-runner rate', finite(decisions.missedRunnerRate) == null || Number(decisions.missedRunnerRate) <= thresholds.decisionMaxMissedRunnerRate, { value: decisions.missedRunnerRate, threshold: `<=${thresholds.decisionMaxMissedRunnerRate}`, hard: false }),
     check('false_positive_rate', 'BUY false-positive rate', finite(decisions.falsePositiveRate) == null || Number(decisions.falsePositiveRate) <= thresholds.decisionMaxFalsePositiveRate, { value: decisions.falsePositiveRate, threshold: `<=${thresholds.decisionMaxFalsePositiveRate}`, hard: false }),
@@ -373,7 +381,7 @@ export function evaluateReadinessEvidence(evidence, thresholds = readinessThresh
     check('shadow_span', 'Shadow evidence span', Number(shadow.evidenceSpanHours || 0) >= thresholds.shadowMinSpanHours, { value: shadow.evidenceSpanHours || 0, threshold: `>=${thresholds.shadowMinSpanHours}h` }),
     check('shadow_expectancy', 'Shadow expectancy', finite(shadow.expectancyR) != null && Number(shadow.expectancyR) >= thresholds.shadowMinExpectancyR, { value: shadow.expectancyR, threshold: `>=${thresholds.shadowMinExpectancyR}R` }),
     check('shadow_profit_factor', 'Shadow profit factor', finite(shadow.profitFactorR) != null && Number(shadow.profitFactorR) >= thresholds.shadowMinProfitFactor, { value: shadow.profitFactorR, threshold: `>=${thresholds.shadowMinProfitFactor}` }),
-    check('shadow_r_coverage', 'Shadow realized-R coverage', finite(shadow.realizedRCoverage) != null && Number(shadow.realizedRCoverage) >= thresholds.shadowMinRealizedCoverage, { value: shadow.realizedRCoverage, threshold: `>=${thresholds.shadowMinRealizedCoverage}` }),
+    check('shadow_r_coverage', 'Shadow R coverage (native or transparent derived)', finite(shadow.realizedRCoverage) != null && Number(shadow.realizedRCoverage) >= thresholds.shadowMinRealizedCoverage, { value: shadow.realizedRCoverage, threshold: `>=${thresholds.shadowMinRealizedCoverage}`, detail: shadow.rEvidenceMethod || null }),
     check('safety_clear', 'Money-grade safety state clear', Boolean(safety.clear), { value: safety.blockerCount, threshold: '0 blockers' }),
     check('control_plane_stable', 'Stable active config with no challenger/config transition', Boolean(controlPlane.stableForPreLive), { value: controlPlane.openProposal?.status || (controlPlane.active ? 'stable' : 'no_active_config'), threshold: 'stable' }),
     check('shadow_drawdown', 'Shadow max drawdown', finite(shadow.maxDrawdownR) != null && Number(shadow.maxDrawdownR) <= thresholds.shadowMaxDrawdownR, { value: shadow.maxDrawdownR, threshold: `<=${thresholds.shadowMaxDrawdownR}R`, hard: false }),
@@ -386,6 +394,10 @@ export function evaluateReadinessEvidence(evidence, thresholds = readinessThresh
     check('live_safety_clear', 'Live safety/ledger state clear', Boolean(safety.clear), { value: safety.blockerCount, threshold: '0 blockers' }),
     check('control_plane_frozen', 'Stable active config for pre-Live review', Boolean(controlPlane.stableForPreLive), { value: controlPlane.openProposal?.status || (controlPlane.active ? 'stable' : 'no_active_config'), threshold: 'stable' }),
     check('no_pending_research_exit', 'No unresolved Research settlement evidence', Number(execution.pendingExitSettlements || 0) === 0, { value: execution.pendingExitSettlements || 0, threshold: '=0' }),
+    check('confirm_attribution', 'Confirm performance is not yet separately attributed from Live ledger identity', false, {
+      value: 'shared_live_ledger_identity', threshold: 'isolated_confirm_performance', hard: false,
+      detail: 'Manager must disclose this caveat; eligibility remains evidence-only and never authorizes Live.',
+    }),
   ];
   const confirmToLiveConsideration = stageResult('confirm_to_live_consideration', liveChecks, 'ELIGIBLE_FOR_LIVE_CONSIDERATION');
 
