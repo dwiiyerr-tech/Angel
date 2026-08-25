@@ -184,15 +184,16 @@ export function buildManagerEvidence(question) {
   else if (mint) focusDecision = compactDetails(latestDecisionReceiptDetailsByMint(mint));
 
   return {
-    evidenceVersion: 'angel-manager-evidence-v4-config-assistant',
+    evidenceVersion: 'angel-manager-evidence-v3-two-mode',
     generatedAtMs: Date.now(),
     questionWindowMs: windowMs,
     authority: {
-      managerMode: 'read_only_analysis_plus_proposal',
+      managerMode: 'read_only',
       canApproveLive: false,
       canEnableLive: false,
       canSignTransactions: false,
       canBroadcastTransactions: false,
+      canMutateSettings: false,
       canMutateSettingsDirectly: false,
       canCreateOwnerDirectedConfigProposal: true,
       canProposeAnalysis: true,
