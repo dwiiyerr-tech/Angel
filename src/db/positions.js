@@ -119,6 +119,7 @@ export function tradingMode() {
   //   Telegram trade intent. Only the owner-confirmed intent path may broadcast.
   // Protective exits remain automatic on persisted execution_mode='live'.
   if (mode === 'live') return 'confirm';
+  if (mode === 'confirm') return 'confirm';
   return 'shadow_live';
 }
 
@@ -136,10 +137,14 @@ export function positionSizeBreakdown(candidate, decision, strat = activeStrateg
   const sourceWeight = Number.isFinite(rawSourceWeight)
     ? rawSourceWeight > 0 ? Math.max(minimumOpportunityWeight, Math.min(1, rawSourceWeight)) : 0
     : 0;
+  const decisionTier = String(candidate.filters?.decisionTier || decision?.tier || 'A').toUpperCase();
+  const bTierMultiplier = decisionTier === 'B'
+    ? Math.max(0.1, Math.min(1, numSetting('b_tier_size_multiplier', 0.5)))
+    : 1;
   const sessionMultiplier = utcHour >= 12 && utcHour <= 18 ? 0.5 : 1;
   const regimeMultiplier = 1;
   const lossRisk = riskControlState(tradingMode());
-  const unconstrainedSizeSol = Math.max(0, baseAfterConfidence * riskMultiplier * sourceWeight * sessionMultiplier * lossRisk.sizeMultiplier);
+  const unconstrainedSizeSol = Math.max(0, baseAfterConfidence * riskMultiplier * sourceWeight * sessionMultiplier * lossRisk.sizeMultiplier * bTierMultiplier);
   const stopDistanceFraction = Math.abs(Number(decision?.suggested_sl_percent ?? strat?.sl_percent ?? numSetting('default_sl_percent', -25))) / 100;
   const riskBudgetSol = Math.max(0, numSetting('risk_per_trade_sol', RISK_PER_TRADE_SOL));
   const riskCappedSizeSol = riskBudgetSol > 0 && stopDistanceFraction > 0
@@ -156,6 +161,7 @@ export function positionSizeBreakdown(candidate, decision, strat = activeStrateg
     finalSizeSol: executable ? rawSizeSol : 0,
     minimumEconomicSol, executable, unconstrainedSizeSol, riskBudgetSol, stopDistanceFraction,
     lossStreak: lossRisk.streak, lossStreakMultiplier: lossRisk.sizeMultiplier, allocatorMultiplier,
+    decisionTier, bTierMultiplier,
   };
 }
 

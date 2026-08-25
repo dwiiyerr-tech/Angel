@@ -23,7 +23,9 @@ assert.doesNotMatch(menus, /set:trading_mode:confirm/);
 // simulation-only and explicitly cannot broadcast.
 assert.match(positions, /if \(mode === 'live'\) return 'confirm'/);
 assert.match(positions, /return 'shadow_live'/);
-assert.match(router, /tradingMode\(\) === 'shadow_live'/);
+assert.match(router, /if \(mode === 'shadow_live'\)/);
+assert.match(router, /assertContractSafetyForMoneyMode/);
+assert.match(router, /assertLiveRiskBudget/);
 assert.match(router, /simulateJupiterSwap/);
 assert.match(router, /broadcast: false/);
 

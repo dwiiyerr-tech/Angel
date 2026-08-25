@@ -2,6 +2,7 @@ import assert from 'node:assert/strict';
 import { validateDryRunRows } from '../../src/learning/dataQuality.js';
 import { tuneAdmissionEdge } from '../../src/learning/edgeTuner.js';
 import { DRY_RUN_SIMULATOR_VERSION } from '../../src/learning/simulatorVersion.js';
+import { buyConfidenceFloor } from '../../src/db/settings.js';
 
 const position = { id: 1, status: 'closed', opened_at_ms: 10, closed_at_ms: 20, pnl_percent: 5, pnl_sol: 0.01, entry_mcap: 10000, size_sol: 0.1, snapshot_json: '{}' };
 assert.equal(validateDryRunRows([position], [{ position_id: 1, side: 'BUY' }, { position_id: 1, side: 'sell' }]).valid, true);
@@ -31,5 +32,16 @@ assert.equal(result.recommended?.splitHalfPositive, true);
 assert(result.recommended?.validationUplift > 0);
 assert(result.recommended?.testUplift > 0, 'final chronological holdout must independently confirm the recommendation');
 assert(result.validationAt > result.splitAt);
+
+assert.equal(
+  buyConfidenceFloor({ min_buy_confidence: 85, llm_min_confidence: 60 }),
+  85,
+  'strategy BUY floor must be stricter than the legacy LLM floor',
+);
+assert.equal(
+  buyConfidenceFloor({ llm_min_confidence: 60 }),
+  60,
+  'legacy strategies must still respect the global operator floor',
+);
 
 console.log('[test_edge_tuning] data quality and chronological holdout tuning verified');

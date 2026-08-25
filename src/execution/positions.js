@@ -12,6 +12,7 @@ import { updateCandidateSnapshot } from '../db/candidates.js';
 import { trending } from '../signals/trending.js';
 import { executeLiveSell } from './router.js';
 import { sendPositionExit } from '../telegram/send.js';
+import { simulationReplayEnabled, simulationTickFor } from './simulation.js';
 
 export function relativeTrailPercent({ peakPnl, atrPercent = null, ageMinutes = 0, baseTrail = 12 }) {
   const peak = Math.max(0, Number(peakPnl) || 0);
@@ -174,7 +175,11 @@ export async function refreshPosition(position, { autoExit = true, jupiterPnl = 
   // reserves) as primary price — datapi mark is stale by design. Mark = fallback on 429/backoff.
   const useQuote = position.execution_mode !== 'live' && numSetting('exit_quote_enabled', 1);
   const drySizedQuote = position.execution_mode !== 'live' && position.token_amount_raw;
-  const [asset, qp, executableExitQuote] = await Promise.all([
+  const replayTick = position.execution_mode === 'shadow_live' ? simulationTickFor(position.mint) : null;
+  // A configured replay must never silently fall back to live market data.
+  // Waiting for the next tick is safer than evaluating an exit on a different clock.
+  if (position.execution_mode === 'shadow_live' && simulationReplayEnabled() && !replayTick) return null;
+  const [asset, qp, executableExitQuote] = replayTick ? [null, null, null] : await Promise.all([
     fetchJupiterAsset(position.mint, { useCache: false, ttlMs: 3000 }),
     useQuote && !drySizedQuote ? fetchTokenSpotViaQuote(position.mint) : Promise.resolve(null),
     position.token_amount_raw && (position.execution_mode === 'live' || drySizedQuote)
@@ -188,8 +193,10 @@ export async function refreshPosition(position, { autoExit = true, jupiterPnl = 
   const jupiterPrice = Number(asset?.usdPrice);
   const jupiterMcap = firstPositiveNumber(asset?.mcap, asset?.fdv);
   // Guard 1 DISABLED (2026-07-17): can't distinguish crash vs stale data — single source (Jupiter) is unreliable
-  let price = firstPositiveNumber(quotePrice, jupiterPrice || null, position.high_water_price, position.entry_price);
-  let mcap = firstPositiveNumber(quoteMcap, jupiterMcap, position.high_water_mcap, position.entry_mcap);
+  let price = replayTick?.priceUsd || firstPositiveNumber(quotePrice, jupiterPrice || null, position.high_water_price, position.entry_price);
+  let mcap = replayTick?.mcapUsd || (replayTick?.priceUsd && Number(position.entry_price) > 0
+    ? Number(position.entry_mcap) * (Number(replayTick.priceUsd) / Number(position.entry_price))
+    : firstPositiveNumber(quoteMcap, jupiterMcap, position.high_water_mcap, position.entry_mcap));
   if (executableExitQuote && Number(position.size_sol) > 0) {
     const liquidationRatio = executableExitQuote.outSol / Number(position.size_sol);
     if (Number(position.entry_mcap) > 0) mcap = Number(position.entry_mcap) * liquidationRatio;
@@ -560,7 +567,7 @@ export async function refreshPosition(position, { autoExit = true, jupiterPnl = 
     db.prepare(`
       INSERT INTO dry_run_trades (position_id, mint, side, at_ms, price, mcap, size_sol, token_amount_est, reason, payload_json)
       VALUES (?, ?, 'sell', ?, ?, ?, ?, ?, ?, ?)
-    `).run(position.id, position.mint, now(), dryExitPrice, dryExitMcap, position.size_sol, position.token_amount_est, exitReason, json({ pnlPercent: finalPnlPercent, pnlSol: finalPnlSol, effectiveSlPercent, atrPercent, baseSlPercent: Number(position.sl_percent), slippage_pct: numSetting('dry_run_slippage_percent', 0) }));
+    `).run(position.id, position.mint, now(), dryExitPrice, dryExitMcap, position.size_sol, position.token_amount_est, exitReason, json({ pnlPercent: finalPnlPercent, pnlSol: finalPnlSol, effectiveSlPercent, atrPercent, baseSlPercent: Number(position.sl_percent), slippage_pct: numSetting('dry_run_slippage_percent', 0), simulationTick: replayTick }));
     closed = true;
   }
   return {
@@ -581,6 +588,7 @@ export async function refreshPosition(position, { autoExit = true, jupiterPnl = 
     exit_reason: closed ? exitReason : position.exit_reason,
     exit_mcap: closed ? mcap : position.exit_mcap,
     exit_price: closed ? price : position.exit_price,
+    simulationTick: replayTick,
   };
 }
 

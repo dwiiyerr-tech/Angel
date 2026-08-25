@@ -4,16 +4,18 @@
  * Builds a concise summary of recent closed trades so the LLM can
  * "learn" from actual outcomes WITHOUT modifying any risk parameters.
  *
- * Only shadow-live-compatible outcomes are allowed into memory. This keeps
- * prompt learning aligned with the same safety and execution path used before
- * real-money broadcast.
+ * Shadow-live-compatible outcomes and historical dry-run outcomes are allowed
+ * into memory. Keeping the dry-run branch preserves the original paper-trade
+ * learning loop while shadow-live remains isolated from real-money history.
  */
 
 import { db } from '../db/connection.js';
+import { numSetting } from '../db/settings.js';
 
 const MEMORY_WINDOW_MS = 72 * 60 * 60 * 1000;
 const FALLBACK_MEMORY_WINDOW_MS = 30 * 24 * 60 * 60 * 1000;
 const MAX_TRADES_IN_PROMPT = 15;
+const DEFAULT_MIN_MEMORY_SAMPLE = 8;
 
 function compatibleTrades(afterMs) {
   return db.prepare(`
@@ -21,10 +23,15 @@ function compatibleTrades(afterMs) {
            entry_mcap, snapshot_json, opened_at_ms, closed_at_ms
     FROM dry_run_positions
     WHERE status = 'closed'
-      AND execution_mode = 'shadow_live'
-      AND json_extract(snapshot_json, '$.shadowLiveCompatible') = 1
-      AND json_extract(snapshot_json, '$.simulatorVersion') = 'quote_sized_v3'
-      AND json_extract(snapshot_json, '$.entryQuoteMode') = 'position_sized'
+      AND (
+        execution_mode = 'dry_run'
+        OR (
+          execution_mode = 'shadow_live'
+          AND json_extract(snapshot_json, '$.shadowLiveCompatible') = 1
+          AND json_extract(snapshot_json, '$.simulatorVersion') = 'quote_sized_v3'
+          AND json_extract(snapshot_json, '$.entryQuoteMode') = 'position_sized'
+        )
+      )
       AND closed_at_ms > ?
     ORDER BY closed_at_ms DESC
     LIMIT ?
@@ -39,15 +46,19 @@ export function buildTradeMemory() {
       trades = compatibleTrades(Date.now() - FALLBACK_MEMORY_WINDOW_MS);
       memoryLabel = 'Up to 30d; freshest first';
     }
-    if (!trades.length) return '';
+    const minimumSample = Math.max(5, numSetting('llm_memory_min_sample', DEFAULT_MIN_MEMORY_SAMPLE));
+    // A tiny or highly selected sample must not become an implicit market veto.
+    // The LLM can still use live candidate evidence when memory is unavailable.
+    if (trades.length < minimumSample) return '';
 
     const wins = trades.filter(t => t.pnl_percent > 0);
     const losses = trades.filter(t => t.pnl_percent <= 0);
     const winRate = ((wins.length / trades.length) * 100).toFixed(0);
     const avgPnl = (trades.reduce((s, t) => s + (t.pnl_percent || 0), 0) / trades.length).toFixed(1);
     const lines = [
-      `== TRADE MEMORY (${memoryLabel}: ${trades.length} shadow-live trades) ==`,
+      `== TRADE MEMORY (${memoryLabel}: ${trades.length} compatible paper/simulation trades) ==`,
       `Stats: ${wins.length}W / ${losses.length}L, WR ${winRate}%, Avg PnL ${avgPnl}%`,
+      'Memory is advisory only; do not veto a candidate from aggregate statistics alone.',
       '',
     ];
 
@@ -102,12 +113,12 @@ function detectPatterns(trades) {
     try { return JSON.parse(t.snapshot_json || '{}').candidate?.jupiterAsset?.audit?.botHoldersPercentage != null; }
     catch { return false; }
   });
-  if (withBotData.length >= 5) {
+  if (withBotData.length >= 8) {
     const highBotTrades = withBotData.filter(t => JSON.parse(t.snapshot_json).candidate?.jupiterAsset?.audit?.botHoldersPercentage > 30);
     if (highBotTrades.length >= 3) {
       const highBotLosses = highBotTrades.filter(t => t.pnl_percent <= 0);
       const lossRate = ((highBotLosses.length / highBotTrades.length) * 100).toFixed(0);
-      if (Number(lossRate) >= 65) patterns.push(`Tokens with bot% > 30% lost ${lossRate}% of the time (${highBotLosses.length}/${highBotTrades.length}). Be very cautious.`);
+      if (Number(lossRate) >= 65) patterns.push(`Tokens with bot% > 30% lost ${lossRate}% of the time (${highBotLosses.length}/${highBotTrades.length}). Use this only as a weak prior; live flow and contract safety dominate.`);
     }
   }
 
@@ -122,28 +133,28 @@ function detectPatterns(trades) {
     } catch {}
   }
   for (const [route, stats] of Object.entries(routeStats)) {
-    if (stats.total < 3) continue;
+    if (stats.total < 8) continue;
     const wr = ((stats.wins / stats.total) * 100).toFixed(0);
     if (Number(wr) >= 50) patterns.push(`Route "${route}" has ${wr}% win rate (${stats.wins}/${stats.total}). Favor candidates from this route.`);
-    else if (Number(wr) <= 20) patterns.push(`Route "${route}" has only ${wr}% win rate (${stats.wins}/${stats.total}). Be extra skeptical.`);
+    else if (Number(wr) <= 20) patterns.push(`Route "${route}" has only ${wr}% win rate (${stats.wins}/${stats.total}). Treat this as a weak tie-breaker, never as a veto; live evidence dominates.`);
   }
 
   const withLiqData = trades.filter(t => {
     try { return (JSON.parse(t.snapshot_json || '{}').candidate?.metrics?.liquidityUsd || 0) > 0; }
     catch { return false; }
   });
-  if (withLiqData.length >= 5) {
+  if (withLiqData.length >= 8) {
     const lowLiqTrades = withLiqData.filter(t => (JSON.parse(t.snapshot_json).candidate?.metrics?.liquidityUsd || 0) < 8000);
     if (lowLiqTrades.length >= 3) {
       const lowLiqLosses = lowLiqTrades.filter(t => t.pnl_percent <= 0);
       const lossRate = ((lowLiqLosses.length / lowLiqTrades.length) * 100).toFixed(0);
-      if (Number(lossRate) >= 65) patterns.push(`Tokens with liquidity < $8k lost ${lossRate}% of the time (${lowLiqLosses.length}/${lowLiqTrades.length}). Prefer higher liquidity.`);
+      if (Number(lossRate) >= 65) patterns.push(`Tokens with liquidity < $8k lost ${lossRate}% of the time (${lowLiqLosses.length}/${lowLiqTrades.length}). Prefer higher liquidity only when live evidence is otherwise equal.`);
     }
   }
 
   const exitCounts = {};
   for (const t of trades) exitCounts[t.exit_reason || 'unknown'] = (exitCounts[t.exit_reason || 'unknown'] || 0) + 1;
   const topExit = Object.entries(exitCounts).sort((a, b) => b[1] - a[1])[0];
-  if (topExit && topExit[1] >= 3) patterns.push(`Most common exit: "${topExit[0]}" (${((topExit[1] / trades.length) * 100).toFixed(0)}% of trades). Adjust entry timing if this is stop-loss.`);
+  if (topExit && topExit[1] >= 5) patterns.push(`Most common exit: "${topExit[0]}" (${((topExit[1] / trades.length) * 100).toFixed(0)}% of trades). Adjust entry timing if this is stop-loss.`);
   return patterns;
 }

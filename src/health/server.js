@@ -6,6 +6,7 @@ import { getBackupStatus } from '../db/backup.js';
 import axios from 'axios';
 import { unresolvedExecutionCount } from '../db/executionOperations.js';
 import { configuredTradingMode } from '../research/policy.js';
+import { auditDatabaseIntegrity } from '../db/integrity.js';
 
 const PORT = process.env.PORT_HEALTH || 3099;
 const bootTime = Date.now();
@@ -17,7 +18,7 @@ async function checkMlHealth() {
   } catch { return false; }
 }
 
-export function startHealthServer() {
+export function startHealthServer({ port = PORT, host = process.env.HEALTH_HOST || '127.0.0.1' } = {}) {
   const server = http.createServer(async (req, res) => {
     if (req.url === '/ping') {
       res.writeHead(200, { 'Content-Type': 'text/plain' });
@@ -49,6 +50,7 @@ export function startHealthServer() {
 
         const mlServiceUp = await checkMlHealth();
         const unresolvedExecutions = unresolvedExecutionCount();
+        const integrity = auditDatabaseIntegrity();
         const signalAgeMs = Date.now() - lastSignalMs;
         const backupAgeMs = backupLastMs == null ? Infinity : Date.now() - backupLastMs;
         const degradedReasons = [];
@@ -56,6 +58,7 @@ export function startHealthServer() {
         if (signalAgeMs > 30 * 60 * 1000) degradedReasons.push('signals_stale');
         if (backupAgeMs > 8 * 60 * 60 * 1000) degradedReasons.push('backup_stale');
         if (unresolvedExecutions > 0) degradedReasons.push('unresolved_execution');
+        if (!integrity.ok) degradedReasons.push('data_integrity');
         const payload = {
           status: degradedReasons.length ? 'degraded' : 'ok',
           uptime_seconds: Math.floor((Date.now() - bootTime) / 1000),
@@ -70,6 +73,7 @@ export function startHealthServer() {
           ml_service_up: mlServiceUp,
           db_backup_last_ms: backupLastMs,
           unresolved_executions: unresolvedExecutions,
+          data_integrity: integrity,
           degraded_reasons: degradedReasons,
           macro_state: macroState,
           regime_awareness_enabled: regimeAwarenessEnabled,
@@ -87,7 +91,33 @@ export function startHealthServer() {
     res.end();
   });
 
-  server.listen(PORT, process.env.HEALTH_HOST || '127.0.0.1', () => {
-    console.log(`[health] server running on port ${PORT}`);
-  });
+  let attemptPort = Number(port) || 3099;
+  const firstPort = attemptPort;
+  const maxPort = firstPort + 10;
+  const bind = () => {
+    // A failed listen can leave the one-shot listeners attached until the
+    // retry begins; clear them so fallback startup emits one clean result.
+    server.removeAllListeners('listening');
+    server.removeAllListeners('error');
+    server.once('listening', () => {
+      console.log(`[health] server running on ${host}:${attemptPort}`);
+    });
+    server.once('error', error => {
+      if (error.code === 'EADDRINUSE' && attemptPort < maxPort) {
+        const failedPort = attemptPort;
+        attemptPort += 1;
+        console.warn(`[health] port ${failedPort} is busy; trying ${attemptPort}`);
+        setTimeout(bind, 25);
+        return;
+      }
+      if (error.code === 'EADDRINUSE') {
+        console.error(`[health] unable to bind ${host}:${firstPort}-${maxPort}; bot will continue without health server`);
+        return;
+      }
+      console.error(`[health] server error on ${host}:${attemptPort}: ${error.message}`);
+    });
+    server.listen(attemptPort, host);
+  };
+  bind();
+  return server;
 }

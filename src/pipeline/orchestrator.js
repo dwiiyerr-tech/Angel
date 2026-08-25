@@ -1,5 +1,5 @@
 import { now, pruneSeen } from '../utils.js';
-import { numSetting, boolSetting, setting } from '../db/settings.js';
+import { numSetting, boolSetting, setting, buyConfidenceFloor } from '../db/settings.js';
 import { db } from '../db/connection.js';
 import { upsertCandidate, updateCandidateStatus, updateCandidateSnapshot, recentEligibleCandidates, candidateById } from '../db/candidates.js';
 import { storeDecision, storeBatchDecision, logDecisionEvent, checkDecisionCache } from '../db/decisions.js';
@@ -266,7 +266,10 @@ async function _processCandidateFromSignals(signals) {
     }
 
     const momentumPreferred = Number(strat.momentum_threshold ?? 0.5);
-    const momentumVetoFloor = Number(strat.momentum_veto_floor ?? 0.1);
+    const configuredMomentumVeto = Number(strat.momentum_veto_floor ?? 0.1);
+    const momentumVetoFloor = tradingMode() === 'dry_run'
+      ? Math.min(configuredMomentumVeto, numSetting('dry_run_momentum_veto_floor', 0.03))
+      : configuredMomentumVeto;
     const momentumResult = await momentumFilter(candidate, momentumVetoFloor);
     const isFreshRoute = ['pumpportal_graduated', 'pumpfun_pregrad'].includes(signals.route);
     const mlUnavailable = Number(momentumResult.score) < 0;
@@ -377,11 +380,19 @@ async function _processCandidateFromSignals(signals) {
 
   const currentUTCHourExecute = new Date().getUTCHours();
   const isUsSessionExecute = currentUTCHourExecute >= 12 && currentUTCHourExecute <= 18;
-  const configuredConfidence = numSetting('llm_min_confidence', 40);
+  const configuredConfidence = buyConfidenceFloor(strat);
   const sessionConfidenceFloor = 60;
   const requiredConfidence = researchMode
     ? Math.max(0, numSetting('research_min_confidence', 30))
     : (isUsSessionExecute ? Math.max(configuredConfidence, sessionConfidenceFloor) : configuredConfidence);
+
+  const approvalReasons = [];
+  if (!selectedRow) approvalReasons.push('no_candidate_selected');
+  if (!boolSetting('agent_enabled', true)) approvalReasons.push('agent_disabled');
+  if (batchDecision.verdict !== 'BUY') approvalReasons.push(`verdict_${String(batchDecision.verdict || 'missing').toLowerCase()}`);
+  if (Number(batchDecision.confidence) < requiredConfidence) {
+    approvalReasons.push(`confidence_${Number(batchDecision.confidence || 0)}_below_${requiredConfidence}`);
+  }
 
   if (selectedRow && boolSetting('agent_enabled', true) && batchDecision.verdict === 'BUY' && batchDecision.confidence >= requiredConfidence) {
     const freshCapacity = activeCapacity(researchMode);
@@ -432,6 +443,7 @@ async function _processCandidateFromSignals(signals) {
         researchMode,
         agentEnabled: boolSetting('agent_enabled', true),
         confidenceThreshold: requiredConfidence,
+        approvalReasons,
         openPositions: currentCapacity.open,
         maxOpenPositions: currentCapacity.max,
       },

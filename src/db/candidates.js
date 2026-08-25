@@ -1,6 +1,6 @@
 import { db } from './connection.js';
 import { now, safeJson, json } from '../utils.js';
-import { numSetting, setting } from './settings.js';
+import { activeStrategy, numSetting, setting } from './settings.js';
 
 export function candidateSignalKey(candidate, signature = null) {
   const route = candidate.signals?.route || 'signal';
@@ -115,6 +115,7 @@ export function pruneOldSignalEvents({ olderThanMs = 7 * 24 * 60 * 60 * 1000, li
 export function recentEligibleCandidates(limit = 10) {
   const maxAgeMs = numSetting('llm_candidate_max_age_ms', 2 * 60 * 1000);
   const cutoff = now() - Math.max(30_000, maxAgeMs);
+  const maxMcap = Number(activeStrategy()?.max_mcap_usd || 0);
   // Lesson #3: block unprofitable routes at query level — prevents blocked routes from drowning out profitable ones
   // pumpfun_pregrad: pre-grad tokens still on bonding curve, can't reliably trade yet — keep for data only
   let BLOCKED_ROUTES = [];
@@ -125,6 +126,10 @@ export function recentEligibleCandidates(limit = 10) {
   }
   const blockedClause = BLOCKED_ROUTES.length > 0 
     ? BLOCKED_ROUTES.map(() => `signal_key NOT LIKE ? || ':%'`).join(' AND ') 
+    : '1=1';
+  const mcapClause = maxMcap > 0
+    ? `(json_extract(candidate_json, '$.metrics.marketCapUsd') IS NULL
+        OR CAST(json_extract(candidate_json, '$.metrics.marketCapUsd') AS REAL) <= ?)`
     : '1=1';
   const rows = db.prepare(`
     SELECT c.*
@@ -140,10 +145,11 @@ export function recentEligibleCandidates(limit = 10) {
           json_extract(candidate_json, '$.filters.passed') IS NULL
           OR json_extract(candidate_json, '$.filters.passed') = 1
         )
+        AND ${mcapClause}
       GROUP BY mint
     ) latest ON c.id = latest.max_id
     ORDER BY c.id DESC
     LIMIT ?
-  `).all(cutoff, ...BLOCKED_ROUTES, limit);
+  `).all(cutoff, ...BLOCKED_ROUTES, ...(maxMcap > 0 ? [maxMcap] : []), limit);
   return rows.map(row => ({ ...row, candidate: safeJson(row.candidate_json, {}) })).reverse();
 }

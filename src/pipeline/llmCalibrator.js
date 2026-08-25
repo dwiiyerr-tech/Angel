@@ -15,15 +15,20 @@ export async function runLLMCalibration() {
       JOIN dry_run_positions p ON l.id = p.llm_decision_id
       WHERE l.verdict = 'BUY'
         AND p.status = 'closed'
-        AND p.execution_mode = 'shadow_live'
-        AND json_extract(p.snapshot_json, '$.shadowLiveCompatible') = 1
-        AND json_extract(p.snapshot_json, '$.entryQuoteMode') = 'position_sized'
+        AND (
+          p.execution_mode = 'dry_run'
+          OR (
+            p.execution_mode = 'shadow_live'
+            AND json_extract(p.snapshot_json, '$.shadowLiveCompatible') = 1
+            AND json_extract(p.snapshot_json, '$.entryQuoteMode') = 'position_sized'
+          )
+        )
         AND l.created_at_ms > ?
         AND json_extract(p.snapshot_json, '$.simulatorVersion') = ?
     `;
 
     const decisions = db.prepare(query).all(now - 7 * 24 * 3600 * 1000, DRY_RUN_SIMULATOR_VERSION);
-    if (decisions.length < 5) return 'Not enough closed shadow-live trades (need 5)';
+    if (decisions.length < 5) return 'Not enough closed simulation trades (need 5)';
 
     const wins = decisions.filter(row => Number(row.pnl_percent) > 0).length;
     const winRate = wins / decisions.length;
