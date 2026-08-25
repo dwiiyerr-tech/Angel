@@ -8,6 +8,7 @@ import { candidateButtons, batchRevealButtons, positionButtons, intentButtons } 
 import { batchById } from '../db/decisions.js';
 import { generateEntryCard } from '../visuals/entryCard.js';
 import { generateExitCard } from '../visuals/exitCard.js';
+import { decisionNotificationEnabled } from './preferences.js';
 import { writeFileSync, unlinkSync } from 'fs';
 
 export async function sendTelegram(text, extra = {}) {
@@ -34,14 +35,23 @@ export async function sendTelegram(text, extra = {}) {
 }
 
 export async function sendCandidateAlert(candidateId, candidate, decision) {
+  if (!decisionNotificationEnabled(decision?.verdict)) {
+    console.log(`[telegram] muted ${String(decision?.verdict || 'UNKNOWN').toUpperCase()} candidate alert for ${candidate?.token?.mint?.slice(0, 8) || candidateId}`);
+    return null;
+  }
   const sent = await sendTelegram(candidateSummary(candidate, decision), candidateButtons(candidateId, decision));
   db.prepare(`
     INSERT INTO alerts (candidate_id, mint, kind, sent_at_ms, telegram_message_id, payload_json)
     VALUES (?, ?, ?, ?, ?, ?)
   `).run(candidateId, candidate.token.mint, 'candidate', now(), sent.message_id, json({ candidate, decision }));
+  return sent;
 }
 
 export async function sendBatchReveal(batchId, rows, decision, triggerCandidateId) {
+  if (!decisionNotificationEnabled(decision?.verdict)) {
+    console.log(`[telegram] muted ${String(decision?.verdict || 'UNKNOWN').toUpperCase()} batch #${batchId}`);
+    return null;
+  }
   const sent = await sendTelegram(
     batchRevealSummary(batchId, rows, decision, triggerCandidateId),
     batchRevealButtons(batchId, rows, decision, triggerCandidateId),
@@ -57,6 +67,7 @@ export async function sendBatchReveal(batchId, rows, decision, triggerCandidateI
     sent.message_id,
     json({ batchId, candidateIds: rows.map(row => row.id), decision, triggerCandidateId }),
   );
+  return sent;
 }
 
 export async function sendBatch(chatId, batchId) {

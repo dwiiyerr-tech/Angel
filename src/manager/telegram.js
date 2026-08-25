@@ -11,6 +11,18 @@ import {
 import { preLiveReadinessReport } from '../readiness/engine.js';
 import { formatReadinessHtml } from '../readiness/format.js';
 import { clearManagerConversation, handleManagerMessage } from './index.js';
+import {
+  decisionNotificationStatus,
+  setAllDecisionNotifications,
+  setDecisionNotification,
+} from '../telegram/preferences.js';
+import {
+  dailyReportScheduleStatus,
+  sendDailyReport,
+  setDailyReportEnabled,
+  setDailyReportTimeWib,
+  startDailyReportScheduler,
+} from '../telegram/dailyReport.js';
 
 let initialized = false;
 
@@ -57,7 +69,7 @@ function summaryHtml(windowArg = '24h') {
     '<b>Top routes by sampled final R</b>',
     ...(routes.length ? routes : ['No route outcomes yet.']),
     '',
-    '<i>Research receipts use 0 SOL capital and executable Jupiter counterfactual quotes.</i>',
+    '<i>PAPER receipts use 0 SOL real capital and executable Jupiter counterfactual quotes.</i>',
   ].join('\n');
 }
 
@@ -82,9 +94,87 @@ function sendReadiness(chatId, windowArg = '7d') {
   });
 }
 
+function boolWord(value) {
+  return value ? 'ON' : 'OFF';
+}
+
+function notificationStatusText() {
+  const status = decisionNotificationStatus();
+  return [
+    '🔔 <b>Decision Notifications</b>',
+    '',
+    `BUY: <b>${boolWord(status.buy)}</b>`,
+    `WATCH: <b>${boolWord(status.watch)}</b>`,
+    `PASS: <b>${boolWord(status.pass)}</b>`,
+    '',
+    '<i>This only mutes screening/decision alerts. LIVE approvals, executions, exits, safety alerts, and critical errors remain enabled.</i>',
+    '',
+    'Usage: <code>/notify buy|watch|pass|all on|off</code>',
+  ].join('\n');
+}
+
+function handleNotifyCommand(chatId, text) {
+  const [, targetRaw, valueRaw] = text.split(/\s+/);
+  if (!targetRaw) return bot.sendMessage(chatId, notificationStatusText(), { parse_mode: 'HTML' });
+  const target = targetRaw.toLowerCase();
+  const value = String(valueRaw || '').toLowerCase();
+  if (!['buy', 'watch', 'pass', 'all'].includes(target) || !['on', 'off'].includes(value)) {
+    return bot.sendMessage(chatId, 'Usage: /notify buy|watch|pass|all on|off');
+  }
+  if (target === 'all') setAllDecisionNotifications(value === 'on');
+  else setDecisionNotification(target, value === 'on');
+  return bot.sendMessage(chatId, notificationStatusText(), { parse_mode: 'HTML' });
+}
+
+function dailyReportStatusText() {
+  const status = dailyReportScheduleStatus();
+  return [
+    '📊 <b>24h Performance Report</b>',
+    '',
+    `Automatic report: <b>${boolWord(status.enabled)}</b>`,
+    `Schedule: <b>${escapeHtml(status.timeWib)} WIB</b>`,
+    `Last scheduled report date: <b>${escapeHtml(status.lastSentWibDate || 'none')}</b>`,
+    '',
+    'Commands:',
+    '<code>/dailyreport on</code> · <code>/dailyreport off</code>',
+    '<code>/dailyreport time 00:05</code>',
+    '<code>/dailyreport now</code>',
+    '',
+    '<i>LIVE realized PnL and PAPER virtual PnL are reported separately.</i>',
+  ].join('\n');
+}
+
+async function handleDailyReportCommand(chatId, text) {
+  const parts = text.split(/\s+/);
+  const action = String(parts[1] || '').toLowerCase();
+  if (!action || action === 'status') {
+    return bot.sendMessage(chatId, dailyReportStatusText(), { parse_mode: 'HTML' });
+  }
+  if (action === 'on' || action === 'off') {
+    setDailyReportEnabled(action === 'on');
+    return bot.sendMessage(chatId, dailyReportStatusText(), { parse_mode: 'HTML' });
+  }
+  if (action === 'time') {
+    try {
+      setDailyReportTimeWib(parts[2]);
+      return bot.sendMessage(chatId, dailyReportStatusText(), { parse_mode: 'HTML' });
+    } catch (error) {
+      return bot.sendMessage(chatId, `Invalid report time: ${error.message}`);
+    }
+  }
+  if (action === 'now') {
+    await bot.sendMessage(chatId, '📊 Building rolling 24h report…');
+    const sent = await sendDailyReport(chatId);
+    if (!sent) return bot.sendMessage(chatId, '24h report failed. Check bot logs for the underlying error.');
+    return;
+  }
+  return bot.sendMessage(chatId, 'Usage: /dailyreport [status|on|off|now|time HH:MM]');
+}
+
 export function setupTelegramManager() {
   if (initialized) return;
   initialized = true;
+  startDailyReportScheduler();
 
   bot.on('message', msg => {
     if (!authorized(msg)) return;
@@ -102,6 +192,14 @@ export function setupTelegramManager() {
     }
     if (text.startsWith('/managerclear')) {
       clearManagerConversation(msg.chat.id).catch(error => console.error(`[manager] clear failed: ${error.message}`));
+      return;
+    }
+    if (text.startsWith('/notify')) {
+      Promise.resolve(handleNotifyCommand(msg.chat.id, text)).catch(error => console.error(`[manager] notify failed: ${error.message}`));
+      return;
+    }
+    if (text.startsWith('/dailyreport')) {
+      handleDailyReportCommand(msg.chat.id, text).catch(error => console.error(`[manager] daily report failed: ${error.message}`));
       return;
     }
     if (text.startsWith('/readiness')) {

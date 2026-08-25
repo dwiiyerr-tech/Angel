@@ -1,6 +1,7 @@
 import { bot } from '../telegram/bot.js';
 import { buildManagerEvidence, clearManagerMessages, recentManagerMessages, storeManagerMessage } from './tools.js';
 import { answerManagerQuestion } from './llm.js';
+import { collectGmgnResearch } from './gmgn.js';
 
 function liveAuthorizationIntent(text) {
   const value = String(text || '').toLowerCase();
@@ -28,6 +29,10 @@ function fallbackSummary(evidence, error) {
   const d = evidence?.decisionIntelligence || {};
   const s = evidence?.system || {};
   const readiness = evidence?.preLiveReadiness?.evaluation?.currentStage || {};
+  const gmgn = evidence?.gmgnResearch;
+  const gmgnLine = gmgn
+    ? `GMGN research: ${gmgn.available === false ? gmgn.reason : `${gmgn.results?.filter(row => row.ok).length || 0}/${gmgn.plan?.length || 0} queries OK`}`
+    : null;
   return [
     '👼 Angel Manager V2 sedang tidak bisa menghubungi LLM, tetapi deterministic read-only evidence masih tersedia.',
     '',
@@ -39,10 +44,11 @@ function fallbackSummary(evidence, error) {
     `Median final R: ${Number.isFinite(Number(d.outcomes?.medianFinalR)) ? Number(d.outcomes.medianFinalR).toFixed(2) + 'R' : '—'}`,
     `Unresolved executions: ${s.liveSafety?.unresolvedExecutions ?? '—'}`,
     `Circuit breaker: ${s.liveSafety?.circuitOpen ? 'OPEN' : 'CLOSED'}`,
+    gmgnLine,
     '',
     `LLM error: ${error.message}`,
     'Tidak ada setting, approval, mode, atau transaksi yang diubah.',
-  ].join('\n');
+  ].filter(Boolean).join('\n');
 }
 
 export async function handleManagerMessage(chatId, question) {
@@ -53,7 +59,7 @@ export async function handleManagerMessage(chatId, question) {
     const reply = [
       '🔐 Angel Manager V2 bersifat read-only dan tidak memiliki fungsi untuk approve atau mengaktifkan Live.',
       '',
-      'Saya bisa membaca deterministic readiness, menjelaskan risk/evidence, dan merekomendasikan apakah Live layak dipertimbangkan.',
+      'Saya bisa membaca deterministic readiness, menjelaskan risk/evidence, melakukan riset GMGN read-only, dan merekomendasikan apakah Live layak dipertimbangkan.',
       'Otorisasi Live tetap harus dilakukan sendiri oleh owner melalui kontrol deterministik /livestatus dan /liveapprove.',
     ].join('\n');
     storeManagerMessage(chatId, 'user', text);
@@ -64,6 +70,19 @@ export async function handleManagerMessage(chatId, question) {
   const history = recentManagerMessages(chatId, 8);
   const evidence = buildManagerEvidence(text);
   storeManagerMessage(chatId, 'user', text);
+
+  try {
+    const gmgnResearch = await collectGmgnResearch(text);
+    if (gmgnResearch) evidence.gmgnResearch = gmgnResearch;
+  } catch (error) {
+    evidence.gmgnResearch = {
+      source: 'gmgn-cli',
+      readOnly: true,
+      available: false,
+      reason: 'GMGN_RESEARCH_GATEWAY_ERROR',
+      error: String(error?.message || error).slice(0, 1000),
+    };
+  }
 
   let answer;
   try {
