@@ -82,7 +82,9 @@ assert.ok(Number(testing.test_until_ms) > Date.now());
 
 const candidate = {
   signals: { route: 'pumpportal_graduated' },
+  metrics: { liquidityUsd: 10_000 },
   filters: { sourceWeight: 0.8 },
+  flowAssessment: { priceChange1h: 5, netBuyerRatio: 0.3 },
 };
 const activePolicy = evaluateEntryPolicy(candidate, { verdict: 'BUY', confidence: currentConfidence + 1 }, parent.config);
 const challengerPolicy = evaluateEntryPolicy(candidate, { verdict: 'BUY', confidence: currentConfidence + 1 }, child.config);
