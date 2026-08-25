@@ -1,6 +1,7 @@
 import { db } from '../db/connection.js';
 import { approvedLiveConfig } from '../db/liveConfig.js';
 import { parseWindowMs } from '../utils.js';
+import { ensureResearchSchema } from '../research/schema.js';
 import {
   decisionIntelligenceSummary,
   latestDecisionReceiptDetailsByMint,
@@ -142,9 +143,9 @@ function systemSnapshot() {
 
 function controlPlaneSnapshot() {
   if (!tableExists('config_versions')) return { available: false };
-  const active = db.prepare("SELECT version, label, status, config_hash, created_at_ms FROM config_versions WHERE status = 'active' ORDER BY id DESC LIMIT 1").get() || null;
+  const active = db.prepare("SELECT version, label, status, config_hash, created_at_ms FROM config_versions WHERE status = 'active' ORDER BY version DESC LIMIT 1").get() || null;
   const proposal = tableExists('strategy_proposals')
-    ? db.prepare("SELECT id, status, created_at_ms, target_version FROM strategy_proposals WHERE status IN ('proposed', 'approved', 'testing', 'promotion_ready') ORDER BY id DESC LIMIT 1").get() || null
+    ? db.prepare("SELECT id, status, created_at_ms, proposed_version FROM strategy_proposals WHERE status IN ('proposed', 'approved', 'testing', 'promotion_ready') ORDER BY id DESC LIMIT 1").get() || null
     : null;
   return { available: true, active, openProposal: proposal };
 }
@@ -160,6 +161,7 @@ function positionsSnapshot(limit = 8) {
 }
 
 export function buildManagerEvidence(question) {
+  ensureResearchSchema();
   ensureDecisionIntelligenceSchema();
   const windowMs = windowFromQuestion(question);
   const receiptId = receiptReferenceFromQuestion(question);
