@@ -146,6 +146,19 @@ export function pruneExpiredCache() {
   return result.changes;
 }
 
+function persistFastHunterWatchIfNeeded({ action, triggerCandidateId, rows, decision }) {
+  if (action !== 'research_fast_hunter_watch' || !triggerCandidateId || decision?.verdict !== 'WATCH') return;
+  const exists = db.prepare('SELECT id FROM llm_decisions WHERE candidate_id = ? ORDER BY id DESC LIMIT 1').get(triggerCandidateId);
+  if (exists) return;
+  const row = rows.find(item => Number(item?.id) === Number(triggerCandidateId));
+  if (!row?.candidate) return;
+  try {
+    storeDecision(triggerCandidateId, row.candidate, decision);
+  } catch (error) {
+    console.warn(`[decision-intel] Fast Hunter WATCH persistence degraded: ${error.message}`);
+  }
+}
+
 export function logDecisionEvent({
   batchId = null,
   triggerCandidateId = null,
@@ -157,6 +170,11 @@ export function logDecisionEvent({
   guardrails = {},
   execution = {},
 }) {
+  // Fast Hunter historically logged WATCH without creating an llm_decisions
+  // row. Decision Intelligence promotes that formal WATCH into the same durable
+  // decision/receipt path as BUY, without changing the decision itself.
+  persistFastHunterWatchIfNeeded({ action, triggerCandidateId, rows, decision });
+
   const selectedCandidate = selectedRow?.candidate || null;
   const strategyId = selectedCandidate?.filters?.strategy
     || rows.find(row => row?.candidate?.filters?.strategy)?.candidate?.filters?.strategy
