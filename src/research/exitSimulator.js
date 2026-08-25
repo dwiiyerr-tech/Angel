@@ -220,6 +220,25 @@ function settlementByTradeId(tradeId) {
   return db.prepare('SELECT * FROM research_exit_settlements WHERE trade_id = ?').get(tradeId) || null;
 }
 
+export function researchPositionHasPendingExitSettlement(positionId) {
+  ensureResearchExitSimulatorSchema();
+  const id = Number(positionId);
+  if (!Number.isInteger(id) || id <= 0) return false;
+  return Boolean(db.prepare(`
+    SELECT id FROM research_exit_settlements
+    WHERE position_id = ? AND status = 'pending'
+    LIMIT 1
+  `).get(id));
+}
+
+function pendingPriorPartialSettlement(positionId, tradeId) {
+  return db.prepare(`
+    SELECT id, trade_id FROM research_exit_settlements
+    WHERE position_id = ? AND kind = 'partial' AND status = 'pending' AND trade_id < ?
+    ORDER BY trade_id ASC LIMIT 1
+  `).get(positionId, tradeId) || null;
+}
+
 function insertPendingSettlement({
   trade,
   position,
@@ -289,6 +308,21 @@ async function completePendingSettlement(row, { quoteFn, feeFn, sleepFn } = {}) 
   if (!row || row.status !== 'pending') return null;
   if (Number(row.next_retry_at_ms || 0) > now()) return null;
 
+  if (row.kind === 'final') {
+    const dependency = pendingPriorPartialSettlement(row.position_id, row.trade_id);
+    if (dependency) {
+      return {
+        ok: false,
+        pending: true,
+        settlementId: row.id,
+        kind: 'final',
+        positionId: row.position_id,
+        blockedBy: 'pending_prior_partial',
+        dependencySettlementId: dependency.id,
+      };
+    }
+  }
+
   let profile;
   try {
     profile = await fetchResearchExitExecutionProfile({
@@ -314,6 +348,7 @@ async function completePendingSettlement(row, { quoteFn, feeFn, sleepFn } = {}) 
   const exitFeeSol = finiteNonNegative(profile.fees?.totalFeeSol, 0);
   let adjustedResult = null;
   let accounting = null;
+  let accountingBaseline = null;
 
   try {
     db.transaction(() => {
@@ -321,9 +356,13 @@ async function completePendingSettlement(row, { quoteFn, feeFn, sleepFn } = {}) 
       if (current?.status !== 'pending') return;
 
       if (row.kind === 'partial') {
+        accountingBaseline = {
+          realizedPnlSol: finiteNumber(row.baseline_realized_pnl_sol, 0),
+          realizedFeeSol: finiteNonNegative(row.baseline_realized_fee_sol, 0),
+        };
         accounting = partialResearchExitAccounting({
-          baselineRealizedPnlSol: row.baseline_realized_pnl_sol,
-          baselineRealizedFeeSol: row.baseline_realized_fee_sol,
+          baselineRealizedPnlSol: accountingBaseline.realizedPnlSol,
+          baselineRealizedFeeSol: accountingBaseline.realizedFeeSol,
           soldCostSol: row.sold_cost_sol,
           fillOutSol: profile.fillOutSol,
           exitFeeSol,
@@ -335,12 +374,19 @@ async function completePendingSettlement(row, { quoteFn, feeFn, sleepFn } = {}) 
           WHERE id = ? AND execution_mode = 'research'
         `).run(accounting.realizedPnlSol, accounting.realizedFeeSol, profile.quality, position.id);
       } else {
+        // A final settlement may have been inserted while an earlier partial leg
+        // was still waiting for executable evidence. Use the latest corrected
+        // partial ledger at completion time, never the stale insertion snapshot.
+        accountingBaseline = {
+          realizedPnlSol: finiteNumber(position.realized_pnl_sol, 0),
+          realizedFeeSol: finiteNonNegative(position.realized_fee_sol, 0),
+        };
         accounting = finalResearchExitAccounting({
-          baselineRealizedPnlSol: row.baseline_realized_pnl_sol,
+          baselineRealizedPnlSol: accountingBaseline.realizedPnlSol,
           realizedCostSol: position.realized_cost_sol,
           remainingCostSol: row.sold_cost_sol,
           entryFeeSol: position.entry_fee_sol,
-          realizedFeeSol: row.baseline_realized_fee_sol,
+          realizedFeeSol: accountingBaseline.realizedFeeSol,
           fillOutSol: profile.fillOutSol,
           exitFeeSol,
         });
@@ -388,6 +434,7 @@ async function completePendingSettlement(row, { quoteFn, feeFn, sleepFn } = {}) 
         kind: row.kind,
         reason: row.reason,
         accounting,
+        accountingBaseline,
         profile,
         replacedLegacy: {
           pnlDeltaSol: Number(row.legacy_pnl_delta_sol || 0),

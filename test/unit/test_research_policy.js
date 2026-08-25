@@ -44,10 +44,39 @@ assert.deepEqual(modeCapabilities('simulation'), {
   research: true,
   walletRequired: false,
   broadcastAllowed: false,
+  perTradeConfirmationRequired: false,
+  autonomousBroadcastAllowed: false,
   moneyGradeEvidence: false,
 });
-assert.equal(modeCapabilities('shadow_live').walletRequired, true);
-assert.equal(modeCapabilities('shadow_live').broadcastAllowed, false);
-assert.equal(modeCapabilities('live').broadcastAllowed, true);
 
-console.log('[research-policy] mode separation and storage invariants passed');
+assert.deepEqual(modeCapabilities('shadow_live'), {
+  mode: 'shadow_live',
+  research: false,
+  walletRequired: true,
+  broadcastAllowed: false,
+  perTradeConfirmationRequired: false,
+  autonomousBroadcastAllowed: false,
+  moneyGradeEvidence: true,
+});
+
+assert.deepEqual(modeCapabilities('confirm'), {
+  mode: 'confirm',
+  research: false,
+  walletRequired: true,
+  broadcastAllowed: true,
+  perTradeConfirmationRequired: true,
+  autonomousBroadcastAllowed: false,
+  moneyGradeEvidence: true,
+});
+
+assert.deepEqual(modeCapabilities('live'), {
+  mode: 'live',
+  research: false,
+  walletRequired: true,
+  broadcastAllowed: true,
+  perTradeConfirmationRequired: false,
+  autonomousBroadcastAllowed: true,
+  moneyGradeEvidence: true,
+});
+
+console.log('[research-policy] mode separation, capability, and storage invariants passed');

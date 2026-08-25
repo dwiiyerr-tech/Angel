@@ -34,11 +34,14 @@ export function isRealMoneyMode(value = null) {
 
 export function modeCapabilities(value = null) {
   const mode = normalizeConfiguredMode(value == null ? setting('trading_mode', 'dry_run') : value);
+  const realMoney = mode === 'confirm' || mode === 'live';
   return {
     mode,
     research: mode === 'research',
-    walletRequired: mode === 'shadow_live' || mode === 'live',
-    broadcastAllowed: mode === 'live',
+    walletRequired: mode === 'shadow_live' || realMoney,
+    broadcastAllowed: realMoney,
+    perTradeConfirmationRequired: mode === 'confirm',
+    autonomousBroadcastAllowed: mode === 'live',
     moneyGradeEvidence: MONEY_GRADE_MODES.has(mode),
   };
 }
