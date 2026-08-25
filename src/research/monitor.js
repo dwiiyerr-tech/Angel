@@ -6,6 +6,7 @@ import { recordResearchObservation } from './engine.js';
 import { estimateResearchTransactionFees } from './executionCost.js';
 import {
   ensureResearchExitSimulatorSchema,
+  researchPositionHasPendingExitSettlement,
   resumePendingResearchExitSettlements,
   settleResearchFinalExitV3,
   settleResearchPartialExitV3,
@@ -93,6 +94,15 @@ export async function monitorResearchPositions() {
     checked += 1;
     const cycleStartedAtMs = Date.now();
     try {
+      // Do not let a later TP/SL/trailing decision overtake an earlier partial
+      // settlement whose executable economics are still unresolved. The pending
+      // row is retried by the durable settlement runner above. This preserves
+      // causal ordering across provider outages and process restarts.
+      if (researchPositionHasPendingExitSettlement(position.id)) {
+        console.warn(`[research-exit-v3] position ${position.id} waiting for pending settlement before new exit decisions`);
+        continue;
+      }
+
       // Keep TP/SL/trailing/profit-lock/time-exit authority in the mature shared
       // position engine. Exit Simulator V3 only replaces virtual settlement
       // economics after that engine has emitted an exit or partial-TP action.
