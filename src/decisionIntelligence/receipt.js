@@ -54,6 +54,7 @@ export function buildDecisionKnowledgeSnapshot({ candidateId, candidate, decisio
     metrics: candidate?.metrics || null,
     safety: candidate?.contractSafety || null,
     holders: candidate?.holders || null,
+    jupiterAsset: candidate?.jupiterAsset || null,
     quality: edge?.quality || null,
     momentum: {
       score: candidate?.filters?.momentumScore ?? null,
@@ -70,6 +71,7 @@ export function buildDecisionKnowledgeSnapshot({ candidateId, candidate, decisio
       feeClaim: candidate?.feeClaim || null,
       graduation: candidate?.graduation || null,
       pregradToken: candidate?.pregradToken || null,
+      jupiterAsset: candidate?.jupiterAsset || null,
       chart: candidate?.chart || null,
       savedWalletExposure: candidate?.savedWalletExposure || null,
       twitterNarrative: candidate?.twitterNarrative || null,
