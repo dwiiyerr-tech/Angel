@@ -43,6 +43,11 @@ jobs:
           DB_PATH: /tmp/angel-research-report.sqlite
         run: npm run research:report
 
+      - name: Research Exit Simulator V3 report smoke test
+        env:
+          DB_PATH: /tmp/angel-research-exit-v3-report.sqlite
+        run: npm run research:exit-report
+
       - name: Runner and route edge report smoke test
         env:
           DB_PATH: /tmp/angel-edge-report.sqlite
