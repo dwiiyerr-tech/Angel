@@ -47,17 +47,41 @@ function maxDrawdownR(values) {
   return worst;
 }
 
+function realizedRForRow(row) {
+  const stored = finite(row.realized_r);
+  if (stored != null) return { value: stored, source: 'stored_realized_r' };
+
+  const pnlSol = finite(row.pnl_sol);
+  let riskSol = finite(row.initial_risk_sol);
+  const sizeSol = finite(row.size_sol);
+  const slPercent = finite(row.sl_percent);
+  if (!(riskSol > 0) && sizeSol > 0 && slPercent != null && Math.abs(slPercent) > 0) {
+    riskSol = sizeSol * Math.abs(slPercent) / 100;
+  }
+  if (pnlSol != null && riskSol > 0) {
+    return { value: pnlSol / riskSol, source: 'derived_pnl_sol_over_risk' };
+  }
+
+  const pnlPercent = finite(row.pnl_percent);
+  if (pnlPercent != null && slPercent != null && Math.abs(slPercent) > 0) {
+    return { value: pnlPercent / Math.abs(slPercent), source: 'derived_pnl_percent_over_sl' };
+  }
+  return { value: null, source: 'unavailable' };
+}
+
 function performanceForMode(executionMode, sinceMs) {
   const rows = db.prepare(`
     SELECT id, opened_at_ms, closed_at_ms, realized_r, mfe_r, mae_r,
-           research_data_quality, pnl_sol, pnl_percent
+           research_data_quality, pnl_sol, pnl_percent, initial_risk_sol,
+           size_sol, sl_percent
     FROM dry_run_positions
     WHERE execution_mode = ? AND status = 'closed'
       AND COALESCE(closed_at_ms, opened_at_ms) >= ?
     ORDER BY COALESCE(closed_at_ms, opened_at_ms) ASC, id ASC
   `).all(executionMode, sinceMs);
 
-  const realized = clean(rows.map(row => row.realized_r));
+  const rRows = rows.map(row => realizedRForRow(row));
+  const realized = clean(rRows.map(row => row.value));
   const winners = realized.filter(value => value > 0);
   const losers = realized.filter(value => value <= 0);
   const grossWinR = winners.reduce((sum, value) => sum + value, 0);
@@ -65,17 +89,21 @@ function performanceForMode(executionMode, sinceMs) {
   const firstAt = rows.length ? Math.min(...rows.map(row => Number(row.opened_at_ms || row.closed_at_ms || Date.now()))) : null;
   const lastAt = rows.length ? Math.max(...rows.map(row => Number(row.closed_at_ms || row.opened_at_ms || 0))) : null;
   const capture = rows
-    .map(row => {
-      const realizedR = finite(row.realized_r);
+    .map((row, index) => {
+      const realizedR = finite(rRows[index]?.value);
       const mfeR = finite(row.mfe_r);
       return realizedR != null && mfeR != null && mfeR > 0 ? realizedR / mfeR : null;
     })
     .filter(value => value != null);
+  const nativeRealizedRSample = rRows.filter(row => row.source === 'stored_realized_r').length;
+  const derivedRealizedRSample = rRows.filter(row => row.value != null && row.source !== 'stored_realized_r').length;
 
   return {
     executionMode,
     closedTrades: rows.length,
     realizedRSample: realized.length,
+    nativeRealizedRSample,
+    derivedRealizedRSample,
     realizedRCoverage: ratio(realized.length, rows.length),
     evidenceSpanHours: firstAt != null && lastAt != null && lastAt >= firstAt ? (lastAt - firstAt) / 3_600_000 : 0,
     wins: winners.length,
@@ -261,7 +289,7 @@ function controlPlaneSnapshot() {
   return {
     active,
     openProposal: proposal,
-    stableForPreLive: !proposal,
+    stableForPreLive: Boolean(active) && !proposal,
   };
 }
 
@@ -347,7 +375,7 @@ export function evaluateReadinessEvidence(evidence, thresholds = readinessThresh
     check('shadow_profit_factor', 'Shadow profit factor', finite(shadow.profitFactorR) != null && Number(shadow.profitFactorR) >= thresholds.shadowMinProfitFactor, { value: shadow.profitFactorR, threshold: `>=${thresholds.shadowMinProfitFactor}` }),
     check('shadow_r_coverage', 'Shadow realized-R coverage', finite(shadow.realizedRCoverage) != null && Number(shadow.realizedRCoverage) >= thresholds.shadowMinRealizedCoverage, { value: shadow.realizedRCoverage, threshold: `>=${thresholds.shadowMinRealizedCoverage}` }),
     check('safety_clear', 'Money-grade safety state clear', Boolean(safety.clear), { value: safety.blockerCount, threshold: '0 blockers' }),
-    check('control_plane_stable', 'No strategy challenger/config transition in progress', Boolean(controlPlane.stableForPreLive), { value: controlPlane.openProposal?.status || 'stable', threshold: 'stable' }),
+    check('control_plane_stable', 'Stable active config with no challenger/config transition', Boolean(controlPlane.stableForPreLive), { value: controlPlane.openProposal?.status || (controlPlane.active ? 'stable' : 'no_active_config'), threshold: 'stable' }),
     check('shadow_drawdown', 'Shadow max drawdown', finite(shadow.maxDrawdownR) != null && Number(shadow.maxDrawdownR) <= thresholds.shadowMaxDrawdownR, { value: shadow.maxDrawdownR, threshold: `<=${thresholds.shadowMaxDrawdownR}R`, hard: false }),
   ];
   const shadowToConfirm = stageResult('shadow_to_confirm', shadowChecks, 'READY_FOR_CONFIRM');
@@ -356,7 +384,7 @@ export function evaluateReadinessEvidence(evidence, thresholds = readinessThresh
     check('shadow_gate', 'Shadow gate already passes', shadowToConfirm.eligible, { value: shadowToConfirm.score, threshold: 'eligible' }),
     check('confirm_mode', 'System is explicitly in Confirm mode', currentMode === 'confirm', { value: currentMode, threshold: 'confirm' }),
     check('live_safety_clear', 'Live safety/ledger state clear', Boolean(safety.clear), { value: safety.blockerCount, threshold: '0 blockers' }),
-    check('control_plane_frozen', 'Strategy/config is stable for pre-Live review', Boolean(controlPlane.stableForPreLive), { value: controlPlane.openProposal?.status || 'stable', threshold: 'stable' }),
+    check('control_plane_frozen', 'Stable active config for pre-Live review', Boolean(controlPlane.stableForPreLive), { value: controlPlane.openProposal?.status || (controlPlane.active ? 'stable' : 'no_active_config'), threshold: 'stable' }),
     check('no_pending_research_exit', 'No unresolved Research settlement evidence', Number(execution.pendingExitSettlements || 0) === 0, { value: execution.pendingExitSettlements || 0, threshold: '=0' }),
   ];
   const confirmToLiveConsideration = stageResult('confirm_to_live_consideration', liveChecks, 'ELIGIBLE_FOR_LIVE_CONSIDERATION');
@@ -408,7 +436,9 @@ export function buildReadinessEvidence(windowMs = 7 * 24 * 60 * 60 * 1000) {
     controlPlane: controlPlaneSnapshot(),
     telemetryCaveat: {
       confirmTradesSeparatelyAttributed: false,
-      reason: "Confirm currently uses the money-grade Live executor and persisted Live position identity; readiness does not invent a separate Confirm performance sample.",
+      reason: 'Confirm currently uses the money-grade Live executor and persisted Live position identity; readiness does not invent a separate Confirm performance sample.',
+      shadowRMayBeDerived: true,
+      shadowRMethod: 'stored realized_r when present, else pnl_sol / initial risk, else pnl_percent / abs(SL)',
     },
   };
   return evidence;
