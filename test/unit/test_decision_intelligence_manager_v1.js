@@ -2,6 +2,7 @@ import assert from 'node:assert/strict';
 import { db, initDb } from '../../src/db/connection.js';
 import { ensureResearchSchema } from '../../src/research/schema.js';
 import { ensureDecisionIntelligenceSchema } from '../../src/decisionIntelligence/schema.js';
+import { ensureControlPlaneSchema } from '../../src/controlPlane/schema.js';
 import { upsertCandidate } from '../../src/db/candidates.js';
 import { logDecisionEvent, storeDecision } from '../../src/db/decisions.js';
 import {
@@ -148,6 +149,17 @@ assert.equal(classifyDecisionOutcome('WATCH', { finalR: 1.2, sampledMfeR: 1.4 })
 assert.equal(classifyDecisionOutcome('BUY', { finalR: -0.4, sampledMfeR: 1.1 }), 'BUY_EXIT_DEPENDENT');
 
 // Manager evidence exposes analytical context but no mutation authority.
+// Also verify that manager status names stay aligned with the real Control Plane.
+ensureControlPlaneSchema();
+const proposalToken = `${Date.now()}_${Math.random()}`;
+const proposedVersion = 900000 + Math.floor(Math.random() * 90000);
+const proposalInsert = db.prepare(`
+  INSERT INTO strategy_proposals (
+    created_at_ms, parent_version, proposed_version, status, source, analyst_mode,
+    proposal_json, proposal_hash, proposed_config_hash, evidence_json, evidence_hash
+  ) VALUES (?, 1, ?, 'pending_review', 'unit_test', 'deterministic', '{}', ?, ?, '{}', ?)
+`).run(Date.now(), proposedVersion, `proposal_${proposalToken}`, `config_${proposalToken}`, `evidence_${proposalToken}`);
+
 const managerEvidence = buildManagerEvidence('bagaimana performa 24h terakhir?');
 assert.equal(managerEvidence.authority.managerMode, 'read_only');
 assert.equal(managerEvidence.authority.canApproveLive, false);
@@ -156,6 +168,10 @@ assert.equal(managerEvidence.authority.canSignTransactions, false);
 assert.equal(managerEvidence.authority.canBroadcastTransactions, false);
 assert.equal(managerEvidence.authority.canMutateSettings, false);
 assert.equal(managerEvidence.authority.humanOwnerIsSoleLiveAuthority, true);
+assert.equal(managerEvidence.controlPlane.openProposal?.id, Number(proposalInsert.lastInsertRowid));
+assert.equal(managerEvidence.controlPlane.openProposal?.status, 'pending_review');
+assert.equal(managerEvidence.controlPlane.openProposal?.proposed_version, proposedVersion);
+db.prepare('DELETE FROM strategy_proposals WHERE id = ?').run(Number(proposalInsert.lastInsertRowid));
 
 storeManagerMessage('unit-chat', 'user', 'hello');
 storeManagerMessage('unit-chat', 'assistant', 'read-only hello');
