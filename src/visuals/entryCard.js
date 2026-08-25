@@ -1,4 +1,5 @@
 import { createCanvas } from 'canvas';
+import { publicExecutionMode, isPaperExecutionMode } from '../tradingModePresentation.js';
 
 const W = 800;
 const H = 420;
@@ -29,21 +30,21 @@ function roundedRect(ctx, x, y, w, h, r) {
 
 function fmtSol(value) {
   const n = Number(value);
-  if (!Number.isFinite(n)) return '\u2014';
+  if (!Number.isFinite(n)) return '—';
   const sign = n > 0 ? '+' : '';
   return `${sign}${n.toFixed(4)}`;
 }
 
 function fmtPct(value) {
   const n = Number(value);
-  if (!Number.isFinite(n)) return '\u2014';
+  if (!Number.isFinite(n)) return '—';
   const sign = n > 0 ? '+' : '';
   return `${sign}${n.toFixed(1)}%`;
 }
 
 function fmtUsd(value) {
   const n = Number(value);
-  if (!Number.isFinite(n) || n === 0) return '\u2014';
+  if (!Number.isFinite(n) || n === 0) return '—';
   if (n >= 1000) return `$${(n / 1000).toFixed(1)}K`;
   if (n >= 1) return `$${n.toFixed(2)}`;
   if (n >= 0.001) return `$${n.toFixed(4)}`;
@@ -66,6 +67,7 @@ function drawBackground(ctx) {
 
 function drawHeader(ctx, position) {
   const symbol = position.symbol || position.mint?.slice(0, 8) || 'UNKNOWN';
+  const mode = publicExecutionMode(position.execution_mode);
 
   ctx.textBaseline = 'middle';
   ctx.font = '600 22px sans-serif';
@@ -76,13 +78,7 @@ function drawHeader(ctx, position) {
   ctx.textAlign = 'right';
   ctx.font = '600 16px sans-serif';
   ctx.fillStyle = PROFIT;
-  const entryLabel = position.execution_mode === 'live'
-    ? '\u2705 LIVE ENTRY'
-    : position.execution_mode === 'research'
-      ? '\ud83e\uddea RESEARCH · 0 SOL'
-      : position.execution_mode === 'shadow_live'
-        ? '\ud83d\udee1 SHADOW ENTRY'
-        : '\u2705 ENTRY';
+  const entryLabel = mode === 'LIVE' ? '✅ LIVE ENTRY' : '🧪 PAPER · 0 SOL';
   ctx.fillText(entryLabel, W - 32, 40);
 }
 
@@ -130,18 +126,18 @@ function drawColumns(ctx, position) {
   const candidate = snap?.candidate || {};
   const metrics = candidate.metrics || {};
   const signals = candidate.signals || {};
-  const research = position.execution_mode === 'research';
+  const paper = isPaperExecutionMode(position.execution_mode);
 
   const mcap = fmtUsd(position.entry_mcap || metrics.marketCapUsd);
   const price = fmtUsd(position.entry_price || metrics.priceUsd);
-  const holders = metrics.holderCount ?? '\u2014';
+  const holders = metrics.holderCount ?? '—';
   const liquidity = fmtUsd(metrics.liquidityUsd);
-  const sizeLabel = research ? 'Capital / Probe' : 'Size';
-  const size = research
+  const sizeLabel = paper ? 'Capital / Probe' : 'Size';
+  const size = paper
     ? `0 SOL / ${fmtSol(position.sim_notional_sol ?? position.size_sol)} SOL`
     : `${fmtSol(position.size_sol)} SOL`;
-  const tp = position.tp_percent ? `${position.tp_percent >= 0 ? '+' : ''}${position.tp_percent}%` : '\u2014';
-  const sl = position.sl_percent ? `${position.sl_percent}%` : '\u2014';
+  const tp = position.tp_percent ? `${position.tp_percent >= 0 ? '+' : ''}${position.tp_percent}%` : '—';
+  const sl = position.sl_percent ? `${position.sl_percent}%` : '—';
   const route = signals.route || 'trenches';
 
   drawInfoRow(ctx, 110, 'Market Cap', mcap, 'Price', price);
@@ -151,10 +147,10 @@ function drawColumns(ctx, position) {
 }
 
 function drawSummary(ctx, position) {
-  const mode = (position.execution_mode || 'dry_run').toUpperCase();
+  const mode = publicExecutionMode(position.execution_mode);
   const opened = position.opened_at_ms
     ? new Date(position.opened_at_ms).toISOString().slice(0, 19).replace('T', ' ')
-    : '\u2014';
+    : '—';
 
   const panelX = 80;
   const panelW = W - 160;
@@ -181,7 +177,7 @@ function drawSummary(ctx, position) {
 }
 
 function drawFooter(ctx, position) {
-  const mint = position.mint?.slice(0, 16) || '\u2014';
+  const mint = position.mint?.slice(0, 16) || '—';
 
   ctx.textBaseline = 'alphabetic';
   ctx.font = '10px sans-serif';
