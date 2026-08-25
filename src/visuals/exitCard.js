@@ -1,4 +1,5 @@
 import { createCanvas } from 'canvas';
+import { publicExecutionMode, isPaperExecutionMode } from '../tradingModePresentation.js';
 
 const W = 800;
 const H = 420;
@@ -82,7 +83,6 @@ function drawBackground(ctx) {
   ctx.fillStyle = grad;
   ctx.fillRect(0, 0, W, H);
 
-  // subtle radial glow top-right
   const glow = ctx.createRadialGradient(W * 0.85, 0, 20, W * 0.85, 0, 320);
   glow.addColorStop(0, 'rgba(91, 140, 255, 0.10)');
   glow.addColorStop(1, 'rgba(91, 140, 255, 0)');
@@ -91,7 +91,6 @@ function drawBackground(ctx) {
 }
 
 function drawHeader(ctx, position, accent) {
-  // CLOSED badge
   const badgeX = 32;
   const badgeY = 28;
   const badgeH = 26;
@@ -106,7 +105,6 @@ function drawHeader(ctx, position, accent) {
   ctx.textAlign = 'left';
   ctx.fillText(badgeText, badgeX + 10, badgeY + badgeH / 2 + 1);
 
-  // exit reason pill
   const reason = String(position.exit_reason || position.exitReason || 'EXIT');
   ctx.font = '600 11px sans-serif';
   const reasonW = ctx.measureText(reason).width + 16;
@@ -117,7 +115,6 @@ function drawHeader(ctx, position, accent) {
   ctx.fillStyle = '#c8cee0';
   ctx.fillText(reason, reasonX + 8, badgeY + badgeH / 2 + 1);
 
-  // token symbol (right-aligned)
   ctx.font = 'bold 28px sans-serif';
   const symbol = String(position.symbol || shortMint(position.mint)).toUpperCase();
   ctx.fillStyle = TEXT;
@@ -125,7 +122,6 @@ function drawHeader(ctx, position, accent) {
   ctx.textBaseline = 'alphabetic';
   ctx.fillText(symbol, W - 32, 56);
 
-  // mint subtitle
   ctx.font = '11px sans-serif';
   ctx.fillStyle = DIM;
   ctx.textAlign = 'right';
@@ -142,12 +138,18 @@ function drawDivider(ctx, y) {
 }
 
 function drawColumns(ctx, position) {
+  const paper = isPaperExecutionMode(position.execution_mode);
   const columns = [
-    { label: 'DEPOSITED', value: `${fmtSol(position.size_sol)} SOL` },
     {
-      label: 'PNL',
+      label: paper ? 'CAPITAL / PROBE' : 'DEPOSITED',
+      value: paper
+        ? `0 SOL / ${fmtSol(position.sim_notional_sol ?? position.size_sol)} SOL`
+        : `${fmtSol(position.size_sol)} SOL`,
+    },
+    {
+      label: paper ? 'VIRTUAL PNL' : 'PNL',
       value: `${fmtPct(position.pnl_percent ?? position.pnlPercent)}`,
-      sub: `${fmtSol(position.pnl_sol ?? position.pnlSol)} SOL`,
+      sub: `${fmtSol(position.pnl_sol ?? position.pnlSol)} SOL${paper ? ' virtual' : ''}`,
       accent: pickAccent(position.pnl_sol ?? position.pnlSol),
     },
     {
@@ -179,7 +181,6 @@ function drawColumns(ctx, position) {
     }
   });
 
-  // column dividers
   ctx.strokeStyle = PANEL_BORDER;
   ctx.lineWidth = 1;
   for (let i = 1; i < columns.length; i++) {
@@ -203,7 +204,6 @@ function drawSummary(ctx, position, accent) {
   ctx.lineWidth = 1;
   ctx.stroke();
 
-  // lock icon
   const iconX = panelX + 24;
   const iconY = panelY + 24;
   drawLockIcon(ctx, iconX, iconY, accent);
@@ -214,7 +214,6 @@ function drawSummary(ctx, position, accent) {
   ctx.textBaseline = 'alphabetic';
   ctx.fillText('POSITION SUMMARY', iconX + 36, iconY + 12);
 
-  // right side: outcome label
   const pnlSol = Number(position.pnl_sol ?? position.pnlSol);
   const outcome = !Number.isFinite(pnlSol) || pnlSol === 0 ? 'BREAK-EVEN' : pnlSol > 0 ? 'PROFIT' : 'LOSS';
   ctx.font = 'bold 12px sans-serif';
@@ -222,12 +221,11 @@ function drawSummary(ctx, position, accent) {
   ctx.fillStyle = accent;
   ctx.fillText(outcome, panelX + panelW - 24, iconY + 12);
 
-  // stats grid 2x2
   const stats = [
     { label: 'Entry mcap', value: fmtUsd(position.entry_mcap) },
     { label: 'Exit mcap', value: fmtUsd(position.exit_mcap) },
     { label: 'Strategy', value: String(position.strategy_id || 'sniper').toUpperCase() },
-    { label: 'Mode', value: String(position.execution_mode || 'dry_run').toUpperCase() },
+    { label: 'Mode', value: publicExecutionMode(position.execution_mode) },
   ];
   const gridX = panelX + 24;
   const gridY = panelY + 64;
@@ -255,12 +253,10 @@ function drawLockIcon(ctx, x, y, color) {
   ctx.strokeStyle = color;
   ctx.fillStyle = color;
   ctx.lineWidth = 1.6;
-  // shackle
   ctx.beginPath();
   ctx.arc(x + 8, y + 4, 5, Math.PI, 0);
   ctx.lineTo(x + 16, y + 4);
   ctx.stroke();
-  // body
   roundedRect(ctx, x, y + 8, 16, 12, 2);
   ctx.fill();
   ctx.restore();
@@ -278,7 +274,6 @@ function drawFooter(ctx, position) {
   const closed = position.closed_at_ms ? new Date(position.closed_at_ms).toISOString().slice(0, 19).replace('T', ' ') + ' UTC' : '—';
   ctx.fillText(`Closed: ${closed}`, W - 32, H - 22);
 
-  // center brand
   ctx.textAlign = 'center';
   ctx.fillStyle = '#3f4660';
   ctx.font = 'bold 10px sans-serif';
