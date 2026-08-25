@@ -9,6 +9,7 @@ import {
   recentDecisionReceipts,
 } from '../decisionIntelligence/report.js';
 import { ensureDecisionIntelligenceSchema } from '../decisionIntelligence/schema.js';
+import { preLiveReadinessReport } from '../readiness/engine.js';
 
 function tableExists(name) {
   return Boolean(db.prepare("SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = ?").get(name));
@@ -167,7 +168,7 @@ export function buildManagerEvidence(question) {
   else if (mint) focusDecision = compactDetails(latestDecisionReceiptDetailsByMint(mint));
 
   return {
-    evidenceVersion: 'angel-manager-evidence-v1',
+    evidenceVersion: 'angel-manager-evidence-v2',
     generatedAtMs: Date.now(),
     questionWindowMs: windowMs,
     authority: {
@@ -182,6 +183,7 @@ export function buildManagerEvidence(question) {
     },
     system: systemSnapshot(),
     controlPlane: controlPlaneSnapshot(),
+    preLiveReadiness: preLiveReadinessReport(windowMs),
     decisionIntelligence: decisionIntelligenceSummary(windowMs),
     recentDecisions: recentDecisionReceipts(10),
     recentPositions: positionsSnapshot(8),
