@@ -59,8 +59,8 @@ export function tryReservePositionSlot() {
   return true;
 }
 
-// Public legacy name now means capital-bearing/pre-live execution capacity only.
-// Research capacity lives in src/research/engine.js.
+// Public legacy name now means capital-bearing execution capacity only.
+// PAPER capacity lives in src/research/engine.js.
 export function openPositionCount() {
   return executionOpenCount() + pendingPositionCount;
 }
@@ -81,7 +81,7 @@ export function canOpenMorePositions() {
 
 export function liveEntryBlockReason(mint, strat = activeStrategy()) {
   // Concurrent exposure to the same mint is blocked even if the other position
-  // is Research; this keeps position identity/reconciliation unambiguous.
+  // is PAPER; this keeps position identity/reconciliation unambiguous.
   const active = db.prepare(`
     SELECT status FROM dry_run_positions
     WHERE mint = ? AND status IN ('open', 'entry_unknown', 'exit_unknown', 'partial_exit_unknown')
@@ -112,12 +112,14 @@ export function liveEntryBlockReason(mint, strat = activeStrategy()) {
 
 export function tradingMode() {
   const mode = setting('trading_mode', 'dry_run');
-  // IMPORTANT: Research routing is handled by src/research/policy.js before any
-  // money-grade executor calls this legacy helper. For backwards compatibility,
-  // old dry_run/simulation values still resolve to shadow_live here so existing
-  // live/shadow execution code does not need a risky broad rewrite in this PR.
-  if (mode === 'dry_run' || mode === 'simulation' || mode === 'research') return 'shadow_live';
-  return ['shadow_live', 'confirm', 'live'].includes(mode) ? mode : 'shadow_live';
+  // Two public modes, one compatibility bridge:
+  // - PAPER is routed away before this helper and maps to legacy shadow_live if
+  //   old execution code asks anyway, which guarantees no broadcast.
+  // - LIVE maps internally to legacy confirm semantics so every BUY becomes a
+  //   Telegram trade intent. Only the owner-confirmed intent path may broadcast.
+  // Protective exits remain automatic on persisted execution_mode='live'.
+  if (mode === 'live') return 'confirm';
+  return 'shadow_live';
 }
 
 export function allPositions(limit = 10) {
