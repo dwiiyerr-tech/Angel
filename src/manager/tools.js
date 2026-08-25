@@ -2,6 +2,7 @@ import { db } from '../db/connection.js';
 import { approvedLiveConfig } from '../db/liveConfig.js';
 import { parseWindowMs } from '../utils.js';
 import { ensureResearchSchema } from '../research/schema.js';
+import { configuredTradingMode } from '../research/policy.js';
 import {
   decisionIntelligenceSummary,
   latestDecisionReceiptDetailsByMint,
@@ -19,7 +20,7 @@ function windowFromQuestion(question) {
   const text = String(question || '').toLowerCase();
   const match = text.match(/\b(\d+(?:\.\d+)?\s*(?:m|h|d))\b/);
   if (match) return parseWindowMs(match[1].replace(/\s+/g, ''));
-  const readinessIntent = /(readiness|kesiapan|siap\s+(?:untuk\s+)?(?:shadow|confirm|live)|ready\s+(?:for\s+)?(?:shadow|confirm|live)|layak\s+(?:naik|masuk|dipertimbangkan))/i.test(text);
+  const readinessIntent = /(readiness|kesiapan|siap\s+(?:untuk\s+)?(?:paper|live)|ready\s+(?:for\s+)?(?:paper|live)|layak\s+(?:naik|masuk|dipertimbangkan)|siap\s+live)/i.test(text);
   return parseWindowMs(readinessIntent ? '7d' : '24h');
 }
 
@@ -45,7 +46,10 @@ function compactDetails(details) {
     symbol: snapshot.token?.symbol || snapshot.token?.name || null,
     verdict: receipt.verdict,
     confidence: receipt.confidence,
-    mode: receipt.mode,
+    // Historical Paper receipts may still store mode='research'. This is an
+    // internal evidence label, not a selectable trading mode.
+    storageMode: receipt.mode,
+    publicMode: receipt.mode === 'live' ? 'live' : 'paper',
     route: receipt.route,
     source: snapshot.source,
     safety: snapshot.safety,
@@ -118,25 +122,30 @@ function liveSafetySnapshot() {
     currentConfigHasValidHumanApproval: Boolean(approved),
     approvedSnapshotId: approved?.id || null,
     liveEligibleFromThisTool: false,
-    note: 'This is read-only evidence. Only deterministic owner commands can authorize Live.',
+    note: 'Read-only evidence only. Live authorization remains a deterministic owner action.',
   };
 }
 
 function systemSnapshot() {
-  const mode = db.prepare("SELECT value FROM settings WHERE key = 'trading_mode'").get()?.value || 'dry_run';
+  const mode = configuredTradingMode();
   const agentEnabled = db.prepare("SELECT value FROM settings WHERE key = 'agent_enabled'").get()?.value || 'true';
-  const open = db.prepare(`
+  const rawOpen = db.prepare(`
     SELECT execution_mode, COUNT(*) AS count, COALESCE(SUM(size_sol), 0) AS exposure
     FROM dry_run_positions
     WHERE status IN ('open', 'entry_unknown', 'exit_unknown', 'partial_exit_unknown')
     GROUP BY execution_mode
   `).all();
+  const openPositions = {
+    paper: rawOpen.filter(row => row.execution_mode !== 'live').reduce((sum, row) => sum + Number(row.count || 0), 0),
+    live: rawOpen.filter(row => row.execution_mode === 'live').reduce((sum, row) => sum + Number(row.count || 0), 0),
+  };
   const strategy = db.prepare('SELECT id, name FROM strategies WHERE enabled = 1 LIMIT 1').get() || null;
   return {
     mode,
+    publicModes: ['paper', 'live'],
     agentEnabled: ['true', '1'].includes(String(agentEnabled)),
     activeStrategy: strategy,
-    openPositionsByMode: open,
+    openPositions,
     liveSafety: liveSafetySnapshot(),
   };
 }
@@ -157,7 +166,10 @@ function positionsSnapshot(limit = 8) {
            tp_percent, sl_percent, exit_reason
     FROM dry_run_positions
     ORDER BY id DESC LIMIT ?
-  `).all(Math.max(1, Math.min(20, Number(limit) || 8)));
+  `).all(Math.max(1, Math.min(20, Number(limit) || 8))).map(row => ({
+    ...row,
+    public_mode: row.execution_mode === 'live' ? 'live' : 'paper',
+  }));
 }
 
 export function buildManagerEvidence(question) {
@@ -171,7 +183,7 @@ export function buildManagerEvidence(question) {
   else if (mint) focusDecision = compactDetails(latestDecisionReceiptDetailsByMint(mint));
 
   return {
-    evidenceVersion: 'angel-manager-evidence-v2',
+    evidenceVersion: 'angel-manager-evidence-v3-two-mode',
     generatedAtMs: Date.now(),
     questionWindowMs: windowMs,
     authority: {
@@ -191,6 +203,12 @@ export function buildManagerEvidence(question) {
     recentDecisions: recentDecisionReceipts(10),
     recentPositions: positionsSnapshot(8),
     focusDecision,
+    modeModel: {
+      publicModes: ['paper', 'live'],
+      paperIsZeroCapital: true,
+      legacyResearchAndShadowArePaperStorageLabels: true,
+      legacyConfirmAliasIsLive: true,
+    },
   };
 }
 
@@ -208,8 +226,6 @@ export function storeManagerMessage(chatId, role, content) {
     INSERT INTO manager_messages (chat_id, role, created_at_ms, content)
     VALUES (?, ?, ?, ?)
   `).run(String(chatId), role, Date.now(), String(content || '').slice(0, 12_000));
-  // Bound persistent conversational context; historical trading evidence stays in
-  // its own immutable/report tables and is never deleted here.
   db.prepare(`
     DELETE FROM manager_messages
     WHERE chat_id = ? AND id NOT IN (
