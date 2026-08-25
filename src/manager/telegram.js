@@ -1,5 +1,6 @@
 import { TELEGRAM_CHAT_ID } from '../config.js';
 import { bot } from '../telegram/bot.js';
+import { sendManagerMessage } from '../telegram/managerSend.js';
 import { escapeHtml } from '../format.js';
 import { parseWindowMs, formatWindow } from '../utils.js';
 import {
@@ -74,12 +75,12 @@ function summaryHtml(windowArg = '24h') {
 }
 
 async function sendDecision(chatId, arg) {
-  if (!arg) return bot.sendMessage(chatId, 'Usage: /decision <receipt_id|mint>');
+  if (!arg) return sendManagerMessage(chatId, 'Usage: /decision <receipt_id|mint>');
   const numeric = /^#?\d+$/.test(arg);
   const details = numeric
     ? loadDecisionReceiptDetails(Number(arg.replace('#', '')))
     : latestDecisionReceiptDetailsByMint(arg);
-  return bot.sendMessage(chatId, formatDecisionReceiptHtml(details), {
+  return sendManagerMessage(chatId, formatDecisionReceiptHtml(details), {
     parse_mode: 'HTML',
     disable_web_page_preview: true,
   });
@@ -88,7 +89,7 @@ async function sendDecision(chatId, arg) {
 function sendReadiness(chatId, windowArg = '7d') {
   const windowMs = parseWindowMs(windowArg);
   const report = preLiveReadinessReport(windowMs);
-  return bot.sendMessage(chatId, formatReadinessHtml(report), {
+  return sendManagerMessage(chatId, formatReadinessHtml(report), {
     parse_mode: 'HTML',
     disable_web_page_preview: true,
   });
@@ -115,15 +116,15 @@ function notificationStatusText() {
 
 function handleNotifyCommand(chatId, text) {
   const [, targetRaw, valueRaw] = text.split(/\s+/);
-  if (!targetRaw) return bot.sendMessage(chatId, notificationStatusText(), { parse_mode: 'HTML' });
+  if (!targetRaw) return sendManagerMessage(chatId, notificationStatusText(), { parse_mode: 'HTML' });
   const target = targetRaw.toLowerCase();
   const value = String(valueRaw || '').toLowerCase();
   if (!['buy', 'watch', 'pass', 'all'].includes(target) || !['on', 'off'].includes(value)) {
-    return bot.sendMessage(chatId, 'Usage: /notify buy|watch|pass|all on|off');
+    return sendManagerMessage(chatId, 'Usage: /notify buy|watch|pass|all on|off');
   }
   if (target === 'all') setAllDecisionNotifications(value === 'on');
   else setDecisionNotification(target, value === 'on');
-  return bot.sendMessage(chatId, notificationStatusText(), { parse_mode: 'HTML' });
+  return sendManagerMessage(chatId, notificationStatusText(), { parse_mode: 'HTML' });
 }
 
 function dailyReportStatusText() {
@@ -148,27 +149,27 @@ async function handleDailyReportCommand(chatId, text) {
   const parts = text.split(/\s+/);
   const action = String(parts[1] || '').toLowerCase();
   if (!action || action === 'status') {
-    return bot.sendMessage(chatId, dailyReportStatusText(), { parse_mode: 'HTML' });
+    return sendManagerMessage(chatId, dailyReportStatusText(), { parse_mode: 'HTML' });
   }
   if (action === 'on' || action === 'off') {
     setDailyReportEnabled(action === 'on');
-    return bot.sendMessage(chatId, dailyReportStatusText(), { parse_mode: 'HTML' });
+    return sendManagerMessage(chatId, dailyReportStatusText(), { parse_mode: 'HTML' });
   }
   if (action === 'time') {
     try {
       setDailyReportTimeWib(parts[2]);
-      return bot.sendMessage(chatId, dailyReportStatusText(), { parse_mode: 'HTML' });
+      return sendManagerMessage(chatId, dailyReportStatusText(), { parse_mode: 'HTML' });
     } catch (error) {
-      return bot.sendMessage(chatId, `Invalid report time: ${error.message}`);
+      return sendManagerMessage(chatId, `Invalid report time: ${error.message}`);
     }
   }
   if (action === 'now') {
-    await bot.sendMessage(chatId, '📊 Building rolling 24h report…');
+    await sendManagerMessage(chatId, '📊 Building rolling 24h report…');
     const sent = await sendDailyReport(chatId);
-    if (!sent) return bot.sendMessage(chatId, '24h report failed. Check bot logs for the underlying error.');
+    if (!sent) return sendManagerMessage(chatId, '24h report failed. Check bot logs for the underlying error.');
     return;
   }
-  return bot.sendMessage(chatId, 'Usage: /dailyreport [status|on|off|now|time HH:MM]');
+  return sendManagerMessage(chatId, 'Usage: /dailyreport [status|on|off|now|time HH:MM]');
 }
 
 export function setupTelegramManager() {
@@ -184,7 +185,7 @@ export function setupTelegramManager() {
     if (text.startsWith('/ask')) {
       const question = text.replace(/^\/ask(?:@\S+)?\s*/i, '').trim();
       if (!question) {
-        bot.sendMessage(msg.chat.id, 'Usage: /ask <question>\nOr simply send a normal message to chat with Angel Manager V2.').catch(() => {});
+        sendManagerMessage(msg.chat.id, 'Usage: /ask <question>\nOr simply send a normal message to chat with Angel Manager V2.').catch(() => {});
         return;
       }
       handleManagerMessage(msg.chat.id, question).catch(error => console.error(`[manager] /ask failed: ${error.message}`));
@@ -207,7 +208,7 @@ export function setupTelegramManager() {
       try {
         sendReadiness(msg.chat.id, windowArg).catch(error => console.error(`[manager] readiness failed: ${error.message}`));
       } catch (error) {
-        bot.sendMessage(msg.chat.id, `Readiness report failed: ${error.message}`).catch(() => {});
+        sendManagerMessage(msg.chat.id, `Readiness report failed: ${error.message}`).catch(() => {});
       }
       return;
     }
@@ -218,7 +219,7 @@ export function setupTelegramManager() {
     }
     if (text.startsWith('/decisions')) {
       const windowArg = text.split(/\s+/)[1] || '24h';
-      bot.sendMessage(msg.chat.id, summaryHtml(windowArg), { parse_mode: 'HTML' })
+      sendManagerMessage(msg.chat.id, summaryHtml(windowArg), { parse_mode: 'HTML' })
         .catch(error => console.error(`[manager] decisions summary failed: ${error.message}`));
       return;
     }

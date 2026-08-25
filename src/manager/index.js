@@ -1,4 +1,4 @@
-import { bot } from '../telegram/bot.js';
+import { sendManagerMessage } from '../telegram/managerSend.js';
 import { buildManagerEvidence, clearManagerMessages, recentManagerMessages, storeManagerMessage } from './tools.js';
 import { answerManagerQuestion } from './llm.js';
 import { collectGmgnResearch } from './gmgn.js';
@@ -84,7 +84,7 @@ export async function handleManagerMessage(chatId, question) {
     ].join('\n');
     storeManagerMessage(chatId, 'user', text);
     storeManagerMessage(chatId, 'assistant', reply);
-    return bot.sendMessage(chatId, reply);
+    return sendManagerMessage(chatId, reply);
   }
 
   try {
@@ -93,13 +93,13 @@ export async function handleManagerMessage(chatId, question) {
       const reply = configProposalReply(configResult);
       storeManagerMessage(chatId, 'user', text);
       storeManagerMessage(chatId, 'assistant', reply.replace(/<[^>]+>/g, ''));
-      return bot.sendMessage(chatId, reply, { parse_mode: 'HTML' });
+      return sendManagerMessage(chatId, reply, { parse_mode: 'HTML' });
     }
   } catch (error) {
     const reply = `❌ Config proposal ditolak: ${String(error?.message || error).slice(0, 1200)}\nActive config tidak berubah.`;
     storeManagerMessage(chatId, 'user', text);
     storeManagerMessage(chatId, 'assistant', reply);
-    return bot.sendMessage(chatId, reply);
+    return sendManagerMessage(chatId, reply);
   }
 
   const history = recentManagerMessages(chatId, 8);
@@ -129,11 +129,11 @@ export async function handleManagerMessage(chatId, question) {
   storeManagerMessage(chatId, 'assistant', answer);
 
   for (const chunk of chunkText(answer)) {
-    await bot.sendMessage(chatId, chunk, { disable_web_page_preview: true });
+    await sendManagerMessage(chatId, chunk, { disable_web_page_preview: true });
   }
 }
 
 export function clearManagerConversation(chatId) {
   const removed = clearManagerMessages(chatId);
-  return bot.sendMessage(chatId, `🧹 Angel Manager memory cleared (${removed} message${removed === 1 ? '' : 's'} removed). Trading evidence/receipts were not deleted.`);
+  return sendManagerMessage(chatId, `🧹 Angel Manager memory cleared (${removed} message${removed === 1 ? '' : 's'} removed). Trading evidence/receipts were not deleted.`);
 }
