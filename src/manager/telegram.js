@@ -16,11 +16,18 @@ function authorized(msg) {
   return String(msg?.chat?.id) === String(TELEGRAM_CHAT_ID);
 }
 
+function finite(value) {
+  if (value === null || value === undefined || value === '') return null;
+  const parsed = Number(value);
+  return Number.isFinite(parsed) ? parsed : null;
+}
+
 function summaryHtml(windowArg = '24h') {
   const windowMs = parseWindowMs(windowArg);
   const summary = decisionIntelligenceSummary(windowMs);
   const routes = summary.routes.slice(0, 5).map(row => {
-    const r = Number.isFinite(Number(row.averageFinalR)) ? `${Number(row.averageFinalR) >= 0 ? '+' : ''}${Number(row.averageFinalR).toFixed(2)}R` : '—';
+    const avg = finite(row.averageFinalR);
+    const r = avg == null ? '—' : `${avg >= 0 ? '+' : ''}${avg.toFixed(2)}R`;
     return `• ${escapeHtml(row.route)}: N=${row.count}, outcomes=${row.outcomes}, avg ${r}, missed runners=${row.missedRunners}`;
   });
   const classes = Object.entries(summary.outcomes.classifications || {})
@@ -28,17 +35,21 @@ function summaryHtml(windowArg = '24h') {
     .slice(0, 6)
     .map(([key, value]) => `${escapeHtml(key)}=${value}`)
     .join(' · ');
+  const decisionToProbe = finite(summary.probes.medianDecisionToProbeMs);
+  const deterioration = finite(summary.probes.medianQuoteDeteriorationPct);
+  const spread = finite(summary.probes.medianRoundtripSpreadPct);
+  const medianFinalR = finite(summary.outcomes.medianFinalR);
   return [
     `🧠 <b>Decision Intelligence · ${escapeHtml(formatWindow(windowMs))}</b>`,
     '',
     `Receipts: <b>${summary.total}</b>`,
     `BUY ${summary.verdicts.BUY} · WATCH ${summary.verdicts.WATCH} · PASS ${summary.verdicts.PASS}`,
     `Executable probes: ready ${summary.probes.ready} · pending ${summary.probes.pending} · failed ${summary.probes.failed}`,
-    `Median decision→probe: ${Number.isFinite(Number(summary.probes.medianDecisionToProbeMs)) ? `${Math.round(summary.probes.medianDecisionToProbeMs)}ms` : '—'}`,
-    `Median quote deterioration: ${Number.isFinite(Number(summary.probes.medianQuoteDeteriorationPct)) ? `${Number(summary.probes.medianQuoteDeteriorationPct).toFixed(2)}%` : '—'}`,
-    `Median roundtrip spread: ${Number.isFinite(Number(summary.probes.medianRoundtripSpreadPct)) ? `${Number(summary.probes.medianRoundtripSpreadPct).toFixed(2)}%` : '—'}`,
+    `Median decision→probe: ${decisionToProbe == null ? '—' : `${Math.round(decisionToProbe)}ms`}`,
+    `Median quote deterioration: ${deterioration == null ? '—' : `${deterioration.toFixed(2)}%`}`,
+    `Median roundtrip spread: ${spread == null ? '—' : `${spread.toFixed(2)}%`}`,
     '',
-    `<b>Outcomes</b>: finalized ${summary.outcomes.finalized} · median final ${Number.isFinite(Number(summary.outcomes.medianFinalR)) ? `${Number(summary.outcomes.medianFinalR) >= 0 ? '+' : ''}${Number(summary.outcomes.medianFinalR).toFixed(2)}R` : '—'}`,
+    `<b>Outcomes</b>: finalized ${summary.outcomes.finalized} · median final ${medianFinalR == null ? '—' : `${medianFinalR >= 0 ? '+' : ''}${medianFinalR.toFixed(2)}R`}`,
     classes || 'No finalized classifications yet.',
     '',
     '<b>Top routes by sampled final R</b>',
