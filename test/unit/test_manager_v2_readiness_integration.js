@@ -13,20 +13,22 @@ const marker = `readiness-paper-${Date.now()}`;
 const openedAt = Date.now() - 30 * 60_000;
 const closedAt = Date.now() - 20 * 60_000;
 
-// PAPER keeps the mature Research ledger label internally. Public readiness must
-// expose it as Paper without rewriting historical storage.
+// PAPER keeps the mature Research ledger label internally. Seed it with the
+// strict zero-capital invariant: positive virtual notional and no signatures.
 const inserted = db.prepare(`
   INSERT INTO dry_run_positions (
     mint, symbol, status, opened_at_ms, closed_at_ms, size_sol,
     entry_price, entry_mcap, high_water_price, high_water_mcap,
     tp_percent, sl_percent, trailing_enabled, trailing_percent, trailing_armed,
     exit_price, exit_mcap, exit_reason, pnl_percent, pnl_sol,
-    execution_mode, snapshot_json, initial_risk_sol, realized_r
+    execution_mode, snapshot_json, initial_risk_sol, realized_r,
+    real_capital_sol, sim_notional_sol
   ) VALUES (?, 'PPR', 'closed', ?, ?, 0.05,
     1, 100000, 1.2, 120000,
     60, -20, 1, 20, 1,
     1.2, 120000, 'UNIT_TEST', 20, 0.01,
-    'research', '{}', 0.01, 1.0)
+    'research', '{}', 0.01, 1.0,
+    0, 0.05)
 `).run(marker, openedAt, closedAt);
 const positionId = Number(inserted.lastInsertRowid);
 
@@ -56,7 +58,10 @@ assert.equal('telemetryCaveat' in readinessQuestion.preLiveReadiness.evidence, f
 assert.equal('shadowToConfirm' in readinessQuestion.preLiveReadiness.evaluation, false);
 assert.equal('confirmToLiveConsideration' in readinessQuestion.preLiveReadiness.evaluation, false);
 
-assert.equal(db.prepare('SELECT execution_mode FROM dry_run_positions WHERE id = ?').get(positionId).execution_mode, 'research');
+const stored = db.prepare('SELECT execution_mode, real_capital_sol, sim_notional_sol FROM dry_run_positions WHERE id = ?').get(positionId);
+assert.equal(stored.execution_mode, 'research');
+assert.equal(Number(stored.real_capital_sol), 0);
+assert.equal(Number(stored.sim_notional_sol), 0.05);
 db.prepare('DELETE FROM dry_run_positions WHERE id = ?').run(positionId);
 
-console.log('[manager-two-mode] PAPER/LIVE readiness grounding and owner-only authority verified');
+console.log('[manager-two-mode] PAPER/LIVE readiness grounding and strict zero-capital Paper invariant verified');
