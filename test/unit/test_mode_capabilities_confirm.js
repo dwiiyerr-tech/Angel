@@ -6,6 +6,7 @@ assert.equal(paper.mode, 'paper');
 assert.equal(paper.walletRequired, false);
 assert.equal(paper.broadcastAllowed, false);
 assert.equal(paper.autonomousBroadcastAllowed, false);
+assert.equal(paper.protectiveExitBroadcastAllowed, false);
 assert.equal(paper.ownerApprovalRequired, false);
 
 // Legacy Shadow is now only a migration alias for PAPER.
@@ -17,14 +18,14 @@ const live = modeCapabilities('live');
 assert.equal(live.mode, 'live');
 assert.equal(live.walletRequired, true);
 assert.equal(live.broadcastAllowed, true);
-assert.equal(live.autonomousBroadcastAllowed, true);
+assert.equal(live.perTradeConfirmationRequired, true);
+assert.equal(live.autonomousBroadcastAllowed, false);
+assert.equal(live.protectiveExitBroadcastAllowed, true);
 assert.equal(live.ownerApprovalRequired, true);
 
-// Legacy Confirm is now only a migration alias for LIVE; it cannot create a
-// separate per-trade-confirmation runtime mode.
+// Legacy Confirm is a migration alias for LIVE, not a selectable third mode.
 const legacyConfirm = modeCapabilities('confirm');
 assert.deepEqual(legacyConfirm, live);
 assert.equal(normalizeConfiguredMode('confirm'), 'live');
-assert.equal(legacyConfirm.perTradeConfirmationRequired, false);
 
-console.log('[two-mode-capabilities] legacy Shadow/Confirm aliases collapse safely into PAPER/LIVE');
+console.log('[two-mode-capabilities] legacy aliases collapse safely and LIVE entries require owner confirmation');
