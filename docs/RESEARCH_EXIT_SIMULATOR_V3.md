@@ -65,6 +65,12 @@ If the first executable exit quote is unavailable, the row remains `pending` and
 
 Research monitoring resumes pending settlements before processing new market state. No real capital is involved.
 
+### Settlement ordering invariant
+
+Exit legs are causal. A final TP/SL/trailing/time settlement may not finalize ahead of an earlier partial-TP settlement for the same Research position. If an earlier partial leg is still `pending`, the final settlement remains durable but waits without issuing its own executable quote. Open Research positions with unresolved exit settlement are also held from new exit decisions until that settlement is resolved.
+
+When the final settlement eventually completes, it reads the latest corrected `realized_pnl_sol` and `realized_fee_sol` from the Research position. This prevents provider outages or process restarts from freezing a stale legacy partial-PnL snapshot into the final result.
+
 ## Data written
 
 Each settlement records:
