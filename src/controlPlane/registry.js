@@ -233,7 +233,7 @@ export function createStrategyProposal({
   };
   const proposalHash = hashJson(proposalPayload);
   const now = Date.now();
-  const evidenceSample = Number(evidence?.totalClosed ?? evidence?.research?.closed ?? 0) || 0;
+  const evidenceSample = Number(evidence?.totalClosed ?? evidence?.paper?.closed ?? evidence?.research?.closed ?? 0) || 0;
   const windowMs = Number(evidence?.windowMs || 0) || null;
 
   return db.transaction(() => {
@@ -391,9 +391,8 @@ export function promoteProposal(id, actor = 'human') {
   ensureControlPlaneSchema();
   const proposal = proposalById(id);
   if (!proposal || proposal.status !== 'promotion_ready') throw new Error('Proposal is not promotion-ready');
-  const mode = configuredTradingMode();
-  if (!['research', 'shadow_live'].includes(mode)) {
-    throw new Error('Promotion is allowed only in Research or Shadow no-broadcast mode');
+  if (configuredTradingMode() !== 'paper') {
+    throw new Error('Promotion is allowed only in PAPER no-broadcast mode');
   }
   const unresolved = Number(db.prepare("SELECT COUNT(*) AS count FROM execution_operations WHERE status IN ('pending', 'outcome_unknown')").get().count || 0);
   if (unresolved > 0) throw new Error(`Cannot promote with ${unresolved} unresolved execution outcome(s)`);
@@ -428,7 +427,7 @@ export function rollbackToParent(targetVersion, reason = 'manual rollback', acto
 
   const now = Date.now();
   db.transaction(() => {
-    if (!['research', 'shadow_live'].includes(configuredTradingMode())) setSetting('trading_mode', 'research');
+    if (configuredTradingMode() !== 'paper') setSetting('trading_mode', 'paper');
     for (const key of CONTROL_PLANE_PROPOSABLE_SETTINGS) {
       if (target.config?.settings?.[key] !== undefined) setSetting(key, target.config.settings[key]);
     }

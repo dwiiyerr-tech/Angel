@@ -1,14 +1,18 @@
 import { db } from './connection.js';
 import { LIVE_SETTING_KEYS, assertLiveConfigApproved } from './liveConfig.js';
 
+// Persist only the two canonical runtime states. Legacy mode names are accepted
+// as migration aliases so an older database can be upgraded without manual SQL.
 const TRADING_MODE_STORAGE = new Map([
+  ['paper', 'dry_run'],
+  ['paper_trading', 'dry_run'],
   ['dry_run', 'dry_run'],
   ['dry-run', 'dry_run'],
   ['simulation', 'dry_run'],
   ['research', 'dry_run'],
-  ['shadow', 'shadow_live'],
-  ['shadow_live', 'shadow_live'],
-  ['confirm', 'confirm'],
+  ['shadow', 'dry_run'],
+  ['shadow_live', 'dry_run'],
+  ['confirm', 'live'],
   ['live', 'live'],
 ]);
 
@@ -20,7 +24,11 @@ export function normalizeTradingModeStorage(value = 'dry_run') {
 }
 
 export function setting(key, fallback = '') {
-  return db.prepare('SELECT value FROM settings WHERE key = ?').get(key)?.value ?? fallback;
+  const raw = db.prepare('SELECT value FROM settings WHERE key = ?').get(key)?.value ?? fallback;
+  // Legacy persisted shadow/confirm values are normalized on read immediately,
+  // so no runtime component can observe more than PAPER(dry_run) or LIVE.
+  if (key === 'trading_mode') return normalizeTradingModeStorage(raw);
+  return raw;
 }
 export const getSetting = setting;
 
@@ -31,7 +39,7 @@ export function setSetting(key, value) {
   const currentMode = setting('trading_mode', 'dry_run');
   if (key === 'trading_mode' && normalized === 'live') assertLiveConfigApproved();
   if (currentMode === 'live' && LIVE_SETTING_KEYS.has(key) && setting(key) !== normalized) {
-    throw new Error(`Cannot change ${key} while live; switch to dry_run and approve a new snapshot`);
+    throw new Error(`Cannot change ${key} while live; switch to paper/dry_run and approve a new snapshot`);
   }
   db.prepare(`
     INSERT INTO settings (key, value) VALUES (?, ?)
@@ -91,7 +99,7 @@ export function allStrategies() {
 
 export function setActiveStrategy(id) {
   if (setting('trading_mode', 'dry_run') === 'live') {
-    throw new Error('Cannot change strategy while live; switch to dry_run first');
+    throw new Error('Cannot change strategy while live; switch to paper first');
   }
   db.transaction(() => {
     const target = db.prepare('SELECT id FROM strategies WHERE id = ?').get(id);
@@ -105,7 +113,7 @@ export function setActiveStrategy(id) {
 
 export function updateStrategyConfig(id, config) {
   if (setting('trading_mode', 'dry_run') === 'live') {
-    throw new Error('Cannot change strategy configuration while live; switch to dry_run first');
+    throw new Error('Cannot change strategy configuration while live; switch to paper first');
   }
   db.prepare('UPDATE strategies SET config_json = ? WHERE id = ?').run(JSON.stringify(config), id);
   if (strategyCache.id === id) {

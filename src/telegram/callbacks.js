@@ -16,11 +16,10 @@ import {
   strategyMenuText,
   strategyKeyboard,
 } from './menus.js';
-import { sendTelegram, sendBatch, sendPositionOpen } from './send.js';
+import { sendBatch, sendPositionOpen } from './send.js';
 import { candidateById, updateCandidateStatus } from '../db/candidates.js';
 import { storeDecision } from '../db/decisions.js';
-import { canOpenMorePositions, openPositionCount, incrementPendingPosition, decrementPendingPosition } from '../db/positions.js';
-import { executeLiveBuy, executeConfirmedIntent, rejectIntent } from '../execution/router.js';
+import { executeConfirmedIntent, rejectIntent } from '../execution/router.js';
 import { refreshCandidateForExecution } from '../execution/positions.js';
 import { sendCandidate, sendPosition, closePosition, updatePositionRule, toggleTrailing } from './commands.js';
 import { requestNumericFilterInput, requestStrategyNumericInput } from './input.js';
@@ -90,6 +89,8 @@ export async function handleCallback(query) {
   if (kind === 'input') return requestNumericFilterInput(query, id);
   if (kind === 'set') return updateSettingFromButton(query, id, value);
   if (kind === 'batch') return sendBatch(chatId, Number(id));
+  // Intent approval is the only Telegram path that may authorize a LIVE BUY.
+  // Old pending intent messages remain valid after the two-mode migration.
   if (kind === 'intent') {
     if (value === 'confirm') return executeConfirmedIntent(chatId, Number(id));
     if (value === 'reject') return rejectIntent(chatId, Number(id));
@@ -104,19 +105,21 @@ export async function handleCallback(query) {
     if (!row) return bot.sendMessage(chatId, 'Candidate not found.');
 
     const mode = configuredTradingMode();
-    if (mode === 'research') {
-      if (!canOpenResearchPosition()) {
-        return bot.sendMessage(chatId, `Research position limit reached (${openResearchPositionCount()}/${researchPositionCap()}).`);
-      }
-    } else if (!canOpenMorePositions()) {
-      return bot.sendMessage(chatId, `Execution position limit reached (${openPositionCount()}/${numSetting('max_open_positions', 3)}). Close a position or raise the limit.`);
+    if (mode === 'live') {
+      return bot.sendMessage(
+        chatId,
+        '🔐 Direct manual BUY is disabled in LIVE. Use the normal decision flow, then approve the generated LIVE trade intent. No transaction was signed or broadcast.',
+      );
+    }
+    if (!canOpenResearchPosition()) {
+      return bot.sendMessage(chatId, `Paper position limit reached (${openResearchPositionCount()}/${researchPositionCap()}).`);
     }
 
     const candidate = row.candidate;
     const decision = {
       verdict: 'BUY',
       confidence: 100,
-      reason: `Manual ${mode} test`,
+      reason: 'Manual paper test',
       risks: [],
       suggested_tp_percent: numSetting('default_tp_percent', 50),
       suggested_sl_percent: numSetting('default_sl_percent', -25),
@@ -124,32 +127,17 @@ export async function handleCallback(query) {
     const decisionId = storeDecision(row.id, candidate, decision);
     decision.id = decisionId;
 
-    if (mode === 'confirm') {
-      return bot.sendMessage(chatId, 'Manual test is disabled in Confirm mode. Use the normal decision flow and approve the generated trade intent.');
+    const freshRow = await refreshCandidateForExecution(row);
+    if (!freshRow.candidate.filters?.passed) {
+      return bot.sendMessage(chatId, `Manual paper test rejected by fresh safety check: ${(freshRow.candidate.filters?.failures || []).join('; ')}`);
     }
 
-    const reserveExecutionSlot = mode !== 'research';
-    if (reserveExecutionSlot) incrementPendingPosition();
-    try {
-      const freshRow = await refreshCandidateForExecution(row);
-      if (!freshRow.candidate.filters?.passed) {
-        return bot.sendMessage(chatId, `Manual ${mode} test rejected by fresh safety check: ${(freshRow.candidate.filters?.failures || []).join('; ')}`);
-      }
-
-      if (mode === 'research') {
-        const result = await executeResearchEntry(freshRow, decision, 'manual_research');
-        if (result?.isNew && result.id) {
-          await sendPositionOpen(result.id);
-          return result;
-        }
-        return bot.sendMessage(chatId, `Research entry not opened: ${result?.blockedBy || 'unknown reason'}.`);
-      }
-
-      await executeLiveBuy(freshRow, decision, 'manual', [freshRow], row.id);
-      return;
-    } finally {
-      if (reserveExecutionSlot) decrementPendingPosition();
+    const result = await executeResearchEntry(freshRow, decision, 'manual_paper');
+    if (result?.isNew && result.id) {
+      await sendPositionOpen(result.id);
+      return result;
     }
+    return bot.sendMessage(chatId, `Paper entry not opened: ${result?.blockedBy || 'unknown reason'}.`);
   }
   if (kind === 'tpsl') return sendTpSlDefaults(chatId, query);
   if (kind === 'pos') return sendPosition(chatId, Number(id), query);

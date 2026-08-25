@@ -10,10 +10,22 @@ import { openResearchPositionCount, researchPositionCap, researchReferenceNotion
 
 function modeMeta() {
   const mode = configuredTradingMode();
-  if (mode === 'live') return { key: 'live', icon: '🔴', name: 'LIVE', detail: 'Real funds', safety: 'Broadcast enabled' };
-  if (mode === 'confirm') return { key: 'confirm', icon: '🟠', name: 'CONFIRM', detail: 'Manual approval', safety: 'Broadcast only after approval' };
-  if (mode === 'shadow_live') return { key: 'shadow_live', icon: '🔵', name: 'SHADOW', detail: 'Wallet-aware pre-live verification', safety: 'Transaction simulation only; no broadcast' };
-  return { key: 'research', icon: '🟢', name: 'RESEARCH', detail: '0 SOL capital paper trading', safety: 'Real market quotes; no wallet, signing, or broadcast' };
+  if (mode === 'live') {
+    return {
+      key: 'live',
+      icon: '🔴',
+      name: 'LIVE',
+      detail: 'Real funds under owner-approved configuration',
+      safety: 'Every BUY requires owner approval; protective exits remain automatic',
+    };
+  }
+  return {
+    key: 'paper',
+    icon: '🟢',
+    name: 'PAPER',
+    detail: '0 SOL paper trading with real Solana market evidence',
+    safety: 'Executable quotes + realistic costs; no wallet, signing, or broadcast',
+  };
 }
 
 function enabledText(value) {
@@ -143,9 +155,9 @@ export function agentText() {
   const mode = modeMeta();
   const agentEnabled = boolSetting('agent_enabled', true);
   const llmReady = Boolean(strat.use_llm && ENABLE_LLM && LLM_API_KEY);
-  const researchOpen = openResearchPositionCount();
-  const researchMax = researchPositionCap();
-  const executionOpen = openPositionCount();
+  const paperOpen = openResearchPositionCount();
+  const paperMax = researchPositionCap();
+  const liveOpen = openPositionCount();
   return [
     '🤖 <b>Angel Execution Console</b>',
     '',
@@ -158,16 +170,18 @@ export function agentText() {
     `• Intelligence: <b>${llmReady ? 'LLM READY' : strat.use_llm ? 'LLM NOT CONFIGURED' : 'RULE-BASED'}</b>`,
     `• Confidence floor: ${fmtPct(strat.llm_min_confidence || numSetting('llm_min_confidence'))}`,
     '',
-    '<b>Research laboratory</b>',
+    '<b>Paper trading laboratory</b>',
     `• Real capital: <b>0 SOL</b>`,
-    `• Quote probe: ${fmtSol(researchReferenceNotionalSol())} SOL`,
-    `• Research positions: ${researchOpen}/${researchMax}`,
+    `• Executable quote probe: ${fmtSol(researchReferenceNotionalSol())} SOL`,
+    `• Paper positions: ${paperOpen}/${paperMax}`,
+    `• Simulates entry/exit friction, fees, TP/SL, trailing and partial TP`,
     '',
-    '<b>Capital execution envelope</b>',
+    '<b>Live capital envelope</b>',
     `• Strategy size: ${fmtSol(strat.position_size_sol)} SOL`,
-    `• Execution positions: ${executionOpen}/${strat.max_open_positions || '∞'}`,
+    `• Live positions: ${liveOpen}/${strat.max_open_positions || '∞'}`,
     `• TP / SL: ${fmtPct(strat.tp_percent)} / ${fmtPct(strat.sl_percent)}`,
     `• Trailing: ${strat.trailing_enabled ? fmtPct(strat.trailing_percent) : 'OFF'}`,
+    `• Entry authority: <b>OWNER APPROVAL PER BUY</b>`,
     '',
     '<b>Pipeline</b>',
     `• Candidate batch: ${numSetting('llm_candidate_pick_count', 10)}`,
@@ -181,11 +195,7 @@ export function agentKeyboard() {
       inline_keyboard: [
         [{ text: boolSetting('agent_enabled', true) ? '⏸ Pause Agent' : '▶️ Start Agent', callback_data: 'toggle:agent' }],
         [
-          { text: selectedModeLabel('research', 'Research'), callback_data: 'set:trading_mode:research' },
-          { text: selectedModeLabel('shadow_live', 'Shadow'), callback_data: 'set:trading_mode:shadow_live' },
-        ],
-        [
-          { text: selectedModeLabel('confirm', 'Confirm'), callback_data: 'set:trading_mode:confirm' },
+          { text: selectedModeLabel('paper', 'Paper'), callback_data: 'set:trading_mode:paper' },
           { text: selectedModeLabel('live', 'Live'), callback_data: 'set:trading_mode:live' },
         ],
         [
@@ -194,14 +204,14 @@ export function agentKeyboard() {
           { text: 'Probe .10', callback_data: 'set:research_notional_sol:0.1' },
         ],
         [
-          { text: 'Research 6', callback_data: 'set:research_max_open_positions:6' },
-          { text: 'Research 12', callback_data: 'set:research_max_open_positions:12' },
-          { text: 'Research 24', callback_data: 'set:research_max_open_positions:24' },
+          { text: 'Paper Max 6', callback_data: 'set:research_max_open_positions:6' },
+          { text: 'Paper Max 12', callback_data: 'set:research_max_open_positions:12' },
+          { text: 'Paper Max 24', callback_data: 'set:research_max_open_positions:24' },
         ],
         [
-          { text: 'Exec Max 1', callback_data: 'set:max_open_positions:1' },
-          { text: 'Exec Max 3', callback_data: 'set:max_open_positions:3' },
-          { text: 'Exec Max 5', callback_data: 'set:max_open_positions:5' },
+          { text: 'Live Max 1', callback_data: 'set:max_open_positions:1' },
+          { text: 'Live Max 3', callback_data: 'set:max_open_positions:3' },
+          { text: 'Live Max 5', callback_data: 'set:max_open_positions:5' },
         ],
         [
           { text: 'Batch 5', callback_data: 'set:llm_candidate_pick_count:5' },
@@ -235,13 +245,13 @@ export function mainMenuText() {
   const agentEnabled = boolSetting('agent_enabled', true);
   return [
     '👼 <b>ANGEL CONTROL CENTER</b>',
-    '<i>Solana autonomous trading system</i>',
+    '<i>Solana trading research + owner-controlled live execution</i>',
     '',
     `${mode.icon} Mode: <b>${mode.name}</b>`,
     `🤖 Agent: <b>${enabledText(agentEnabled)}</b>`,
     `🎯 Strategy: <b>${escapeHtml(strat.name)}</b>`,
-    `🧪 Research: <b>${openResearchPositionCount()}/${researchPositionCap()}</b> · Capital: <b>0 SOL</b>`,
-    `📍 Execution: <b>${openPositionCount()}/${strat.max_open_positions || '∞'}</b>`,
+    `🧪 Paper: <b>${openResearchPositionCount()}/${researchPositionCap()}</b> · Capital: <b>0 SOL</b>`,
+    `📍 Live: <b>${openPositionCount()}/${strat.max_open_positions || '∞'}</b>`,
     '',
     `🛡️ <i>${mode.safety}</i>`,
     '',
@@ -432,12 +442,11 @@ export function batchRevealButtons(batchId, rows, decision, triggerCandidateId =
 }
 
 export function positionButtons(positionId) {
-  const noBroadcast = modeMeta().key === 'research' || modeMeta().key === 'shadow_live';
   return {
     reply_markup: {
       inline_keyboard: [
         [
-          { text: noBroadcast ? '🧪 Close Simulation' : '🚪 Close Position', callback_data: `sell:${positionId}` },
+          { text: '🚪 Close Position', callback_data: `sell:${positionId}` },
           { text: '🔄 Refresh', callback_data: `pos:${positionId}` },
         ],
         [
@@ -459,7 +468,7 @@ export function intentButtons(intentId) {
     reply_markup: {
       inline_keyboard: [
         [
-          { text: '✅ Approve Buy', callback_data: `intent:${intentId}:confirm` },
+          { text: '✅ Approve LIVE Buy', callback_data: `intent:${intentId}:confirm` },
           { text: '✖ Reject', callback_data: `intent:${intentId}:reject` },
         ],
         [{ text: '📍 Positions', callback_data: 'menu:positions' }],

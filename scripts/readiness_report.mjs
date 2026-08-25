@@ -14,32 +14,31 @@ if (process.argv.includes('--json')) {
   process.exit(0);
 }
 
-const current = report.evaluation.currentStage;
-const research = report.evidence.research;
-const shadow = report.evidence.shadow;
+const gate = report.evaluation.paperToLiveConsideration || report.evaluation.currentStage;
+const paper = report.evidence.paper || report.evidence.research;
 const execution = report.evidence.execution;
 const safety = report.evidence.safety;
 
-console.log('Angel Pre-Live Readiness Engine V1');
-console.log('==================================');
+console.log('Angel Paper -> Live Readiness V2');
+console.log('================================');
 console.log(`Window: ${formatWindow(windowMs)}`);
-console.log(`Mode: ${report.currentMode}`);
-console.log(`Current gate: ${current.status} (${current.score}/100)`);
-console.log(`Hard blockers: ${current.hardBlockers.length}`);
+console.log(`Mode: ${String(report.currentMode || 'paper').toUpperCase()}`);
+console.log(`Gate: ${gate.status} (${gate.score}/100)`);
+console.log(`Hard blockers: ${gate.hardBlockers.length}`);
+console.log(`Warnings: ${gate.warnings.length}`);
 console.log('');
-console.log(`Research: N=${research.closedTrades}, expectancy=${research.expectancyR == null ? 'n/a' : research.expectancyR.toFixed(3)}R, PF=${research.profitFactorInfinite ? 'inf' : research.profitFactorR == null ? 'n/a' : research.profitFactorR.toFixed(2)}, maxDD=${research.maxDrawdownR.toFixed(2)}R`);
-console.log(`Execution: entry coverage=${execution.entryExecutionCoverage == null ? 'n/a' : (execution.entryExecutionCoverage * 100).toFixed(1) + '%'}, ExitV3=${execution.exitV3Coverage == null ? 'n/a' : (execution.exitV3Coverage * 100).toFixed(1) + '%'}, pending=${execution.pendingExitSettlements}`);
-console.log(`Shadow: N=${shadow.closedTrades}, expectancy=${shadow.expectancyR == null ? 'n/a' : shadow.expectancyR.toFixed(3)}R, PF=${shadow.profitFactorInfinite ? 'inf' : shadow.profitFactorR == null ? 'n/a' : shadow.profitFactorR.toFixed(2)}`);
+console.log(`Paper: N=${paper.closedTrades}, expectancy=${paper.expectancyR == null ? 'n/a' : paper.expectancyR.toFixed(3)}R, PF=${paper.profitFactorInfinite ? 'inf' : paper.profitFactorR == null ? 'n/a' : paper.profitFactorR.toFixed(2)}, maxDD=${Number(paper.maxDrawdownR || 0).toFixed(2)}R`);
+console.log(`Execution: entry coverage=${execution.entryExecutionCoverage == null ? 'n/a' : (execution.entryExecutionCoverage * 100).toFixed(1) + '%'}, realistic exit=${execution.exitV3Coverage == null ? 'n/a' : (execution.exitV3Coverage * 100).toFixed(1) + '%'}, pending=${execution.pendingExitSettlements}`);
 console.log(`Safety: blockers=${safety.blockerCount}, circuit=${safety.circuitOpen ? 'OPEN' : 'CLOSED'}, db=${safety.pragmaHealthy ? 'OK' : 'CHECK'}`);
-console.log('');
-console.log('Stage gates:');
-console.log(`- Research -> Shadow: ${report.evaluation.researchToShadow.status} (${report.evaluation.researchToShadow.score}/100)`);
-console.log(`- Shadow -> Confirm: ${report.evaluation.shadowToConfirm.status} (${report.evaluation.shadowToConfirm.score}/100)`);
-console.log(`- Confirm -> Live consideration: ${report.evaluation.confirmToLiveConsideration.status} (${report.evaluation.confirmToLiveConsideration.score}/100)`);
-if (current.hardBlockers.length) {
+if (gate.hardBlockers.length) {
   console.log('');
-  console.log('Current hard blockers:');
-  for (const blocker of current.hardBlockers) console.log(`- ${blocker.label}: ${blocker.value ?? 'n/a'} (${blocker.threshold ?? 'required'})`);
+  console.log('Hard blockers:');
+  for (const blocker of gate.hardBlockers) console.log(`- ${blocker.label}: ${blocker.value ?? 'n/a'} (${blocker.threshold ?? 'required'})`);
+}
+if (gate.warnings.length) {
+  console.log('');
+  console.log('Warnings:');
+  for (const warning of gate.warnings) console.log(`- ${warning.label}: ${warning.value ?? 'n/a'} (${warning.threshold ?? 'preferred'})`);
 }
 console.log('');
-console.log('Readiness is eligibility-only. It never authorizes or enables Live.');
+console.log('READY_FOR_LIVE_REVIEW is evidence eligibility only. Only the authenticated owner can authorize Live.');

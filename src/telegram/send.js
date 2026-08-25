@@ -87,11 +87,7 @@ export async function sendPositionOpen(positionId) {
   if (!position) return;
   const label = position.execution_mode === 'live'
     ? 'Live buy executed'
-    : position.execution_mode === 'research'
-      ? 'Zero-capital research opened'
-      : position.execution_mode === 'shadow_live'
-        ? 'Shadow-live verification opened'
-        : 'Dry-run buy stored';
+    : 'Paper position opened';
   const text = `✅ <b>${label}</b>\n\n${formatPosition(position)}`;
   let photoSent = false;
   try {
@@ -118,11 +114,7 @@ export async function sendPositionOpen(positionId) {
 export async function sendPositionExit(position) {
   const label = position?.execution_mode === 'live'
     ? 'Live exit'
-    : position?.execution_mode === 'research'
-      ? 'Research exit'
-      : position?.execution_mode === 'shadow_live'
-        ? 'Shadow-live exit'
-        : 'Dry-run exit';
+    : 'Paper exit';
   const text = `🏁 <b>${label}: ${escapeHtml(position.exitReason)}</b>\n\n${formatPosition({ ...position, status: 'closed' })}`;
   let photoSent = false;
   try {
@@ -147,11 +139,14 @@ export async function sendPositionExit(position) {
 
 export async function sendTradeIntent(intentId, candidate, decision, approvedSizeSol) {
   await sendTelegram([
-    '🧾 <b>Trade intent awaiting confirmation</b>',
+    '🔴 <b>LIVE BUY — OWNER APPROVAL REQUIRED</b>',
     '',
     candidateSummary(candidate, decision),
     '',
     `Maximum approved size: <b>${fmtSol(approvedSizeSol)} SOL</b>`,
-    'Execution: confirmation required before signing.',
+    'No transaction has been signed or broadcast yet.',
+    'If approved, Angel will run fresh safety checks again before signing.',
+    '',
+    '<i>TP / SL / trailing exits remain automatic after an approved entry.</i>',
   ].join('\n'), intentButtons(intentId));
 }

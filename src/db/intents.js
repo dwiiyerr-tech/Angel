@@ -2,8 +2,13 @@ import { db } from './connection.js';
 import { now, safeJson, json } from '../utils.js';
 import { numSetting } from './settings.js';
 
+function canonicalIntentMode(mode) {
+  return String(mode || '').toLowerCase() === 'confirm' ? 'live' : String(mode || 'paper').toLowerCase();
+}
+
 export function createTradeIntent(candidateId, candidate, decision, mode, status, side = 'buy', sizeSolOverride = null) {
   const sizeSol = Number.isFinite(Number(sizeSolOverride)) ? Number(sizeSolOverride) : numSetting('dry_run_buy_sol', 0.1);
+  const canonicalMode = canonicalIntentMode(mode);
   const result = db.prepare(`
     INSERT INTO trade_intents (
       candidate_id, mint, mode, status, created_at_ms, updated_at_ms, side,
@@ -12,7 +17,7 @@ export function createTradeIntent(candidateId, candidate, decision, mode, status
   `).run(
     candidateId,
     candidate.token.mint,
-    mode,
+    canonicalMode,
     status,
     now(),
     now(),
@@ -21,7 +26,7 @@ export function createTradeIntent(candidateId, candidate, decision, mode, status
     decision.confidence,
     decision.reason,
     decision.id || null,
-    json({ candidate, decision, mode, status, approved_size_sol: sizeSol }),
+    json({ candidate, decision, mode: canonicalMode, status, approved_size_sol: sizeSol }),
   );
   return Number(result.lastInsertRowid);
 }

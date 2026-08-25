@@ -214,7 +214,7 @@ export function evaluateActiveRollback(version = null) {
   let baselineR = null;
   try {
     const evidence = JSON.parse(active.evidence_json || '{}');
-    baselineR = finite(evidence?.research?.expectancyR);
+    baselineR = finite(evidence?.paper?.expectancyR ?? evidence?.research?.expectancyR);
   } catch {}
   const minSample = Math.max(20, Math.floor(numSetting('control_plane_rollback_min_sample', 30)));
   const absoluteFloor = numSetting('control_plane_rollback_floor_r', -0.30);
@@ -238,7 +238,7 @@ export function evaluateActiveRollback(version = null) {
 
 export function runAutomaticRollbackCheck() {
   const mode = configuredTradingMode();
-  if (!['research', 'shadow_live'].includes(mode)) return { rolledBack: false, reason: 'deferred_outside_no_broadcast_mode' };
+  if (mode !== 'paper') return { rolledBack: false, reason: 'deferred_outside_paper_mode' };
   const evaluation = evaluateActiveRollback();
   if (!evaluation.shouldRollback) return { rolledBack: false, evaluation };
   const reason = `automatic performance rollback: sample=${evaluation.sample}, expectancy=${Number(evaluation.expectancyR).toFixed(2)}R, baseline=${evaluation.baselineR == null ? 'n/a' : `${Number(evaluation.baselineR).toFixed(2)}R`}`;

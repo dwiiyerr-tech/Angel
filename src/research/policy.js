@@ -1,47 +1,72 @@
 import { setting } from '../db/settings.js';
 
-const RESEARCH_ALIASES = new Set(['dry_run', 'dry-run', 'simulation', 'research']);
-const MONEY_GRADE_MODES = new Set(['shadow_live', 'confirm', 'live']);
+// Angel exposes exactly two trading modes: PAPER and LIVE.
+// Old names stay accepted only as migration aliases so existing databases and
+// historical tooling cannot accidentally create a third/fourth runtime mode.
+const PAPER_ALIASES = new Set([
+  'paper',
+  'paper_trading',
+  'dry_run',
+  'dry-run',
+  'simulation',
+  'research',
+  'shadow',
+  'shadow_live',
+]);
+const LIVE_ALIASES = new Set(['confirm', 'live']);
 
 export function normalizeConfiguredMode(value = 'dry_run') {
   const normalized = String(value || 'dry_run').trim().toLowerCase();
-  if (RESEARCH_ALIASES.has(normalized)) return 'research';
-  if (MONEY_GRADE_MODES.has(normalized)) return normalized;
-  return 'research';
+  if (LIVE_ALIASES.has(normalized)) return 'live';
+  if (PAPER_ALIASES.has(normalized)) return 'paper';
+  return 'paper';
 }
 
 export function configuredTradingMode() {
   return normalizeConfiguredMode(setting('trading_mode', 'dry_run'));
 }
 
-export function isResearchSimulationMode(value = null) {
-  return normalizeConfiguredMode(value == null ? setting('trading_mode', 'dry_run') : value) === 'research';
+export function isPaperTradingMode(value = null) {
+  return normalizeConfiguredMode(value == null ? setting('trading_mode', 'dry_run') : value) === 'paper';
 }
 
-export function isPreLiveShadowMode(value = null) {
-  return normalizeConfiguredMode(value == null ? setting('trading_mode', 'dry_run') : value) === 'shadow_live';
+// Compatibility name used throughout the existing Research execution engine.
+// Research is now the implementation of PAPER, not a separate user-facing mode.
+export function isResearchSimulationMode(value = null) {
+  return isPaperTradingMode(value);
+}
+
+// Shadow is retired as a selectable mode. Keep the export temporarily so old
+// imports remain source-compatible while returning canonical two-mode semantics.
+export function isPreLiveShadowMode() {
+  return false;
 }
 
 export function requiresMoneyGradeEvidence(value = null) {
-  const mode = normalizeConfiguredMode(value == null ? setting('trading_mode', 'dry_run') : value);
-  return MONEY_GRADE_MODES.has(mode);
+  return normalizeConfiguredMode(value == null ? setting('trading_mode', 'dry_run') : value) === 'live';
 }
 
 export function isRealMoneyMode(value = null) {
-  const mode = normalizeConfiguredMode(value == null ? setting('trading_mode', 'dry_run') : value);
-  return mode === 'confirm' || mode === 'live';
+  return normalizeConfiguredMode(value == null ? setting('trading_mode', 'dry_run') : value) === 'live';
 }
 
 export function modeCapabilities(value = null) {
   const mode = normalizeConfiguredMode(value == null ? setting('trading_mode', 'dry_run') : value);
-  const realMoney = mode === 'confirm' || mode === 'live';
+  const live = mode === 'live';
   return {
     mode,
-    research: mode === 'research',
-    walletRequired: mode === 'shadow_live' || realMoney,
-    broadcastAllowed: realMoney,
-    perTradeConfirmationRequired: mode === 'confirm',
-    autonomousBroadcastAllowed: mode === 'live',
-    moneyGradeEvidence: MONEY_GRADE_MODES.has(mode),
+    paper: !live,
+    live,
+    // Compatibility field for Research engine/report code.
+    research: !live,
+    walletRequired: live,
+    broadcastAllowed: live,
+    // Every LIVE entry is owner-confirmed. Protective exits (TP/SL/trailing)
+    // remain automatic after an approved entry so risk controls cannot stall.
+    perTradeConfirmationRequired: live,
+    autonomousBroadcastAllowed: false,
+    protectiveExitBroadcastAllowed: live,
+    moneyGradeEvidence: live,
+    ownerApprovalRequired: live,
   };
 }
