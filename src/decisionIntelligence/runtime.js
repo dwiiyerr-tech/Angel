@@ -1,6 +1,5 @@
 import { JUPITER_SLIPPAGE_BPS } from '../config.js';
 import { db } from '../db/connection.js';
-import { fetchTokenExitQuote } from '../enrichment/jupiter.js';
 import {
   fetchResearchEntryExecutionProfile,
 } from '../research/executionCost.js';
@@ -8,6 +7,7 @@ import { researchReferenceNotionalSol } from '../research/engine.js';
 import { initialRiskSol } from '../research/rr.js';
 import { ensureResearchSchema } from '../research/schema.js';
 import { now } from '../utils.js';
+import { fetchDecisionEntryQuote, fetchDecisionExitQuote } from './jupiterProbe.js';
 import { ensureDecisionIntelligenceSchema } from './schema.js';
 
 const activeReceipts = new Set();
@@ -138,6 +138,8 @@ export async function processDecisionProbe(receiptId) {
       decimals,
       referencePriceUsd: snapshot.metrics?.priceUsd,
       referenceMcapUsd: snapshot.metrics?.marketCapUsd,
+      quoteFn: fetchDecisionEntryQuote,
+      exitQuoteFn: fetchDecisionExitQuote,
     });
     const completedAtMs = now();
     const fill = profile.fillQuote;
@@ -166,6 +168,7 @@ export async function processDecisionProbe(receiptId) {
       JUPITER_SLIPPAGE_BPS,
       JSON.stringify({
         ...profile,
+        quotePriority: 'enrichment',
         source: 'decision_counterfactual_probe',
         decisionToProbeMs: Math.max(0, startedAtMs - Number(receipt.created_at_ms || startedAtMs)),
       }),
@@ -221,7 +224,7 @@ export async function processDueDecisionObservation(observationId) {
   if (Number(row.due_at_ms) > now() || row.probe_status !== 'ready') return false;
 
   try {
-    const quote = await fetchTokenExitQuote(row.mint, row.token_amount_raw);
+    const quote = await fetchDecisionExitQuote(row.mint, row.token_amount_raw);
     if (!quote || !Number.isFinite(Number(quote.outSol))) throw new Error('counterfactual exit quote unavailable');
     const observedAtMs = now();
     const economics = economicsForObservation(row, row, Number(quote.outSol));
