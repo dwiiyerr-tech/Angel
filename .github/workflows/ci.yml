@@ -73,6 +73,11 @@ jobs:
           DB_PATH: /tmp/angel-decision-intelligence-report.sqlite
         run: npm run decision:report
 
+      - name: Pre-Live readiness report smoke test
+        env:
+          DB_PATH: /tmp/angel-prelive-readiness-report.sqlite
+        run: npm run readiness:report -- 7d --json
+
   python-syntax:
     name: Python syntax
     runs-on: ubuntu-latest
