@@ -2,6 +2,8 @@ import { db } from './connection.js';
 import { now, safeJson, json } from '../utils.js';
 import { numSetting } from './settings.js';
 import { recordChallengerObservation } from '../controlPlane/challenger.js';
+import { createDecisionReceipt } from '../decisionIntelligence/receipt.js';
+import { scheduleDecisionReceipt } from '../decisionIntelligence/runtime.js';
 
 export function storeDecision(candidateId, candidate, decision) {
   const result = db.prepare(`
@@ -18,6 +20,17 @@ export function storeDecision(candidateId, candidate, decision) {
     json(decision),
     json(decision.learning_lesson_ids || []),
   );
+  const decisionId = Number(result.lastInsertRowid);
+
+  // Every canonical BUY/WATCH/PASS gets an immutable decision-time receipt.
+  // Decision Intelligence is evidence-only: a receipt/probe failure must never
+  // mutate or veto the trading decision that was already stored above.
+  try {
+    const receipt = createDecisionReceipt({ decisionId, candidateId, candidate, decision });
+    if (receipt) scheduleDecisionReceipt(receipt.id);
+  } catch (error) {
+    console.warn(`[decision-intel] receipt degraded for decision #${decisionId}: ${error.message}`);
+  }
   
   // FIX #1: Cache WATCH/PASS decisions to prevent redundant LLM calls
   if (decision.verdict === 'WATCH' || decision.verdict === 'PASS') {
@@ -49,7 +62,7 @@ export function storeDecision(candidateId, candidate, decision) {
     console.warn(`[control-plane] challenger observation degraded: ${error.message}`);
   }
   
-  return Number(result.lastInsertRowid);
+  return decisionId;
 }
 
 export function storeBatchDecision(triggerCandidateId, rows, batchDecision) {
