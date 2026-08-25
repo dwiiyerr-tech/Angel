@@ -7,6 +7,7 @@ function safeJson(value, fallback = null) {
 }
 
 function finite(value) {
+  if (value === null || value === undefined || value === '') return null;
   const n = Number(value);
   return Number.isFinite(n) ? n : null;
 }
@@ -80,16 +81,16 @@ export function formatDecisionReceiptHtml(details) {
   const executionLines = probeReady ? [
     `Probe: <b>READY</b> · Notional: ${fmtSol(probe.sim_notional_sol)} SOL`,
     `Decision→probe: ${fmtMs(probe.decision_to_probe_ms)} · quote→fill: ${fmtMs(probe.quote_to_fill_latency_ms)}`,
-    `Quote deterioration: ${fmtPct(probe.quote_deterioration_pct)} · roundtrip spread: ${fmtPct(probe.roundtrip_spread_pct)}`,
-    `Size impact: ${fmtPct(probe.size_impact_pct)} · slippage tolerance: ${Number(probe.slippage_tolerance_bps || 0)} bps`,
-    `Modeled fees: entry ${fmtSol(probe.entry_fee_sol)} · exit ${fmtSol(probe.expected_exit_fee_sol)} SOL`,
+    `Quote deterioration: ${finite(probe.quote_deterioration_pct) == null ? '—' : fmtPct(probe.quote_deterioration_pct)} · roundtrip spread: ${finite(probe.roundtrip_spread_pct) == null ? '—' : fmtPct(probe.roundtrip_spread_pct)}`,
+    `Size impact: ${finite(probe.size_impact_pct) == null ? '—' : fmtPct(probe.size_impact_pct)} · slippage tolerance: ${finite(probe.slippage_tolerance_bps) == null ? '—' : `${Number(probe.slippage_tolerance_bps)} bps`}`,
+    `Modeled fees: entry ${finite(probe.entry_fee_sol) == null ? '—' : `${fmtSol(probe.entry_fee_sol)} SOL`} · exit ${finite(probe.expected_exit_fee_sol) == null ? '—' : `${fmtSol(probe.expected_exit_fee_sol)} SOL`}`,
   ] : [
     `Probe: <b>${escapeHtml(String(probe?.status || 'missing').toUpperCase())}</b>${probe?.error ? ` · ${escapeHtml(String(probe.error).slice(0, 180))}` : ''}`,
   ];
 
   const observationLines = observations.map(row => {
     if (row.status === 'ready') {
-      return `${horizonLabel(row.horizon_ms)}: ${fmtR(row.r_multiple)} · ${fmtPct(row.pnl_percent)} · exit ${fmtSol(row.out_sol)} SOL`;
+      return `${horizonLabel(row.horizon_ms)}: ${fmtR(row.r_multiple)} · ${finite(row.pnl_percent) == null ? '—' : fmtPct(row.pnl_percent)} · exit ${finite(row.out_sol) == null ? '—' : `${fmtSol(row.out_sol)} SOL`}`;
     }
     return `${horizonLabel(row.horizon_ms)}: ${escapeHtml(String(row.status))}${row.error ? ` (${escapeHtml(String(row.error).slice(0, 80))})` : ''}`;
   });
@@ -97,7 +98,7 @@ export function formatDecisionReceiptHtml(details) {
   return [
     `🧾 <b>ANGEL DECISION RECEIPT #${receipt.id}</b>`,
     '',
-    `Decision: <b>${escapeHtml(receipt.verdict)}</b> · Confidence: <b>${fmtPct(receipt.confidence)}</b>`,
+    `Decision: <b>${escapeHtml(receipt.verdict)}</b> · Confidence: <b>${finite(receipt.confidence) == null ? '—' : fmtPct(receipt.confidence)}</b>`,
     `Mode: <b>${escapeHtml(receipt.mode)}</b> · Source: <b>${escapeHtml(source)}</b>`,
     `Route: <b>${escapeHtml(receipt.route || 'unknown')}</b>`,
     `Token: <b>${escapeHtml(snapshot.token?.symbol || snapshot.token?.name || short(receipt.mint))}</b> · <code>${escapeHtml(receipt.mint)}</code>`,
@@ -105,7 +106,7 @@ export function formatDecisionReceiptHtml(details) {
     '',
     '<b>Decision-time market</b>',
     `Mcap: ${fmtUsd(metrics.marketCapUsd)} · Liq: ${fmtUsd(metrics.liquidityUsd)} · Holders: ${metrics.holderCount ?? '?'}`,
-    `Top20: ${fmtPct(snapshot.holders?.top20Percent)} · Max holder: ${fmtPct(snapshot.holders?.maxHolderPercent)}`,
+    `Top20: ${finite(snapshot.holders?.top20Percent) == null ? '—' : fmtPct(snapshot.holders.top20Percent)} · Max holder: ${finite(snapshot.holders?.maxHolderPercent) == null ? '—' : fmtPct(snapshot.holders.maxHolderPercent)}`,
     '',
     '<b>Safety / Edge</b>',
     `Contract Safety: <b>${safetyLabel}</b>`,
@@ -115,7 +116,7 @@ export function formatDecisionReceiptHtml(details) {
     `Combined opportunity: ${fmtProbability(combined.opportunityProbability)} · evidence: ${escapeHtml(combined.evidenceQuality || 'LOW')}`,
     '',
     '<b>Risk plan</b>',
-    `TP: ${fmtPct(receipt.planned_tp_percent)} · SL: ${fmtPct(receipt.planned_sl_percent)} · Planned R:R: ${finite(receipt.planned_rr) == null ? '—' : `1:${Number(receipt.planned_rr).toFixed(2)}`}`,
+    `TP: ${finite(receipt.planned_tp_percent) == null ? '—' : fmtPct(receipt.planned_tp_percent)} · SL: ${finite(receipt.planned_sl_percent) == null ? '—' : fmtPct(receipt.planned_sl_percent)} · Planned R:R: ${finite(receipt.planned_rr) == null ? '—' : `1:${Number(receipt.planned_rr).toFixed(2)}`}`,
     '',
     '<b>Executable market probe</b>',
     ...executionLines,
@@ -129,13 +130,17 @@ export function formatDecisionReceiptHtml(details) {
   ].filter(Boolean).join('\n');
 }
 
+function cleanNumbers(values) {
+  return values.map(finite).filter(value => value != null);
+}
+
 function mean(values) {
-  const clean = values.map(Number).filter(Number.isFinite);
+  const clean = cleanNumbers(values);
   return clean.length ? clean.reduce((sum, value) => sum + value, 0) / clean.length : null;
 }
 
 function median(values) {
-  const clean = values.map(Number).filter(Number.isFinite).sort((a, b) => a - b);
+  const clean = cleanNumbers(values).sort((a, b) => a - b);
   if (!clean.length) return null;
   const mid = Math.floor(clean.length / 2);
   return clean.length % 2 ? clean[mid] : (clean[mid - 1] + clean[mid]) / 2;
@@ -165,11 +170,13 @@ export function decisionIntelligenceSummary(windowMs = 24 * 60 * 60 * 1000) {
     if (!routes.has(key)) routes.set(key, { route: key, count: 0, outcomes: 0, finalR: [], mfeR: [], missedRunners: 0 });
     const bucket = routes.get(key);
     bucket.count += 1;
-    if (Number.isFinite(Number(row.final_r))) {
+    const finalR = finite(row.final_r);
+    if (finalR != null) {
       bucket.outcomes += 1;
-      bucket.finalR.push(Number(row.final_r));
+      bucket.finalR.push(finalR);
     }
-    if (Number.isFinite(Number(row.sampled_mfe_r))) bucket.mfeR.push(Number(row.sampled_mfe_r));
+    const mfeR = finite(row.sampled_mfe_r);
+    if (mfeR != null) bucket.mfeR.push(mfeR);
     if (['FALSE_NEGATIVE_RUNNER', 'WATCH_MISSED_RUNNER'].includes(row.classification)) bucket.missedRunners += 1;
   }
 
