@@ -36,27 +36,18 @@ import { approveLiveConfigSnapshot, approvedLiveConfig, createLiveConfigSnapshot
 import { configuredTradingMode } from '../research/policy.js';
 import { recordResearchObservation } from '../research/engine.js';
 
-const NO_BROADCAST_MODES = new Set(['research', 'shadow_live']);
+const NO_BROADCAST_MODES = new Set(['paper']);
 
 function isNoBroadcastMode() {
   return NO_BROADCAST_MODES.has(configuredTradingMode());
 }
 
 function publicTradingMode() {
-  const mode = configuredTradingMode();
-  if (mode === 'research') return 'RESEARCH';
-  if (mode === 'shadow_live') return 'SHADOW';
-  if (mode === 'confirm') return 'CONFIRM';
-  if (mode === 'live') return 'LIVE';
-  return 'RESEARCH';
+  return configuredTradingMode() === 'live' ? 'LIVE' : 'PAPER';
 }
 
 function publicTradingModeIcon() {
-  const mode = publicTradingMode();
-  if (mode === 'LIVE') return '🔴';
-  if (mode === 'CONFIRM') return '🟠';
-  if (mode === 'SHADOW') return '🔵';
-  return '🟢';
+  return publicTradingMode() === 'LIVE' ? '🔴' : '🟢';
 }
 
 export async function handleMessage(msg) {
@@ -180,7 +171,7 @@ export async function handleMessage(msg) {
     const [, actionOrId, checksum] = text.split(/\s+/);
     if (actionOrId === 'create') {
       if (!isNoBroadcastMode()) {
-        return bot.sendMessage(chatId, '🛡️ Switch to Research or Shadow before creating a Live approval snapshot.');
+        return bot.sendMessage(chatId, '🛡️ Switch to PAPER before creating a new Live approval snapshot.');
       }
       const snapshot = createLiveConfigSnapshot();
       return bot.sendMessage(chatId, [
@@ -192,7 +183,7 @@ export async function handleMessage(msg) {
         'Review the configuration carefully, then approve with:',
         `<code>/liveapprove ${snapshot.id} ${snapshot.checksum}</code>`,
         '',
-        '<i>Creating this snapshot does not enable Live mode.</i>',
+        '<i>Creating or approving this snapshot does not itself switch Angel into LIVE mode.</i>',
       ].join('\n'), { parse_mode: 'HTML' });
     }
     const id = Number(actionOrId);
@@ -201,19 +192,19 @@ export async function handleMessage(msg) {
     }
     try {
       const approved = approveLiveConfigSnapshot(id, checksum);
-      return bot.sendMessage(chatId, `✅ Live safety snapshot #${approved.id} approved. Live/Confirm execution may be enabled only while this checksum remains unchanged.`);
+      return bot.sendMessage(chatId, `✅ Live safety snapshot #${approved.id} approved. LIVE may be enabled only while this checksum remains unchanged and all Safety gates pass.`);
     } catch (error) {
       return bot.sendMessage(chatId, `❌ Approval failed: ${error.message}`);
     }
   }
   if (text.startsWith('/circuitreset')) {
     if (!isNoBroadcastMode()) {
-      return bot.sendMessage(chatId, '🛡️ Circuit breaker reset is allowed only in Research or Shadow no-broadcast mode.');
+      return bot.sendMessage(chatId, '🛡️ Circuit breaker reset is allowed only in PAPER mode.');
     }
     const unresolved = db.prepare("SELECT count(*) AS count FROM execution_operations WHERE status IN ('pending', 'outcome_unknown')").get().count;
     if (unresolved > 0) return bot.sendMessage(chatId, `Cannot reset: ${unresolved} unresolved execution(s). Reconcile them first.`);
     setSetting('live_circuit_breaker_open', 'false');
-    return bot.sendMessage(chatId, '✅ Circuit breaker reset in no-broadcast mode. Create and approve a fresh Live snapshot before enabling Confirm/Live execution.');
+    return bot.sendMessage(chatId, '✅ Circuit breaker reset in PAPER mode. Create and approve a fresh Live snapshot before enabling LIVE.');
   }
   const command = commandName(text);
   if (command === '/learn') {
@@ -307,16 +298,19 @@ export async function handleMessage(msg) {
     let normalizedValue = value === 'off' ? '0' : value;
     if (key === 'trading_mode') {
       const aliases = new Map([
-        ['dry_run', 'research'],
-        ['simulation', 'research'],
-        ['research', 'research'],
-        ['shadow', 'shadow_live'],
-        ['shadow_live', 'shadow_live'],
-        ['confirm', 'confirm'],
+        ['paper', 'paper'],
+        ['paper_trading', 'paper'],
+        ['dry_run', 'paper'],
+        ['dry-run', 'paper'],
+        ['simulation', 'paper'],
+        ['research', 'paper'],
+        ['shadow', 'paper'],
+        ['shadow_live', 'paper'],
+        ['confirm', 'live'],
         ['live', 'live'],
       ]);
       normalizedValue = aliases.get(String(value).toLowerCase());
-      if (!normalizedValue) return bot.sendMessage(chatId, 'Trading mode must be: research, shadow_live, confirm, or live.');
+      if (!normalizedValue) return bot.sendMessage(chatId, 'Trading mode must be: paper or live.');
     }
     setSetting(key, normalizedValue);
     return bot.sendMessage(chatId, key === 'trading_mode' ? agentText() : filtersText(), {
@@ -400,11 +394,7 @@ export async function closePosition(chatId, id, reason) {
 
   const label = row.execution_mode === 'live'
     ? '🔴 Live position closed'
-    : row.execution_mode === 'research'
-      ? '🧪 Research position closed (0 SOL capital)'
-      : row.execution_mode === 'shadow_live'
-        ? '🔵 Shadow position closed'
-        : '🧪 Simulation position closed';
+    : '🧪 Paper position closed (0 SOL capital)';
   await bot.sendMessage(chatId, `${label} #${id}: ${escapeHtml(reason)} · ${fmtPct(pnlPercent)}`, { parse_mode: 'HTML' });
 }
 
@@ -467,7 +457,7 @@ export function setupTelegram() {
     { command: 'livestatus', description: 'Show Live safety controls' },
     { command: 'liveapprove', description: 'Create or approve a Live snapshot' },
     { command: 'executions', description: 'Show durable execution ledger' },
-    { command: 'circuitreset', description: 'Reset circuit breaker in a no-broadcast mode' },
+    { command: 'circuitreset', description: 'Reset circuit breaker in PAPER mode' },
     { command: 'mutations', description: 'Show legacy mutation audit records' },
     { command: 'lessonapprove', description: 'Approve a learning lesson' },
     { command: 'lessonreject', description: 'Reject a learning lesson' },
