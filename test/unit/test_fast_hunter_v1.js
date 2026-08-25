@@ -20,21 +20,26 @@ assert.equal(isFastHunterRoute('trending'), false);
 assert.equal(isFastHunterRoute('trenches_completed'), false);
 
 setSetting('research_fast_hunter_enabled', 'true');
-setSetting('trading_mode', 'dry_run');
+setSetting('trading_mode', 'paper');
 assert.equal(isFastHunterSignal({ route: 'pumpportal_graduated' }), true);
 assert.equal(isFastHunterSignal({ route: 'pumpfun_pregrad' }), true);
 assert.equal(isFastHunterSignal({ route: 'trending' }), false);
 
+// Legacy Shadow is now a PAPER migration alias, so it must preserve the same
+// zero-capital Fast Hunter behavior rather than creating a hidden third mode.
 setSetting('trading_mode', 'shadow_live');
-assert.equal(isFastHunterSignal({ route: 'pumpportal_graduated' }), false, 'Shadow must stay on the full pipeline');
-setSetting('trading_mode', 'confirm');
-assert.equal(isFastHunterSignal({ route: 'pumpfun_pregrad' }), false, 'Confirm must stay on the full pipeline');
+assert.equal(isFastHunterSignal({ route: 'pumpportal_graduated' }), true, 'Legacy Shadow alias must collapse to PAPER');
 
-// Live is intentionally not set here: setSetting('trading_mode', 'live') is
-// guarded by the existing approved-config snapshot invariant. The dedicated
-// live safety tests own that authorization path; Fast Hunter only needs to prove
-// that non-Research money-grade modes cannot select its route.
-setSetting('trading_mode', 'dry_run');
+// Test-only raw storage switch: LIVE normally requires an approved config
+// snapshot through setSetting(). This assertion only verifies Fast Hunter route
+// selection cannot run in canonical LIVE.
+db.prepare(`
+  INSERT INTO settings (key, value) VALUES ('trading_mode', 'live')
+  ON CONFLICT(key) DO UPDATE SET value = 'live'
+`).run();
+assert.equal(isFastHunterSignal({ route: 'pumpfun_pregrad' }), false, 'Fast Hunter must never open LIVE entries');
+
+setSetting('trading_mode', 'paper');
 setSetting('research_fast_hunter_enabled', 'false');
 assert.equal(isFastHunterSignal({ route: 'pumpportal_graduated' }), false, 'Fast Hunter can be disabled without changing route code');
 
@@ -58,4 +63,4 @@ for (const expected of [
   assert.equal(columns.has(expected), true, `missing fast-hunter telemetry column ${expected}`);
 }
 
-console.log('[test_fast_hunter_v1] PASS');
+console.log('[test_fast_hunter_v1] PASS: Fast Hunter is PAPER-only under two-mode semantics');
