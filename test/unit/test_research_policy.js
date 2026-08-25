@@ -42,6 +42,7 @@ assert.deepEqual(modeCapabilities('paper'), {
   broadcastAllowed: false,
   perTradeConfirmationRequired: false,
   autonomousBroadcastAllowed: false,
+  protectiveExitBroadcastAllowed: false,
   moneyGradeEvidence: false,
   ownerApprovalRequired: false,
 });
@@ -54,11 +55,12 @@ assert.deepEqual(modeCapabilities('live'), {
   research: false,
   walletRequired: true,
   broadcastAllowed: true,
-  perTradeConfirmationRequired: false,
-  autonomousBroadcastAllowed: true,
+  perTradeConfirmationRequired: true,
+  autonomousBroadcastAllowed: false,
+  protectiveExitBroadcastAllowed: true,
   moneyGradeEvidence: true,
   ownerApprovalRequired: true,
 });
 assert.deepEqual(modeCapabilities('confirm'), modeCapabilities('live'));
 
-console.log('[two-mode-policy] PAPER/LIVE canonical modes and legacy alias collapse verified');
+console.log('[two-mode-policy] PAPER/LIVE canonical modes and owner-approved LIVE entry verified');
