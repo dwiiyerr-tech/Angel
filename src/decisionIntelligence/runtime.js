@@ -6,6 +6,7 @@ import {
 } from '../research/executionCost.js';
 import { researchReferenceNotionalSol } from '../research/engine.js';
 import { initialRiskSol } from '../research/rr.js';
+import { ensureResearchSchema } from '../research/schema.js';
 import { now } from '../utils.js';
 import { ensureDecisionIntelligenceSchema } from './schema.js';
 
@@ -24,7 +25,7 @@ function boundedRetryAt(attempts) {
 function probeForReceipt(receiptId) {
   return db.prepare(`
     SELECT r.*, p.status AS probe_status, p.attempt_count AS probe_attempt_count,
-           p.requested_at_ms, p.position_id AS probe_position_id
+           p.requested_at_ms, p.next_retry_at_ms, p.position_id AS probe_position_id
     FROM decision_receipts r
     JOIN decision_execution_probes p ON p.receipt_id = r.id
     WHERE r.id = ?
@@ -77,11 +78,20 @@ function copyPositionExecutionProfile(receipt, position) {
   return true;
 }
 
+function markProbeTerminal(receiptId, errorMessage) {
+  db.prepare(`
+    UPDATE decision_outcome_observations
+    SET status = 'failed', error = COALESCE(error, ?)
+    WHERE receipt_id = ? AND status IN ('pending', 'degraded')
+  `).run(`entry_probe_failed:${errorMessage}`, receiptId);
+}
+
 export async function processDecisionProbe(receiptId) {
+  ensureResearchSchema();
   ensureDecisionIntelligenceSchema();
   if (activeReceipts.has(Number(receiptId))) return false;
   const receipt = probeForReceipt(receiptId);
-  if (!receipt || receipt.mode !== 'research' || !['pending', 'degraded'].includes(receipt.probe_status)) return false;
+  if (!receipt || receipt.mode !== 'research' || !['pending', 'running', 'degraded'].includes(receipt.probe_status)) return false;
   if (receipt.next_retry_at_ms && Number(receipt.next_retry_at_ms) > now()) return false;
 
   activeReceipts.add(Number(receiptId));
@@ -96,7 +106,7 @@ export async function processDecisionProbe(receiptId) {
     if (receipt.verdict === 'BUY' && ageMs < 15_000) {
       db.prepare(`
         UPDATE decision_execution_probes
-        SET next_retry_at_ms = ?, error = 'awaiting_research_position_profile'
+        SET status = 'pending', next_retry_at_ms = ?, error = 'awaiting_research_position_profile'
         WHERE receipt_id = ?
       `).run(now() + 5_000, receipt.id);
       return false;
@@ -111,7 +121,7 @@ export async function processDecisionProbe(receiptId) {
     const startedAtMs = now();
     db.prepare(`
       UPDATE decision_execution_probes
-      SET status = 'running', started_at_ms = ?, attempt_count = attempt_count + 1,
+      SET status = 'running', started_at_ms = COALESCE(started_at_ms, ?), attempt_count = attempt_count + 1,
           next_retry_at_ms = NULL, error = NULL
       WHERE receipt_id = ?
     `).run(startedAtMs, receipt.id);
@@ -131,7 +141,8 @@ export async function processDecisionProbe(receiptId) {
           token_amount_raw = ?, entry_effective_price_usd = ?, entry_effective_mcap_usd = ?,
           quote_to_fill_latency_ms = ?, decision_to_probe_ms = ?, quote_deterioration_pct = ?,
           roundtrip_spread_pct = ?, size_impact_pct = ?, entry_fee_sol = ?,
-          expected_exit_fee_sol = ?, slippage_tolerance_bps = ?, profile_json = ?, error = NULL
+          expected_exit_fee_sol = ?, slippage_tolerance_bps = ?, profile_json = ?, error = NULL,
+          next_retry_at_ms = NULL
       WHERE receipt_id = ?
     `).run(
       completedAtMs,
@@ -164,6 +175,7 @@ export async function processDecisionProbe(receiptId) {
       SET status = ?, next_retry_at_ms = ?, error = ?
       WHERE receipt_id = ?
     `).run(terminal ? 'failed' : 'degraded', terminal ? null : boundedRetryAt(attempts), error.message, receipt.id);
+    if (terminal) markProbeTerminal(receipt.id, error.message);
     console.warn(`[decision-intel] probe #${receipt.id} ${terminal ? 'failed' : 'degraded'}: ${error.message}`);
     return false;
   } finally {
@@ -309,6 +321,10 @@ export function finalizeDecisionOutcomeIfReady(receiptId) {
 }
 
 export function scheduleDecisionReceipt(receiptId) {
+  // Unit tests and module imports do not start the runtime; keeping scheduling
+  // behind this flag prevents hidden network timers while retaining durable
+  // pending rows that the production sweeper will pick up after startup.
+  if (!runtimeStarted) return;
   const receipt = db.prepare('SELECT verdict, mode FROM decision_receipts WHERE id = ?').get(Number(receiptId));
   if (!receipt || receipt.mode !== 'research') return;
   const delayMs = receipt.verdict === 'BUY' ? 8_000 : 750;
@@ -318,11 +334,12 @@ export function scheduleDecisionReceipt(receiptId) {
 }
 
 export async function runDecisionIntelligenceCycle() {
+  ensureResearchSchema();
   ensureDecisionIntelligenceSchema();
   const at = now();
   const probes = db.prepare(`
     SELECT receipt_id FROM decision_execution_probes
-    WHERE status IN ('pending', 'degraded')
+    WHERE status IN ('pending', 'running', 'degraded')
       AND (next_retry_at_ms IS NULL OR next_retry_at_ms <= ?)
     ORDER BY requested_at_ms ASC
     LIMIT 2
@@ -337,9 +354,17 @@ export async function runDecisionIntelligenceCycle() {
     LIMIT 4
   `).all(at);
   for (const row of observations) await processDueDecisionObservation(row.id);
+
+  const finalizable = db.prepare(`
+    SELECT DISTINCT receipt_id FROM decision_outcome_observations
+    WHERE due_at_ms <= ?
+    ORDER BY receipt_id ASC LIMIT 20
+  `).all(at);
+  for (const row of finalizable) finalizeDecisionOutcomeIfReady(row.receipt_id);
 }
 
 export function startDecisionIntelligenceRuntime() {
+  ensureResearchSchema();
   ensureDecisionIntelligenceSchema();
   if (runtimeStarted) return;
   runtimeStarted = true;
