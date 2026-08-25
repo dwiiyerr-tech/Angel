@@ -1,6 +1,8 @@
 import { startAngel } from './src/app.js';
 import { startControlPlaneRuntime } from './src/controlPlane/runtime.js';
 import { startFastHunterRuntime } from './src/research/fastHunterRuntime.js';
+import { startDecisionIntelligenceRuntime } from './src/decisionIntelligence/runtime.js';
+import { setupTelegramManager } from './src/manager/telegram.js';
 
 process.on('unhandledRejection', (err) => {
   console.error('[FATAL] Unhandled rejection:', err);
@@ -12,6 +14,8 @@ process.on('uncaughtException', (err) => {
 
 startAngel()
   .then(() => {
+    setupTelegramManager();
+    startDecisionIntelligenceRuntime();
     startFastHunterRuntime();
     return startControlPlaneRuntime();
   })
