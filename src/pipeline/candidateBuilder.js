@@ -1,5 +1,5 @@
 import { now, firstPositiveNumber, marketCapFromGmgn, tokenPriceFromGmgn, lamToSol, sleep } from '../utils.js';
-import { activeStrategy, numSetting, setting } from '../db/settings.js';
+import { activeStrategy, numSetting } from '../db/settings.js';
 import { fetchGmgnTokenInfo } from '../enrichment/gmgn.js';
 import { fetchJupiterAsset, fetchJupiterHolders, fetchJupiterChartContext } from '../enrichment/jupiter.js';
 import { fetchSavedWalletExposure } from '../enrichment/wallets.js';
@@ -58,7 +58,7 @@ export function filterCandidate(candidate) {
   const strat = activeStrategy();
   const failures = [];
   const opportunityWarnings = [];
-  const mcap = Number(candidate.metrics.marketCapUsd);
+  const mcap = candidate.metrics.marketCapUsd;
   const totalFees = candidate.metrics.gmgnTotalFeesSol;
   const gradVolume = candidate.metrics.graduatedVolumeUsd;
   const top20HolderPercent = candidate.holders.top20Percent;
@@ -129,13 +129,13 @@ export function filterCandidate(candidate) {
     failures.push('fee claim: missing (required by strategy)');
   }
 
-  // The active strategy's market-cap ceiling is a screening boundary. Keep
-  // over-cap tokens out of the LLM batch as well as the execution path.
-  if (strat.min_mcap_usd > 0 && !freshGrad && (!Number.isFinite(mcap) || mcap < strat.min_mcap_usd)) {
-    failures.push(`market cap below strategy range: ${mcap} < ${strat.min_mcap_usd}`);
+  // Market cap defines opportunity/style, not contract safety. Keep it visible
+  // for ranking and sizing but do not discard an otherwise safe early runner.
+  if (strat.min_mcap_usd > 0 && (!Number.isFinite(mcap) || mcap < strat.min_mcap_usd)) {
+    opportunityWarnings.push(`market cap below strategy range: ${mcap} < ${strat.min_mcap_usd}`);
   }
   if (strat.max_mcap_usd > 0 && Number.isFinite(mcap) && mcap > strat.max_mcap_usd) {
-    failures.push(`market cap above strategy range: ${mcap} > ${strat.max_mcap_usd}`);
+    opportunityWarnings.push(`market cap above strategy range: ${mcap} > ${strat.max_mcap_usd}`);
   }
 
   // GMGN fees — only enforce when GMGN data is available; Jupiter has no equivalent
@@ -161,27 +161,27 @@ export function filterCandidate(candidate) {
 
   // === AUDIT MODE: All hard filters disabled for 3-day data collection (2026-07-05) ===
 
-  // Fresh-route bot count is a sizing/ranking signal. Percentage-based extreme
-  // bot concentration remains a hard veto below; a raw count alone is not
-  // comparable across tokens with different holder counts.
-  const botHolders = Number(candidate.jupiterAsset?.audit?.botHoldersCount ?? 0);
-  if (botHolders >= 50 && candidate.signals?.route === 'pumpportal_graduated') {
-    opportunityWarnings.push(`pumpportal bot-heavy: ${botHolders} bots`);
-  }
+  // Pumpportal bot dominance check — DISABLED for audit
+  // const botHolders = Number(candidate.jupiterAsset?.audit?.botHoldersCount ?? 0);
+  // if (botHolders >= 50 && candidate.signals?.route === 'pumpportal_graduated') {
+  //   failures.push(`pumpportal bot-dominated: ${botHolders} bots >= 50`);
+  // }
 
-  // Audit-based hard rejects
-  const top10Pct = Number(candidate.jupiterAsset?.audit?.topHoldersPercentage ?? null);
-  if (Number.isFinite(top10Pct) && top10Pct >= 50) {
-    failures.push(`top10 holders: ${top10Pct.toFixed(1)}% >= 50% (too concentrated)`);
-  }
-  // Migration history is handled below as a risk flag. Only the extreme
-  // threshold remains a hard veto, preventing ordinary experienced developers
-  // from being excluded before the LLM can evaluate the current setup.
+  // Audit-based hard rejects — DISABLED for audit
+  // const top10Pct = Number(candidate.jupiterAsset?.audit?.topHoldersPercentage ?? null);
+  // const devMigrations = Number(candidate.jupiterAsset?.audit?.devMigrations ?? null);
+  // if (Number.isFinite(top10Pct) && top10Pct >= 50) {
+  //   failures.push(`top10 holders: ${top10Pct.toFixed(1)}% >= 50% (too concentrated)`);
+  // }
+  // const devMigThreshold = freshGrad ? 15 : 7;
+  // if (Number.isFinite(devMigrations) && devMigrations >= devMigThreshold) {
+  //   failures.push(`dev migrations: ${devMigrations} >= ${devMigThreshold} (serial rugger${freshGrad ? ', fresh grad' : ''})`);
+  // }
 
-  // === v40 per-route filters ===
-  const signalRoute = candidate.signals?.route;
-  const top10 = Number(candidate.jupiterAsset?.audit?.topHoldersPercentage ?? null);
-  const devMig = Number(candidate.jupiterAsset?.audit?.devMigrations ?? null);
+  // === v40 per-route filters — DISABLED for audit ===
+  // const signalRoute = candidate.signals?.route;
+  // const top10 = Number(candidate.jupiterAsset?.audit?.topHoldersPercentage ?? null);
+  // const devMig = Number(candidate.jupiterAsset?.audit?.devMigrations ?? null);
   const botPct = nullableNumber(candidate.jupiterAsset?.audit?.botHoldersPercentage);
   const devMigrations = nullableNumber(candidate.jupiterAsset?.audit?.devMigrations);
 
@@ -233,33 +233,33 @@ export function filterCandidate(candidate) {
     });
   }
 
-  // Per-route filters
-  if (signalRoute === 'pumpportal_graduated') {
-    if (Number.isFinite(top10) && top10 >= 15 && top10 < 25) {
-      opportunityWarnings.push(`pumpportal top10 rug zone: ${top10.toFixed(1)}% in [15,25)`);
-    }
-    if (!freshGrad && Number.isFinite(devMig) && devMig > 10) {
-      opportunityWarnings.push(`pumpportal dev_migrations: ${devMig} > 10`);
-    }
-    if (Number.isFinite(botPct) && botPct > 30) {
-      opportunityWarnings.push(`pumpportal bot-heavy: ${botPct.toFixed(1)}% > 30%`);
-    }
-  }
+  // Per-route filters — DISABLED for audit
+  // if (signalRoute === 'pumpportal_graduated') {
+  //   if (Number.isFinite(top10) && top10 >= 15 && top10 < 25) {
+  //     failures.push(`pumpportal top10 rug zone: ${top10.toFixed(1)}% in [15,25)`);
+  //   }
+  //   if (!freshGrad && Number.isFinite(devMig) && devMig > 10) {
+  //     failures.push(`pumpportal dev_migrations: ${devMig} > 10 (serial rugger)`);
+  //   }
+  //   if (Number.isFinite(botPct) && botPct > 30) {
+  //     failures.push(`pumpportal bot-dominated: ${botPct.toFixed(1)}% > 30%`);
+  //   }
+  // }
 
-  if (signalRoute === 'fee_trending') {
-    if (!freshGrad && Number.isFinite(devMig) && devMig > 10) {
-      opportunityWarnings.push(`fee_trending dev_migrations: ${devMig} > 10`);
-    }
-    if (Number.isFinite(botPct) && botPct > 30) {
-      opportunityWarnings.push(`fee_trending bot-heavy: ${botPct.toFixed(1)}% > 30%`);
-    }
-  }
+  // if (signalRoute === 'fee_trending') {
+  //   if (!freshGrad && Number.isFinite(devMig) && devMig > 10) {
+  //     failures.push(`fee_trending dev_migrations: ${devMig} > 10 (serial rugger)`);
+  //   }
+  //   if (Number.isFinite(botPct) && botPct > 30) {
+  //     failures.push(`fee_trending bot-dominated: ${botPct.toFixed(1)}% > 30%`);
+  //   }
+  // }
 
-  if (signalRoute === 'trenches_completed') {
-    if (Number.isFinite(top10) && top10 >= 25 && top10 < 35) {
-      opportunityWarnings.push(`trenches top10 rug zone: ${top10.toFixed(1)}% in [25,35)`);
-    }
-  }
+  // if (signalRoute === 'trenches_completed') {
+  //   if (Number.isFinite(top10) && top10 >= 25 && top10 < 35) {
+  //     failures.push(`trenches top10 rug zone: ${top10.toFixed(1)}% in [25,35)`);
+  //   }
+  // }
 
   // Trenches route: mcap is already checked by strategy max_mcap_usd — no extra cap needed
 
@@ -406,19 +406,9 @@ export function filterCandidate(candidate) {
   // Track A routes bypass soft scoring — only hard Kaiser filters apply
   const isTrackA = TRACK_A_ROUTES.has(candidate.signals?.route);
 
-  // Dry-run is also our controlled discovery lane. Let borderline-but-safe
-  // candidates reach the LLM when they are close to the soft threshold. This
-  // is deliberately disabled for money modes and cannot bypass hard failures.
-  const relaxedSoftGate = setting('trading_mode', 'dry_run') === 'dry_run'
-    && failures.length === 0
-    && !admission.passed
-    && softScore >= softThreshold - Math.max(0, numSetting('screening_soft_gate_relaxation', 10));
-  const tierSignals = confirmationSignals(candidate, admission, softScore, softThreshold);
-  const decisionTier = tierSignals.count >= 2 && softScore >= Math.max(60, softThreshold + 25) ? 'A' : 'B';
-
   // Hard safety always vetoes. Opportunity admission is OR-based so a runner
   // pattern can survive a low generic score without weakening money safety.
-  if (failures.length > 0 || (!isTrackA && !admission.passed && !relaxedSoftGate)) {
+  if (failures.length > 0 || (!isTrackA && !admission.passed)) {
     const reasons = failures.join('; ');
     const scoreReason = (!isTrackA && !admission.passed) ? (reasons ? `; no hybrid admission pattern` : 'no hybrid admission pattern') : '';
     console.log(`[candidate] filtered ${candidate.token?.mint?.slice(0, 8)}... ${reasons}${scoreReason} (soft=${softScore.toFixed(0)}, threshold=${softThreshold})`);
@@ -431,9 +421,6 @@ export function filterCandidate(candidate) {
       opportunityWarnings,
       admission,
       kaiserComplements,
-      decisionTier,
-      confirmationSignals: tierSignals,
-      relaxedSoftGate,
     };
   }
 
@@ -467,35 +454,7 @@ export function filterCandidate(candidate) {
     routeWeight,
     admission,
     kaiserComplements,
-    decisionTier,
-    confirmationSignals: tierSignals,
-    relaxedSoftGate,
   };
-}
-
-function confirmationSignals(candidate, admission, softScore, softThreshold) {
-  const stats1h = candidate.jupiterAsset?.stats1h || {};
-  const stats5m = candidate.jupiterAsset?.stats5m || {};
-  const priceChange1h = nullableNumber(stats1h.priceChange);
-  const netBuyers = nullableNumber(stats5m.numNetBuyers);
-  const traders = nullableNumber(stats5m.numTraders);
-  const netBuyerRatio = traders > 0 && netBuyers != null ? netBuyers / traders : null;
-  const smartMoney = Number(candidate.trending?.smart_degen_count
-    ?? candidate.jupiterAsset?.stats5m?.numOrganicBuyers
-    ?? 0) >= 2 || Number(candidate.savedWalletExposure?.holderCount || 0) >= 2;
-  const positiveFlow = priceChange1h != null && priceChange1h >= 0
-    && netBuyerRatio != null && netBuyerRatio >= 0.2;
-  const accelerating = candidate.volumeAcceleration?.accelerating === true
-    || Number(candidate.volumeAcceleration?.volumeAcceleration || 0) >= 1.15;
-  const quality = Number(softScore) >= Math.max(60, Number(softThreshold) + 25)
-    || admission?.patterns?.angelQuality === true;
-  const signals = [
-    positiveFlow ? 'positive_flow' : null,
-    smartMoney ? 'smart_money' : null,
-    accelerating ? 'accelerating_volume' : null,
-    quality ? 'quality_score' : null,
-  ].filter(Boolean);
-  return { count: signals.length, signals };
 }
 
 export function evaluateKaiserComplements(candidate) {

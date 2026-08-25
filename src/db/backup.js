@@ -4,7 +4,7 @@ import Database from 'better-sqlite3';
 import { db } from './connection.js';
 
 const BACKUP_DIR = path.resolve(process.cwd(), 'backups');
-const BACKUP_RETENTION = Math.max(3, Number(process.env.DB_BACKUP_RETENTION || 14));
+const BACKUP_RETENTION = 2;
 
 function pruneOldBackups(keep = BACKUP_RETENTION) {
   if (!fs.existsSync(BACKUP_DIR)) return;

@@ -1,19 +1,19 @@
 import axios from 'axios';
 import { ENABLE_LLM, LLM_API_KEY, LLM_BASE_URL, LLM_MODEL, LLM_TIMEOUT_MS, LLM_MODEL_CHEAP, LLM_BASE_URL_CHEAP, LLM_API_KEY_CHEAP, LLM_OPENROUTER_MODEL, LLM_OPENROUTER_API_KEY, LLM_FALLBACK_BASE_URL, LLM_FALLBACK_API_KEY, LLM_FALLBACK_MODEL } from '../config.js';
 import { now, stripThinking, strictJsonFromText } from '../utils.js';
-import { numSetting, setting, activeStrategy, buyConfidenceFloor } from '../db/settings.js';
+import { numSetting, setting } from '../db/settings.js';
 import { db } from '../db/connection.js';
 import { storeSignalEvent } from '../signals/trending.js';
 import { validateLLMResponse } from './llmValidator.js';
 import { buildTradeMemory } from './tradeMemory.js';
 
-// Avoid paying the full timeout on every batch while a dead primary provider
-// is being retried. A successful primary call naturally clears the circuit.
-let primaryUnavailableUntilMs = 0;
-const PRIMARY_COOLDOWN_MS = 60_000;
+// Read from DB setting (configurable per-strategy), fallback to 70 for backward compat
+import { activeStrategy } from '../db/settings.js';
 
 function llmBuyMinConfidence() { 
-  return buyConfidenceFloor(activeStrategy());
+  // Always read fresh from settings table (source of truth)
+  const fromSettings = numSetting('llm_min_confidence', 40);
+  return fromSettings;
 }
 function llmLowConfidenceCap() { return numSetting('llm_low_confidence_cap', 70); }
 
@@ -75,7 +75,6 @@ export function normalizeDecision(parsed, fallbackReason = '', route = '') {
   return {
     verdict,
     confidence,
-    tier: ['A', 'B'].includes(String(parsed?.tier).toUpperCase()) ? String(parsed.tier).toUpperCase() : null,
     thesis: Array.isArray(parsed?.thesis) ? parsed.thesis.map(String).slice(0, 5) : [],
     missing_confirmation: Array.isArray(parsed?.missing_confirmation) ? parsed.missing_confirmation.map(String).slice(0, 3) : [],
     reason: String(parsed?.reason || fallbackReason).slice(0, 1000),
@@ -256,44 +255,81 @@ export async function decideCandidateBatch(rows, triggerCandidateId) {
   const promptLessons = activeLessonsForPrompt(rows.map(item => item.candidate?.signals?.route || ''));
   console.log(`[llm] model=${llmConfig.model} route=${route || 'none'}`);
 
-  // Kaiser-style prompt discipline: keep aggregate outcome memory out of the
-  // live decision prompt by default. It was repeatedly turning a cold/regime-
-  // biased sample into a global veto. The memory remains available for audits
-  // and can be explicitly enabled for controlled experiments.
-  const tradeMemory = setting('llm_memory_prompt_enabled', 'false') === 'true'
-    ? buildTradeMemory()
-    : '';
+  const tradeMemory = buildTradeMemory();
 
   const system = [
-    'You are Angel, a Solana meme-coin trench analyst operating in dry-run simulation.',
-    'Return strict JSON only. Select at most ONE BUY from up to 10 candidates, or select none.',
-    'Candidates already passed deterministic screening; use the live evidence in each candidate rather than inventing missing facts.',
-    '',
-    '== SOFT SCORE ==',
-    'Soft score is a ranking aid, not a veto. A high score with weak live evidence is WATCH; a moderate score with a real asymmetric setup may be BUY.',
-    '== FRESH GRADUATES ==',
-    'Early data can be incomplete. Prefer bot% below 20 with liquidity above $3K and positive flow; bot% 20-30 needs a second confirmation; bot% above 50 is PASS.',
-    'Do not penalize a fresh graduate merely because it has little history. Never override a hard safety failure, severe dump, wash trading, or missing critical safety data.',
-    '== ESTABLISHED ROUTES ==',
-    'For trenches, the useful mcap zone is roughly $25K-$100K; smart money >=3 is strong evidence. Experienced dev migration history is a risk-adjusted signal, not an automatic PASS.',
-    'For fee/trending routes, prefer mcap above $40K, organic score >=50, and bundler rate below 0.3 when those fields exist.',
-    '== DECISION ==',
-    `BUY means the best asymmetric opportunity with confidence >= ${buyConfidenceFloor(activeStrategy())}; WATCH means interesting but missing confirmation; PASS means heavy bundling, severe flow, concentration, or rug evidence.`,
-    'Candidate filters include decisionTier. A-tier can use normal size. B-tier is allowed with smaller size when there are two independent confirmations, including positive flow or verified smart money. Narrative alone is insufficient.',
-    'Select a BUY when the safety envelope is clear and the evidence is good enough; do not wait for perfect evidence and do not let aggregate historical memory veto live evidence.',
-    `Suggested exits must meet at least ${numSetting('min_risk_reward_ratio', 1.5).toFixed(2)}:1 R:R. Fresh graduates need room: avoid a tight stop and target a meaningful upside.`,
-    'Insider launch → fake hype → distribution, wash trading, or unresolved critical contradictions are immediate PASS.',
+    'You are Angel, a Solana meme coin entry screener operating in dry-run mode.',
+    'Return strict JSON only — no markdown, no code fences, no explanation outside JSON.',
+    'You will receive up to 10 candidates. Pick the best one to BUY, or PASS all.',
     tradeMemory ? `\n${tradeMemory}\n` : '',
+    'RECENT LESSONS are human-approved prompt guidance, not hard filters or permission to change settings.',
+    'Apply a route-scoped lesson only to matching routes. Treat low-confidence lessons as weak context.',
+    'When a lesson conflicts with fresh candidate evidence or a hard safety rule, follow the fresh evidence and safety rule.',
+    'Never infer causality beyond the sample counts and comparisons supplied in a lesson.',
+    '',
+    '== MICRO INTELLIGENCE ==',
+    'Pay close attention to ML momentum score, velocity, and smart money presence.',
+    '',
+    '== SOFT SCORE CONTEXT ==',
+    'Each candidate has a pre-computed soft score (0-150). Score >= 50 passed pre-filter.',
+    'Use soft score as ONE input, not the primary filter. Score 70+ with weak narrative = WATCH.',
+    '',
+    '== FRESHLY GRADUATED (pumpportal_graduated) ==',
+    'Brand new tokens. HIGH concentration, ZERO smart money, no narrative = NORMAL. Do NOT penalize.',
+    'PRIMARY signal: botHoldersPercentage. Data-driven buckets:',
+    '  bot% < 20% + liq > $3K = BUY 70-80. bot% 20-30% + liq > $5K = BUY 60-70.',
+    '  bot% 30-50% = WATCH. bot% > 50% = PASS. organicScore is unreliable for fresh grads.',
+    '',
+    '== ESTABLISHED (trenches_completed, fee_trending) ==',
+    'trenches: High dev_migrations = POSITIVE (experienced dev).',
+    '  High bot% = smart money + bots coexisting (more tolerant). Top10 rug zone: 25-35%.',
+    '  Smart money (smart_degen_count) is STRONG signal. Prefer >= 3.',
+    'fee_trending: High RR but be selective. Confidence 55+ for BUY.',
+    '  MAX_HOLD common (80%+). Prefer organic_score >= 50 + bundler_rate < 0.3.',
+    '',
+    '== STRATEGY: FORMER RUNNER-RECLAIM (Lowcap Hunter) ==',
+    'If Market Cap < 50k, evaluate strictly against the Former Runner-Reclaim checklist:',
+    '  1. Former Runner: ATH must be >= 5x current MC (Drawdown >= 70%).',
+    '  2. Liquidity: Must be > $15k.',
+    '  3. Chart: Reclaiming Key Support with Volume Expansion.',
+    '  4. Organic Accumulation: >= 2 vetted smart wallets (smart_degen_count >= 2).',
+    '  5. Security: PASS if Top 10 > 45% or high bundler rate/dev sell.',
+    '  If all matched, BUY with high confidence. Specify Invalidation and TP Ladder.',
+    '',
+    '== STRATEGY: BUY THE DIP (Re-Accumulation) ==',
+    'If the token has a proven runner history (high ATH multiplier) and suffers an extreme drawdown (e.g. 70-95%), watch for smart money Re-Accumulation:',
+    '  - LP must be stable (Liquidity >= 15k).',
+    '  - Smart Degen Count must show active accumulation.',
+    '  - If price response is weak despite net inflow, this is silent re-accumulation.',
+    '  - Verdict: WATCH if missing a breakout catalyst; BUY if breaking out.',
+    '',
+    '== UNIVERSAL RISK MANAGEMENT (R:R & M:M) ==',
+    'Do not hesitate endlessly. If a token has strong ML Momentum or smart money, TAKE THE SHOT.',
+    'Apply strict Money Management (M:M) by adjusting your Confidence Score (which dictates position size):',
+    '  - High conviction: Confidence 80-100 (Full size)',
+    '  - Medium conviction: Confidence 60-79 (Half size)',
+    '  - Low conviction: Confidence 40-59 (Quarter size)',
+    'Apply strict Risk:Reward (R:R) logic to your suggested exits:',
+    `  - ALWAYS maintain at least a ${numSetting('min_risk_reward_ratio', 1.5).toFixed(2)}:1 R:R ratio (TP / abs(SL)).`,
+    '  - If a token is highly volatile, widen the SL (e.g. -40%) but you MUST increase TP (e.g. 100%) to justify the risk.',
+    '  - Do not give tight SLs (-10%) to freshly graduated coins, they will instantly hit. Give them room to breathe (-30%) but aim for 60%+ TP.',
+    'Be aggressive when the Macro or Micro allows it. Grow the portfolio by taking calculated risks.',
+    '',
+    '== INSIDER FLOW (DANGER) ==',
+    'Be extremely careful of the classic Insider Flow:',
+    '1. Launch (Add liquidity + Bundle/Snipe in the very first block)',
+    '2. Fake Hype (Wash trading volume + KOL posts + Community taking over narrative)',
+    '3. Distribution (Insiders slowly sell through multiple generated wallets)',
+    'If you detect this exact flow, REJECT immediately with verdict PASS.',
   ].join('\n');
   const user = {
-    task: 'Pick the best simulation buy candidate from this recent batch, or choose none.',
+    task: 'Pick the best dry-run buy candidate from this recent batch, or choose none.',
     recent_lessons: promptLessons,
     output_schema: {
       verdict: 'BUY|WATCH|PASS',
       selected_candidate_id: 'integer candidate_id when verdict is BUY, otherwise null',
       selected_mint: 'mint string when verdict is BUY, otherwise null',
       confidence: 'calibrated 0-100 estimate that the selected BUY will close with positive PnL; use 0 for no BUY',
-      tier: 'A|B when verdict is BUY, otherwise null',
       thesis: ['short strings justifying the decision, e.g. Drawdown 92%, LP stable'],
       missing_confirmation: ['short strings of what is missing, e.g. Catalyst, Breakout'],
       reason: 'short string',
@@ -339,11 +375,6 @@ export async function decideCandidateBatch(rows, triggerCandidateId) {
     
     // Try primary model first
     try {
-      if (Date.now() < primaryUnavailableUntilMs) {
-        const skipped = new Error('primary LLM provider cooling down');
-        skipped.code = 'ECONNREFUSED';
-        throw skipped;
-      }
       try {
         res = await axios.post(`${llmConfig.baseUrl.replace(/\/$/, '')}/chat/completions`, {
           model: llmConfig.model,
@@ -356,11 +387,7 @@ export async function decideCandidateBatch(rows, triggerCandidateId) {
           timeout: LLM_TIMEOUT_MS,
           headers: { authorization: `Bearer ${llmConfig.apiKey}`, 'content-type': 'application/json' },
         });
-        primaryUnavailableUntilMs = 0;
       } catch (primaryCallErr) {
-        if (isRetryableLlmError(primaryCallErr)) {
-          primaryUnavailableUntilMs = Date.now() + PRIMARY_COOLDOWN_MS;
-        }
         if (primaryCallErr?.name === 'AbortError' || primaryCallErr?.name === 'CanceledError' || primaryCallErr?.code === 'ABORTED' || primaryCallErr?.code === 'ERR_CANCELED') {
           console.log(`[llm] call aborted after ${LLM_TIMEOUT_MS}ms`);
         }

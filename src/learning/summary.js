@@ -79,15 +79,10 @@ export function summarizeLearningWindow(windowMs) {
     FROM dry_run_positions
     WHERE ((status = 'closed' AND COALESCE(closed_at_ms, opened_at_ms) >= ?)
        OR (status != 'closed' AND opened_at_ms >= ?))
-      AND (
-        execution_mode = 'dry_run'
-        OR (
-          execution_mode = 'shadow_live'
-          AND json_extract(snapshot_json, '$.shadowLiveCompatible') = 1
-          AND json_extract(snapshot_json, '$.entryQuoteMode') = 'position_sized'
-          AND json_extract(snapshot_json, '$.simulatorVersion') = ?
-        )
-      )
+      AND execution_mode = 'shadow_live'
+      AND json_extract(snapshot_json, '$.shadowLiveCompatible') = 1
+      AND json_extract(snapshot_json, '$.entryQuoteMode') = 'position_sized'
+      AND json_extract(snapshot_json, '$.simulatorVersion') = ?
     ORDER BY opened_at_ms ASC
   `).all(cutoff, cutoff, DRY_RUN_SIMULATOR_VERSION);
   const closed = positions.filter(position => position.status === 'closed');
@@ -124,13 +119,6 @@ export function summarizeLearningWindow(windowMs) {
     SELECT action, COUNT(*) AS count
     FROM decision_logs
     WHERE at_ms >= ?
-    GROUP BY action
-    ORDER BY count DESC
-  `).all(cutoff);
-  const buyFunnel = db.prepare(`
-    SELECT action, COUNT(*) AS count
-    FROM decision_logs
-    WHERE at_ms >= ? AND verdict = 'BUY'
     GROUP BY action
     ORDER BY count DESC
   `).all(cutoff);
@@ -190,15 +178,7 @@ export function summarizeLearningWindow(windowMs) {
       best,
       worst,
     },
-    llm: {
-      batches,
-      actions,
-      buyFunnel: {
-        totalBuyEvents: buyFunnel.reduce((sum, row) => sum + Number(row.count), 0),
-        executedEntries: buyFunnel.filter(row => ['dry_run_entry', 'shadow_live_entry_simulated'].includes(row.action)).reduce((sum, row) => sum + Number(row.count), 0),
-        byAction: buyFunnel,
-      },
-    },
+    llm: { batches, actions },
     dataQuality,
     featureOutcomeEvidence: featureOutcomeEvidence(closed),
   };

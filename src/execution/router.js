@@ -113,29 +113,7 @@ async function executeShadowLiveBuy(selectedRow, decision, batchId, rows = [], t
 }
 
 export async function executeLiveBuy(selectedRow, decision, batchId, rows = [], triggerCandidateId = null) {
-  const mode = tradingMode();
-  if (mode === 'dry_run') {
-    const strat = activeStrategy();
-    const candidate = selectedRow.candidate;
-    const sizeSol = calculatePositionSizeSol(candidate, decision, strat);
-    const entryQuote = await fetchDryRunEntryQuote(
-      candidate.token.mint,
-      sizeSol,
-      candidate.jupiterAsset?.decimals,
-      candidate.metrics?.priceUsd,
-      candidate.metrics?.marketCapUsd,
-    );
-    const created = createDryRunPosition(selectedRow.id, candidate, decision, `manual_dry_run_${batchId}`, entryQuote);
-    logDecisionEvent({
-      batchId, triggerCandidateId, selectedRow, rows, decision,
-      mode: 'dry_run',
-      action: created.isNew ? 'dry_run_entry' : `dry_run_blocked_${created.blockedBy || 'duplicate'}`,
-      execution: { positionId: created.id, isNew: created.isNew },
-    });
-    if (created.isNew) await sendPositionOpen(created.id);
-    return created;
-  }
-  if (mode === 'shadow_live') return executeShadowLiveBuy(selectedRow, decision, batchId, rows, triggerCandidateId);
+  if (tradingMode() === 'shadow_live') return executeShadowLiveBuy(selectedRow, decision, batchId, rows, triggerCandidateId);
   assertLiveConfigApproved();
   const strat = activeStrategy();
   const candidate = selectedRow.candidate;

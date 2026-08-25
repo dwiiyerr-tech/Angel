@@ -4,13 +4,7 @@ import { DB_PATH } from '../config.js';
 export const db = new Database(DB_PATH);
 
 export function initDb() {
-  // Multiple signal/enrichment workers and external reporting scripts may
-  // briefly contend for the WAL writer lock. Wait briefly instead of dropping
-  // an otherwise valid candidate with SQLITE_BUSY/"database is locked".
-  db.pragma('busy_timeout = 5000');
   db.pragma('journal_mode = WAL');
-  // Money-grade ledger durability takes precedence over write latency.
-  db.pragma('synchronous = FULL');
   db.exec(`
     CREATE TABLE IF NOT EXISTS settings (
       key TEXT PRIMARY KEY,
@@ -346,10 +340,10 @@ export function initDb() {
     trading_mode: process.env.TRADING_MODE || 'dry_run',
     llm_candidate_pick_count: process.env.LLM_CANDIDATE_PICK_COUNT || '10',
     llm_candidate_max_age_ms: process.env.LLM_CANDIDATE_MAX_AGE_MS || String(2 * 60 * 1000),
-    // Keep the global floor conservative; route availability is controlled by
-    // the live setting below and can be reopened without a code change.
-    llm_min_confidence: process.env.LLM_MIN_CONFIDENCE || '60',
-    blocked_routes: process.env.BLOCKED_ROUTES || '[]',
+    // Historical calibration: confidence 75 was only ~26% win-rate; require
+    // the stronger evidence band and keep historically losing trend routes out.
+    llm_min_confidence: process.env.LLM_MIN_CONFIDENCE || '65',
+    blocked_routes: process.env.BLOCKED_ROUTES || '["trending","graduated_trending"]',
     sideways_timeout_minutes: '10',
     max_open_positions: process.env.MAX_OPEN_POSITIONS || '3',
     dry_run_buy_sol: '0.1',
@@ -360,14 +354,6 @@ export function initDb() {
     max_entry_sl_percent: process.env.MAX_ENTRY_SL_PERCENT || '15',
     min_entry_tp_percent: process.env.MIN_ENTRY_TP_PERCENT || '60',
     min_risk_reward_ratio: process.env.MIN_RISK_REWARD_RATIO || '2',
-    // Dry-run may inspect borderline candidates, but money modes remain strict.
-    // The relaxation only moves a candidate to the LLM; it never overrides a
-    // hard contract, liquidity, concentration, dev, bot, or severe-flow veto.
-    screening_soft_gate_relaxation: process.env.SCREENING_SOFT_GATE_RELAXATION || '10',
-    dry_run_momentum_veto_floor: process.env.DRY_RUN_MOMENTUM_VETO_FLOOR || '0.03',
-    b_tier_size_multiplier: process.env.B_TIER_SIZE_MULTIPLIER || '0.5',
-    llm_memory_min_sample: process.env.LLM_MEMORY_MIN_SAMPLE || '8',
-    llm_memory_prompt_enabled: process.env.LLM_MEMORY_PROMPT_ENABLED || 'false',
     loss_streak_size_cut_after: process.env.LOSS_STREAK_SIZE_CUT_AFTER || '2',
     loss_streak_size_multiplier: process.env.LOSS_STREAK_SIZE_MULTIPLIER || '0.5',
     loss_streak_pause_after: process.env.LOSS_STREAK_PAUSE_AFTER || '3',
@@ -449,7 +435,6 @@ export function initDb() {
     max_hold_ms: 1800000,
     use_llm: true,
     llm_min_confidence: 20,
-    min_buy_confidence: 60,
     momentum_threshold: 0.5,
     prescore_hard_floor: 35,
     prescore_veto_floor: -50,

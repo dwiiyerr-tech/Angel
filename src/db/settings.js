@@ -76,21 +76,6 @@ export function activeStrategy() {
   return config;
 }
 
-// One confidence floor must govern both the LLM response normalization and
-// the execution gate. Older databases may only have llm_min_confidence;
-// newer strategy configs may also provide the stricter min_buy_confidence.
-// Keep the global floor as a lower bound so an operator-wide safety increase
-// cannot be bypassed by a per-strategy value.
-export function buyConfidenceFloor(strat = activeStrategy()) {
-  const values = [
-    strat?.min_buy_confidence,
-    strat?.llm_min_confidence,
-    numSetting('llm_min_confidence', 0),
-  ].map(Number).filter(value => Number.isFinite(value));
-  if (!values.length) return 0;
-  return Math.max(0, Math.min(100, Math.max(...values)));
-}
-
 export function strategyById(id) {
   const row = db.prepare('SELECT * FROM strategies WHERE id = ?').get(id);
   if (!row) return null;
@@ -161,7 +146,7 @@ function defaultStrategy() {
     position_size_sol: 0.08, max_open_positions: 3,
     tp_percent: 25, sl_percent: -15, trailing_enabled: true, trailing_percent: 10,
     partial_tp: false, partial_tp_at_percent: 0, partial_tp_sell_percent: 0,
-    max_hold_ms: 1800000, use_llm: true, llm_min_confidence: 20, min_buy_confidence: 60,
+    max_hold_ms: 1800000, use_llm: true, llm_min_confidence: 20,
     prescore_hard_floor: 35, momentum_threshold: 0.5, momentum_hard_floor: 0.25,
   };
 }

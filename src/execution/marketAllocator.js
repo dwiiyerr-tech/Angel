@@ -43,15 +43,23 @@ export function evaluateMarketAllocator({ force = false } = {}) {
   const expectancy = rows.length
     ? rows.reduce((sum, row) => sum + Number(row.pnl_percent || 0), 0) / rows.length
     : null;
-  const desired = 'green'; // Disabled by user request
+  const desired = streak >= 3 || (rows.length >= 10 && avgPnl != null && avgPnl <= -5)
+    ? 'red'
+    : streak >= 2 || (rows.length >= 10 && expectancy != null && expectancy < 0)
+      ? 'yellow'
+      : 'green';
   const current = modeFromSetting();
+  const changedAt = Number(setting('market_allocator_changed_at_ms', 0));
   const pending = setting('market_allocator_pending_mode', '');
-
-  // Force reset
-  let next = 'green';
-  let nextPending = 0;
-  setSetting('market_allocator_mode', 'green');
-  setSetting('market_allocator_changed_at_ms', Date.now());
+  const pendingCount = Number(setting('market_allocator_pending_count', 0));
+  let next = current;
+  let nextPending = pending === desired ? pendingCount + 1 : 1;
+  if (force || (desired !== current && nextPending >= SWITCH_CONFIRMATIONS && Date.now() - changedAt >= MIN_MODE_HOLD_MS)) {
+    next = desired;
+    nextPending = 0;
+    setSetting('market_allocator_mode', next);
+    setSetting('market_allocator_changed_at_ms', Date.now());
+  }
   setSetting('market_allocator_size_multiplier', next === 'yellow' ? 0.5 : next === 'red' ? RED_RECOVERY_SIZE_MULTIPLIER : 1);
   setSetting('market_allocator_pending_mode', next === current ? desired : '');
   setSetting('market_allocator_pending_count', nextPending);

@@ -21,7 +21,6 @@ import {
 } from './execution/swapValidation.js';
 import { ensureLiveSafetySchema } from './db/liveSafety.js';
 import { db } from './db/connection.js';
-import { injectSimulationFailure, simulateConfirmation } from './execution/simulation.js';
 
 let liveWallet = null;
 let solanaConnection = null;
@@ -341,22 +340,15 @@ async function waitForFinalizedSwapReceipt(signature, mints, timeoutMs = 30_000)
 }
 
 export async function simulateJupiterSwap({ inputMint, outputMint, amount }) {
-  injectSimulationFailure('order');
   const order = await jupiterOrder({ inputMint, outputMint, amount });
   const transaction = orderTransactionBase64(order);
   if (!transaction) throw new Error('Jupiter order did not include a transaction.');
-  injectSimulationFailure('sign');
   const signed = signTransaction(transaction);
-  injectSimulationFailure('rpc');
   await simulateAndValidateTransaction(signed.tx, { inputMint, outputMint, amount });
-  const confirmation = await simulateConfirmation({ signature: null });
   return {
     order,
     simulated: true,
     broadcast: false,
-    signing: { performed: true, signer: liveWallet.publicKey.toBase58(), broadcast: false },
-    rpc: { simulated: true, status: 'ok' },
-    confirmation,
     inputAmount: String(amount),
     outputAmount: String(order?.outAmount || order?.outputAmount || order?.outAmountResult || ''),
   };

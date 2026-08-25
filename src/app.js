@@ -20,7 +20,6 @@ import axios from 'axios';
 import { ensureSafeStartupMode } from './db/liveConfig.js';
 import { pauseLiveEntries } from './health/circuitBreaker.js';
 import { recordHttpBlock } from './enrichment/httpEvents.js';
-import { auditDatabaseIntegrity } from './db/integrity.js';
 
 setDefaultResultOrder('ipv4first');
 axios.interceptors.response.use(
@@ -82,12 +81,6 @@ export async function startAngel() {
   // Additive/idempotent research migration: existing Angel databases upgrade in
   // place and retain all previous live/shadow history.
   ensureResearchSchema();
-  try {
-    const integrity = auditDatabaseIntegrity();
-    console.log(`[integrity] positions=${integrity.positions.total} closed=${integrity.positions.closed} open=${integrity.positions.open} orphan_logs=${integrity.orphanPositionLogs} unresolved_exec=${integrity.unresolvedExecutions}`);
-  } catch (error) {
-    console.error(`[integrity] startup audit failed: ${error.message}`);
-  }
   ensureSafeStartupMode();
 
   startHealthServer();
@@ -222,20 +215,6 @@ export async function startAngel() {
     }
   }, 60 * 60 * 1000);
 
-  setInterval(() => {
-    try {
-      const integrity = auditDatabaseIntegrity();
-      if (!integrity.ok || integrity.unresolvedExecutions > 0) {
-        console.warn(`[integrity] warning ${JSON.stringify(integrity)}`);
-      }
-    } catch (error) {
-      console.error(`[integrity] scheduled audit failed: ${error.message}`);
-    }
-  }, 4 * 60 * 60 * 1000);
-
-  // ── Database Backup ───────────────────────────────────────────────
-  // Create a fresh backup at startup so health does not report a stale
-  // snapshot for the first four hours after a restart.
   void runBackup().then(() => console.log('[backup] startup SQLite backup created'))
     .catch(err => console.error(`[backup] startup backup failed: ${err.message}`));
   setInterval(nonOverlapping('database backup', async () => {

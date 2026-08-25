@@ -37,7 +37,7 @@ async function runRemainingM1Tests() {
   }
 
   // -------------------------------------------------------------
-  // Test 2: strategy market-cap floor is a hard screening boundary
+  // Test 2: strategy market-cap preference does not override safety
   // -------------------------------------------------------------
   {
     console.log('Testing strategy market-cap floor...');
@@ -51,10 +51,9 @@ async function runRemainingM1Tests() {
       savedWalletExposure: { holderCount: 0 },
     };
     const result = filterCandidate(mockCandidate);
-    assert(result.failures.some(failure => failure.includes('market cap below strategy range')));
-    assert(!result.opportunityWarnings.some(warning => warning.includes('market cap')));
-    assert.strictEqual(result.passed, false);
-    console.log('  ✓ Strategy market-cap hard floor verified');
+    assert(result.opportunityWarnings.some(warning => warning.includes('market cap below strategy range')));
+    assert(!result.failures.some(failure => failure.includes('market cap')));
+    console.log('  ✓ Strategy market-cap preference verified');
     passedCount++;
   }
   assert.strictEqual(passedCount, 2, 'Both current builder tests must pass');
