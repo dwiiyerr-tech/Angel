@@ -63,6 +63,11 @@ jobs:
           DB_PATH: /tmp/angel-live-chaos-report.sqlite
         run: npm run chaos:report
 
+      - name: Decision intelligence report smoke test
+        env:
+          DB_PATH: /tmp/angel-decision-intelligence-report.sqlite
+        run: npm run decision:report
+
   python-syntax:
     name: Python syntax
     runs-on: ubuntu-latest
