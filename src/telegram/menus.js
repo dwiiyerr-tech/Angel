@@ -16,7 +16,7 @@ function modeMeta() {
       icon: '🔴',
       name: 'LIVE',
       detail: 'Real funds under owner-approved configuration',
-      safety: 'Wallet/signing/broadcast enabled only behind Live Safety gates',
+      safety: 'Every BUY requires owner approval; protective exits remain automatic',
     };
   }
   return {
@@ -181,6 +181,7 @@ export function agentText() {
     `• Live positions: ${liveOpen}/${strat.max_open_positions || '∞'}`,
     `• TP / SL: ${fmtPct(strat.tp_percent)} / ${fmtPct(strat.sl_percent)}`,
     `• Trailing: ${strat.trailing_enabled ? fmtPct(strat.trailing_percent) : 'OFF'}`,
+    `• Entry authority: <b>OWNER APPROVAL PER BUY</b>`,
     '',
     '<b>Pipeline</b>',
     `• Candidate batch: ${numSetting('llm_candidate_pick_count', 10)}`,
@@ -441,12 +442,11 @@ export function batchRevealButtons(batchId, rows, decision, triggerCandidateId =
 }
 
 export function positionButtons(positionId) {
-  const noBroadcast = modeMeta().key === 'paper';
   return {
     reply_markup: {
       inline_keyboard: [
         [
-          { text: noBroadcast ? '🧪 Close Paper Position' : '🚪 Close Live Position', callback_data: `sell:${positionId}` },
+          { text: '🚪 Close Position', callback_data: `sell:${positionId}` },
           { text: '🔄 Refresh', callback_data: `pos:${positionId}` },
         ],
         [
@@ -463,13 +463,12 @@ export function positionButtons(positionId) {
   };
 }
 
-// Kept only for old pending intent messages created before the two-mode migration.
 export function intentButtons(intentId) {
   return {
     reply_markup: {
       inline_keyboard: [
         [
-          { text: '✅ Approve Legacy Buy', callback_data: `intent:${intentId}:confirm` },
+          { text: '✅ Approve LIVE Buy', callback_data: `intent:${intentId}:confirm` },
           { text: '✖ Reject', callback_data: `intent:${intentId}:reject` },
         ],
         [{ text: '📍 Positions', callback_data: 'menu:positions' }],
