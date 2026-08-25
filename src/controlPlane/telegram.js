@@ -12,6 +12,11 @@ import {
   rejectProposal,
   rollbackToParent,
 } from './registry.js';
+import {
+  MANAGER_CONFIG_CATALOG,
+  createOwnerConfigProposal,
+  managerConfigSnapshot,
+} from '../manager/configAssistant.js';
 
 let installed = false;
 
@@ -45,6 +50,51 @@ function proposalText(proposal) {
   ].join('\n');
 }
 
+function renderCurrentValue(value) {
+  return Array.isArray(value) ? JSON.stringify(value) : String(value ?? 'n/a');
+}
+
+function configAssistantText() {
+  const snapshot = managerConfigSnapshot();
+  const rows = Object.entries(snapshot.fields).map(([alias, row]) => (
+    `• <code>${escapeHtml(alias)}</code> = <b>${escapeHtml(renderCurrentValue(row.current))}</b> <i>${escapeHtml(row.unit)}</i>`
+  ));
+  return [
+    '🛠️ <b>Angel Manager Config Assistant</b>',
+    '',
+    'Explicit owner commands create a <b>proposal</b>; they do not mutate active config immediately.',
+    '',
+    ...rows,
+    '',
+    '<b>Examples</b>',
+    '<code>/configset confidence 70</code>',
+    '<code>/configset liquidity 7500</code>',
+    '<code>/configset flow_dump -12</code>',
+    '<code>/configset flow_net 0.05</code>',
+    '<code>/configset opportunity 0.40</code>',
+    '<code>/configset blocked_routes trending,graduated_trending</code>',
+    '',
+    'Natural language also works: <code>Angel set confidence 70</code>.',
+    '<i>Brainstorm questions do not create proposals until the owner gives an explicit set/atur/ubah/ganti instruction.</i>',
+  ].join('\n');
+}
+
+function ownerProposalText(result) {
+  const { parsed, proposal } = result;
+  const rendered = Array.isArray(parsed.value) ? JSON.stringify(parsed.value) : String(parsed.value);
+  return [
+    '🧬 <b>Owner Config Proposal Created</b>',
+    '',
+    `Proposal <b>#${proposal.proposalId}</b> → <b>config-v${proposal.proposedVersion}</b>`,
+    `<code>${escapeHtml(parsed.key)}</code> → <code>${escapeHtml(rendered)}</code>`,
+    '',
+    '<b>Active config unchanged.</b>',
+    `Start PAPER challenger: <code>/configapprove ${proposal.proposalId}</code>`,
+    `Evaluate: <code>/configeval ${proposal.proposalId}</code>`,
+    `Reject: <code>/configreject ${proposal.proposalId}</code>`,
+  ].join('\n');
+}
+
 async function safeReply(msg, fn) {
   if (!authorized(msg)) return;
   try {
@@ -58,6 +108,15 @@ async function safeReply(msg, fn) {
 export function setupControlPlaneTelegram() {
   if (installed) return;
   installed = true;
+
+  bot.onText(/^\/confighelp(?:@\w+)?$/i, msg => safeReply(msg, async () => configAssistantText()));
+  bot.onText(/^\/configshow(?:@\w+)?$/i, msg => safeReply(msg, async () => configAssistantText()));
+
+  bot.onText(/^\/configset(?:@\w+)?\s+\S+\s+.+$/i, msg => safeReply(msg, async () => {
+    const result = createOwnerConfigProposal({ text: String(msg.text || ''), chatId: msg.chat.id });
+    if (!result) throw new Error('Usage: /configset <field> <value>');
+    return ownerProposalText(result);
+  }));
 
   bot.onText(/^\/configstatus(?:@\w+)?$/i, msg => safeReply(msg, async () => {
     const active = activeConfigVersion();
@@ -73,6 +132,8 @@ export function setupControlPlaneTelegram() {
       proposalText(proposal),
       '',
       `Latest review: <b>${escapeHtml(review?.status || 'none')}</b>`,
+      '',
+      '<code>/confighelp</code> shows owner-configurable proposal fields.',
     ].join('\n');
   }));
 
@@ -83,13 +144,13 @@ export function setupControlPlaneTelegram() {
         '🧠 <b>Strategy Analyst Proposal</b>',
         '',
         `Review #${result.reviewRunId}`,
-        `Research: ${result.evidence.research.closed} closed · WR ${pct(result.evidence.research.winRate)} · Exp ${r(result.evidence.research.expectancyR)}`,
+        `PAPER: ${result.evidence.research.closed} closed · WR ${pct(result.evidence.research.winRate)} · Exp ${r(result.evidence.research.expectancyR)}`,
         '',
         `Proposal #${result.proposal.proposalId} → config-v${result.proposal.proposedVersion}`,
         ...result.proposal.changes.map(change => `• <code>${escapeHtml(change.key)}</code> → <code>${escapeHtml(String(change.value))}</code>`),
         '',
-        `Approve Shadow test: <code>/configapprove ${result.proposal.proposalId}</code>`,
-        `<i>No settings were changed.</i>`,
+        `Approve PAPER challenger: <code>/configapprove ${result.proposal.proposalId}</code>`,
+        '<i>No active settings were changed.</i>',
       ].join('\n');
     }
     if (result.status === 'open_proposal_exists') return proposalText(result.proposal);
@@ -97,16 +158,16 @@ export function setupControlPlaneTelegram() {
       '🧠 <b>Strategy Analyst</b>',
       '',
       `Result: <b>${escapeHtml(result.status)}</b>`,
-      `Research: ${result.evidence.research.closed} closed · Exp ${r(result.evidence.research.expectancyR)}`,
+      `PAPER: ${result.evidence.research.closed} closed · Exp ${r(result.evidence.research.expectancyR)}`,
       escapeHtml(result.analysis?.rationale || 'No proposal.'),
       '',
-      '<i>No settings were changed.</i>',
+      '<i>No active settings were changed.</i>',
     ].join('\n');
   }));
 
   bot.onText(/^\/configapprove(?:@\w+)?\s+(\d+)$/i, (msg, match) => safeReply(msg, async () => {
     const proposal = approveProposalForTest(Number(match?.[1]), 'telegram_human');
-    return `✅ Proposal #${proposal.id} approved for <b>Shadow challenger testing only</b> until ${new Date(proposal.test_until_ms).toISOString()}.\nNo active settings changed.`;
+    return `✅ Proposal #${proposal.id} approved for <b>PAPER control-vs-challenger testing only</b> until ${new Date(proposal.test_until_ms).toISOString()}.\nNo active settings changed.`;
   }));
 
   bot.onText(/^\/configreject(?:@\w+)?\s+(\d+)(?:\s+(.+))?$/i, (msg, match) => safeReply(msg, async () => {
@@ -116,13 +177,13 @@ export function setupControlPlaneTelegram() {
 
   bot.onText(/^\/configextend(?:@\w+)?\s+(\d+)(?:\s+(\d+))?$/i, (msg, match) => safeReply(msg, async () => {
     const proposal = extendProposalTest(Number(match?.[1]), Number(match?.[2] || 7), 'telegram_human');
-    return `⏳ Proposal #${proposal.id} challenger extended until ${new Date(proposal.test_until_ms).toISOString()}.`;
+    return `⏳ Proposal #${proposal.id} PAPER challenger extended until ${new Date(proposal.test_until_ms).toISOString()}.`;
   }));
 
   bot.onText(/^\/configeval(?:@\w+)?\s+(\d+)$/i, (msg, match) => safeReply(msg, async () => {
     const result = evaluateChallenger(Number(match?.[1]));
     return [
-      '📊 <b>Challenger Evaluation</b>',
+      '📊 <b>PAPER Challenger Evaluation</b>',
       '',
       `Proposal #${result.proposalId} · <b>${escapeHtml(result.status)}</b>`,
       `Control: n=${result.active.sample} · WR ${pct(result.active.winRate)} · Exp ${r(result.active.expectancyR)}`,
@@ -136,13 +197,13 @@ export function setupControlPlaneTelegram() {
     const active = promoteProposal(Number(match?.[1]), 'telegram_human');
     return [
       `✅ <b>${escapeHtml(active.label)} promoted</b>`,
-      'Promotion occurred only in Research/Shadow no-broadcast mode.',
+      'Promotion occurred only while Angel was in PAPER no-broadcast mode.',
       'Any previous Live approval checksum is now stale; create a fresh /liveapprove snapshot before Live.',
     ].join('\n');
   }));
 
   bot.onText(/^\/configrollback(?:@\w+)?\s+(\d+)(?:\s+(.+))?$/i, (msg, match) => safeReply(msg, async () => {
     const active = rollbackToParent(Number(match?.[1]), match?.[2] || 'manual Telegram rollback', 'telegram_human');
-    return `↩️ Rolled back to <b>${escapeHtml(active.label)}</b>. Mode is forced to no-broadcast Research if needed; Live requires fresh approval.`;
+    return `↩️ Rolled back to <b>${escapeHtml(active.label)}</b>. Mode is forced to PAPER if needed; Live requires fresh approval.`;
   }));
 }

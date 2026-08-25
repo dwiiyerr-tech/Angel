@@ -14,7 +14,18 @@ export const CONTROL_PLANE_PROPOSABLE_SETTINGS = new Set([
   'llm_min_confidence',
   'blocked_routes',
   'min_opportunity_size_multiplier',
+  'min_liquidity_usd',
+  'flow_hard_price_change_pct',
+  'flow_hard_net_buyer_ratio',
 ]);
+
+const PROPOSABLE_NUMERIC_RANGES = Object.freeze({
+  llm_min_confidence: [30, 90],
+  min_opportunity_size_multiplier: [0.25, 0.75],
+  min_liquidity_usd: [1000, 100000],
+  flow_hard_price_change_pct: [-80, 0],
+  flow_hard_net_buyer_ratio: [-1, 0.5],
+});
 
 const KNOWN_ROUTES = new Set([
   'pumpportal_graduated',
@@ -146,6 +157,14 @@ function normalizedBlockedRoutes(value) {
   return JSON.stringify(normalized);
 }
 
+function validateProposableNumber(key, number) {
+  const range = PROPOSABLE_NUMERIC_RANGES[key];
+  if (!range) return;
+  if (number < range[0] || number > range[1]) {
+    throw new Error(`${key} must remain within [${range[0]}, ${range[1]}]`);
+  }
+}
+
 export function validateProposalChanges(changes = []) {
   if (!Array.isArray(changes)) throw new Error('Proposal changes must be an array');
   if (changes.length > 6) throw new Error('A proposal may contain at most 6 changes');
@@ -163,12 +182,7 @@ export function validateProposalChanges(changes = []) {
     } else {
       const number = Number(item.value);
       if (!Number.isFinite(number)) throw new Error(`${key} must be numeric`);
-      if (key === 'llm_min_confidence' && (number < 30 || number > 90)) {
-        throw new Error('llm_min_confidence must remain within [30, 90]');
-      }
-      if (key === 'min_opportunity_size_multiplier' && (number < 0.25 || number > 0.75)) {
-        throw new Error('min_opportunity_size_multiplier must remain within [0.25, 0.75]');
-      }
+      validateProposableNumber(key, number);
       value = String(number);
     }
     return {

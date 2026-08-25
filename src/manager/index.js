@@ -2,6 +2,7 @@ import { bot } from '../telegram/bot.js';
 import { buildManagerEvidence, clearManagerMessages, recentManagerMessages, storeManagerMessage } from './tools.js';
 import { answerManagerQuestion } from './llm.js';
 import { collectGmgnResearch } from './gmgn.js';
+import { createOwnerConfigProposal } from './configAssistant.js';
 
 function liveAuthorizationIntent(text) {
   const value = String(text || '').toLowerCase();
@@ -51,17 +52,51 @@ function fallbackSummary(evidence, error) {
   ].filter(Boolean).join('\n');
 }
 
+function configProposalReply(result) {
+  const { parsed, proposal } = result;
+  const renderedValue = Array.isArray(parsed.value) ? JSON.stringify(parsed.value) : String(parsed.value);
+  return [
+    '🧬 Angel Manager membuat <b>config proposal</b> dari perintah owner.',
+    '',
+    `Proposal: <b>#${proposal.proposalId}</b> → <b>config-v${proposal.proposedVersion}</b>`,
+    `Field: <code>${parsed.key}</code>`,
+    `Proposed value: <code>${renderedValue}</code>`,
+    '',
+    `<b>Belum ada active config yang berubah.</b>`,
+    `Mulai PAPER challenger: <code>/configapprove ${proposal.proposalId}</code>`,
+    `Evaluasi: <code>/configeval ${proposal.proposalId}</code>`,
+    `Batalkan: <code>/configreject ${proposal.proposalId}</code>`,
+    '',
+    '<i>Promotion baru diizinkan setelah evidence PAPER memenuhi gate dan owner menjalankan /configpromote.</i>',
+  ].join('\n');
+}
+
 export async function handleManagerMessage(chatId, question) {
   const text = String(question || '').trim();
   if (!text) return;
 
   if (liveAuthorizationIntent(text)) {
     const reply = [
-      '🔐 Angel Manager V2 bersifat read-only dan tidak memiliki fungsi untuk approve atau mengaktifkan Live.',
+      '🔐 Angel Manager V2 tidak memiliki fungsi untuk approve atau mengaktifkan Live.',
       '',
-      'Saya bisa membaca deterministic readiness, menjelaskan risk/evidence, melakukan riset GMGN read-only, dan merekomendasikan apakah Live layak dipertimbangkan.',
+      'Saya bisa membaca deterministic readiness, menjelaskan risk/evidence, melakukan riset GMGN read-only, brainstorming, dan membuat config proposal dari perintah owner.',
       'Otorisasi Live tetap harus dilakukan sendiri oleh owner melalui kontrol deterministik /livestatus dan /liveapprove.',
     ].join('\n');
+    storeManagerMessage(chatId, 'user', text);
+    storeManagerMessage(chatId, 'assistant', reply);
+    return bot.sendMessage(chatId, reply);
+  }
+
+  try {
+    const configResult = createOwnerConfigProposal({ text, chatId });
+    if (configResult) {
+      const reply = configProposalReply(configResult);
+      storeManagerMessage(chatId, 'user', text);
+      storeManagerMessage(chatId, 'assistant', reply.replace(/<[^>]+>/g, ''));
+      return bot.sendMessage(chatId, reply, { parse_mode: 'HTML' });
+    }
+  } catch (error) {
+    const reply = `❌ Config proposal ditolak: ${String(error?.message || error).slice(0, 1200)}\nActive config tidak berubah.`;
     storeManagerMessage(chatId, 'user', text);
     storeManagerMessage(chatId, 'assistant', reply);
     return bot.sendMessage(chatId, reply);

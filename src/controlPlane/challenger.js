@@ -26,6 +26,15 @@ function parseBlockedRoutes(value) {
   }
 }
 
+function candidateNetBuyerRatio(candidate = {}) {
+  const direct = finite(candidate?.flowAssessment?.netBuyerRatio);
+  if (direct != null) return direct;
+  const netBuyers = finite(candidate?.jupiterAsset?.stats5m?.numNetBuyers);
+  const traders = finite(candidate?.jupiterAsset?.stats5m?.numTraders);
+  if (netBuyers == null || traders == null || traders <= 0) return null;
+  return netBuyers / traders;
+}
+
 export function evaluateEntryPolicy(candidate = {}, decision = {}, config = {}) {
   const settings = config?.settings || {};
   const route = String(candidate?.signals?.route || 'unknown');
@@ -34,13 +43,23 @@ export function evaluateEntryPolicy(candidate = {}, decision = {}, config = {}) 
   const blockedRoutes = new Set(parseBlockedRoutes(settings.blocked_routes));
   const confidenceFloor = finite(settings.llm_min_confidence) ?? 65;
   const opportunityFloor = finite(settings.min_opportunity_size_multiplier) ?? 0.35;
+  const liquidityFloor = finite(settings.min_liquidity_usd) ?? 5000;
+  const flowPriceFloor = finite(settings.flow_hard_price_change_pct) ?? -10;
+  const flowNetFloor = finite(settings.flow_hard_net_buyer_ratio) ?? 0;
   const sourceWeight = finite(candidate?.filters?.sourceWeight) ?? 1;
+  const liquidity = finite(candidate?.metrics?.liquidityUsd ?? candidate?.jupiterAsset?.liquidityUsd ?? candidate?.gmgn?.liquidity) ?? 0;
+  const priceChange1h = finite(candidate?.flowAssessment?.priceChange1h ?? candidate?.jupiterAsset?.stats1h?.priceChange);
+  const netBuyerRatio = candidateNetBuyerRatio(candidate);
+  const evidence = { liquidity, priceChange1h, netBuyerRatio, liquidityFloor, flowPriceFloor, flowNetFloor };
 
-  if (verdict !== 'BUY') return { eligible: false, reason: `verdict_${verdict.toLowerCase()}`, route, confidence, sourceWeight };
-  if (blockedRoutes.has(route)) return { eligible: false, reason: 'blocked_route', route, confidence, sourceWeight };
-  if (confidence < confidenceFloor) return { eligible: false, reason: 'confidence_below_floor', route, confidence, sourceWeight };
-  if (sourceWeight < opportunityFloor) return { eligible: false, reason: 'opportunity_below_floor', route, confidence, sourceWeight };
-  return { eligible: true, reason: 'eligible', route, confidence, sourceWeight };
+  if (verdict !== 'BUY') return { eligible: false, reason: `verdict_${verdict.toLowerCase()}`, route, confidence, sourceWeight, evidence };
+  if (blockedRoutes.has(route)) return { eligible: false, reason: 'blocked_route', route, confidence, sourceWeight, evidence };
+  if (liquidity < liquidityFloor) return { eligible: false, reason: 'liquidity_below_floor', route, confidence, sourceWeight, evidence };
+  if (priceChange1h != null && priceChange1h <= flowPriceFloor) return { eligible: false, reason: 'flow_severe_dump', route, confidence, sourceWeight, evidence };
+  if (netBuyerRatio != null && netBuyerRatio < flowNetFloor) return { eligible: false, reason: 'flow_severe_selling', route, confidence, sourceWeight, evidence };
+  if (confidence < confidenceFloor) return { eligible: false, reason: 'confidence_below_floor', route, confidence, sourceWeight, evidence };
+  if (sourceWeight < opportunityFloor) return { eligible: false, reason: 'opportunity_below_floor', route, confidence, sourceWeight, evidence };
+  return { eligible: true, reason: 'eligible', route, confidence, sourceWeight, evidence };
 }
 
 export function decorateCandidateControlPlane(candidate = {}) {

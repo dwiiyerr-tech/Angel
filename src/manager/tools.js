@@ -11,6 +11,7 @@ import {
 } from '../decisionIntelligence/report.js';
 import { ensureDecisionIntelligenceSchema } from '../decisionIntelligence/schema.js';
 import { preLiveReadinessReport } from '../readiness/engine.js';
+import { managerConfigSnapshot } from './configAssistant.js';
 
 function tableExists(name) {
   return Boolean(db.prepare("SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = ?").get(name));
@@ -193,11 +194,14 @@ export function buildManagerEvidence(question) {
       canSignTransactions: false,
       canBroadcastTransactions: false,
       canMutateSettings: false,
+      canMutateSettingsDirectly: false,
+      canCreateOwnerDirectedConfigProposal: true,
       canProposeAnalysis: true,
       humanOwnerIsSoleLiveAuthority: true,
     },
     system: systemSnapshot(),
     controlPlane: controlPlaneSnapshot(),
+    managerConfiguration: managerConfigSnapshot(),
     preLiveReadiness: preLiveReadinessReport(windowMs),
     decisionIntelligence: decisionIntelligenceSummary(windowMs),
     recentDecisions: recentDecisionReceipts(10),
