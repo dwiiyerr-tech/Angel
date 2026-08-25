@@ -10,10 +10,6 @@ import {
 } from '../decisionIntelligence/report.js';
 import { ensureDecisionIntelligenceSchema } from '../decisionIntelligence/schema.js';
 
-function safeJson(value, fallback = null) {
-  try { return JSON.parse(value); } catch { return fallback; }
-}
-
 function tableExists(name) {
   return Boolean(db.prepare("SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = ?").get(name));
 }
@@ -145,7 +141,7 @@ function controlPlaneSnapshot() {
   if (!tableExists('config_versions')) return { available: false };
   const active = db.prepare("SELECT version, label, status, config_hash, created_at_ms FROM config_versions WHERE status = 'active' ORDER BY version DESC LIMIT 1").get() || null;
   const proposal = tableExists('strategy_proposals')
-    ? db.prepare("SELECT id, status, created_at_ms, proposed_version FROM strategy_proposals WHERE status IN ('proposed', 'approved', 'testing', 'promotion_ready') ORDER BY id DESC LIMIT 1").get() || null
+    ? db.prepare("SELECT id, status, created_at_ms, proposed_version FROM strategy_proposals WHERE status IN ('pending_review', 'testing', 'promotion_ready', 'needs_extension') ORDER BY id DESC LIMIT 1").get() || null
     : null;
   return { available: true, active, openProposal: proposal };
 }
