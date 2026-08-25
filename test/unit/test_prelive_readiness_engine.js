@@ -1,5 +1,5 @@
 import assert from 'node:assert/strict';
-import { evaluateReadinessEvidence } from '../../src/readiness/engine.js';
+import { evaluateReadinessEvidence, positionRealizedR } from '../../src/readiness/engine.js';
 
 const thresholds = {
   researchMinClosed: 50,
@@ -42,6 +42,7 @@ function strongEvidence(mode = 'research') {
       profitFactorR: 1.35,
       realizedRCoverage: 1,
       maxDrawdownR: 3.4,
+      rEvidenceMethod: 'stored realized_r, else pnl_sol/risk, else pnl_percent/abs(SL)',
     },
     execution: {
       entryExecutionCoverage: 0.94,
@@ -62,10 +63,25 @@ function strongEvidence(mode = 'research') {
     },
     controlPlane: {
       stableForPreLive: true,
+      active: { version: 1 },
       openProposal: null,
     },
   };
 }
+
+// Research must never silently manufacture missing native R evidence.
+const researchMissingR = positionRealizedR({ pnl_sol: 0.01, initial_risk_sol: 0.01, pnl_percent: 20, sl_percent: -20 }, 'research');
+assert.equal(researchMissingR.value, null);
+assert.equal(researchMissingR.source, 'unavailable');
+
+// Shadow can derive R transparently because its legacy rows do not always
+// persist native realized_r. Derivation must not require DB mutation.
+const shadowFromRisk = positionRealizedR({ pnl_sol: 0.01, initial_risk_sol: 0.005, pnl_percent: 20, sl_percent: -20 }, 'shadow_live');
+assert.equal(shadowFromRisk.value, 2);
+assert.equal(shadowFromRisk.source, 'derived_pnl_sol_over_risk');
+const shadowFromPercent = positionRealizedR({ pnl_sol: null, initial_risk_sol: null, size_sol: null, pnl_percent: 30, sl_percent: -15 }, 'shadow_live');
+assert.equal(shadowFromPercent.value, 2);
+assert.equal(shadowFromPercent.source, 'derived_pnl_percent_over_sl');
 
 const research = evaluateReadinessEvidence(strongEvidence('research'), thresholds);
 assert.equal(research.researchToShadow.eligible, true);
@@ -85,6 +101,7 @@ assert.equal(confirm.confirmToLiveConsideration.eligible, true);
 assert.equal(confirm.confirmToLiveConsideration.status, 'ELIGIBLE_FOR_LIVE_CONSIDERATION');
 assert.equal(confirm.currentStage.stage, 'confirm_to_live_consideration');
 assert.match(confirm.authority.note, /never authorization/i);
+assert.ok(confirm.confirmToLiveConsideration.warnings.some(row => row.id === 'confirm_attribution'));
 
 const notConfirm = evaluateReadinessEvidence(strongEvidence('shadow_live'), thresholds);
 assert.equal(notConfirm.confirmToLiveConsideration.eligible, false);
@@ -98,7 +115,7 @@ assert.equal(unsafe.confirmToLiveConsideration.eligible, false);
 assert.ok(unsafe.confirmToLiveConsideration.hardBlockers.some(row => row.id === 'live_safety_clear'));
 
 const movingConfig = strongEvidence('confirm');
-movingConfig.controlPlane = { stableForPreLive: false, openProposal: { id: 7, status: 'testing' } };
+movingConfig.controlPlane = { stableForPreLive: false, active: { version: 1 }, openProposal: { id: 7, status: 'testing' } };
 const unstable = evaluateReadinessEvidence(movingConfig, thresholds);
 assert.equal(unstable.shadowToConfirm.eligible, false);
 assert.ok(unstable.shadowToConfirm.hardBlockers.some(row => row.id === 'control_plane_stable'));
@@ -114,4 +131,4 @@ assert.ok(weak.researchToShadow.hardBlockers.some(row => row.id === 'research_sa
 assert.ok(weak.researchToShadow.hardBlockers.some(row => row.id === 'research_expectancy'));
 assert.ok(weak.researchToShadow.hardBlockers.some(row => row.id === 'exit_v3_coverage'));
 
-console.log('[prelive-readiness] staged eligibility, safety, config stability, and owner-only Live authority verified');
+console.log('[prelive-readiness] staged eligibility, R provenance, safety, config stability, and owner-only Live authority verified');
