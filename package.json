@@ -16,6 +16,7 @@
     "fast:report": "node scripts/fast_hunter_report.mjs",
     "chaos:report": "node scripts/live_chaos_report.mjs",
     "decision:report": "node scripts/decision_intelligence_report.mjs",
+    "readiness:report": "node scripts/readiness_report.mjs",
     "dashboard:api": "node src/dashboard/server.js"
   },
   "dependencies": {
