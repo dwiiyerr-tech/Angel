@@ -1,16 +1,22 @@
 # Research Execution Cost V2
 
-Angel Research remains a zero-capital market laboratory. V2 makes the virtual execution path closer to live trading without signing or broadcasting a transaction.
+Angel PAPER remains a no-real-capital market laboratory with its own virtual wallet. V2 makes the virtual execution path closer to live trading without signing or broadcasting a transaction.
 
 ## Invariants
 
 - `real_capital_sol = 0`
-- no wallet balance is required
+- no real wallet balance or private key is required
+- the configured PAPER virtual balance is enforced for entry reservations
 - no private key is required
 - no transaction is signed
 - no transaction is broadcast
 - Jupiter executable quotes remain the source of virtual token amounts
 - Live Safety Kernel behavior is unchanged
+
+PAPER uses the same strategy sizing and money-grade market/safety admission as
+LIVE. The only execution settlement difference is that the input SOL and
+resulting token/SOL fills are committed to the virtual ledger rather than to a
+wallet transaction.
 
 ## Entry model
 

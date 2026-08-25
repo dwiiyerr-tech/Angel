@@ -183,6 +183,7 @@ export function createDryRunPosition(candidateId, candidate, decision, reason = 
   if (rrBlocked) return { id: null, isNew: false, blockedBy: rrBlocked, riskRewardRatio: riskRewardRatio(tp, sl) };
   const trailingEnabled = (strat.trailing_enabled ?? boolSetting('default_trailing_enabled', true)) ? 1 : 0;
   const trailingPercent = strat.trailing_percent ?? numSetting('default_trailing_percent', 20);
+  const trailingArmPercent = numSetting('trailing_arm_percent', 15);
   const entryFeeSol = Math.max(0, numSetting('dry_run_network_fee_sol', DRY_RUN_NETWORK_FEE_SOL))
     + Math.max(0, numSetting('dry_run_priority_fee_sol', DRY_RUN_PRIORITY_FEE_SOL));
 
@@ -223,12 +224,12 @@ export function createDryRunPosition(candidateId, candidate, decision, reason = 
       INSERT INTO dry_run_positions (
         candidate_id, mint, symbol, status, opened_at_ms, size_sol, entry_price, entry_mcap,
         token_amount_est, high_water_price, high_water_mcap, tp_percent, sl_percent,
-        trailing_enabled, trailing_percent, trailing_armed, llm_decision_id, strategy_id, entry_fee_sol, snapshot_json
-      ) VALUES (?, ?, ?, 'open', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0, ?, ?, ?, ?)
+        trailing_enabled, trailing_percent, trailing_arm_percent, trailing_armed, llm_decision_id, strategy_id, entry_fee_sol, snapshot_json
+      ) VALUES (?, ?, ?, 'open', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0, ?, ?, ?, ?)
     `).run(
       candidateId, candidate.token.mint, candidate.token.symbol, now(), finalSize, entryPrice, entryMcap,
       Number(entryQuote?.tokenAmount) > 0 ? Number(entryQuote.tokenAmount) : null,
-      entryPrice, entryMcap, tp, sl, trailingEnabled, trailingPercent, decision.id || null, strat.id, entryFeeSol,
+      entryPrice, entryMcap, tp, sl, trailingEnabled, trailingPercent, trailingArmPercent, decision.id || null, strat.id, entryFeeSol,
       json({
         candidate, decision, reason, strategy: strat.id, sizing, entryQuote,
         strategyFamily: candidate.signals?.strategyFamily || candidate.strategyFamily || 'edge1',
@@ -261,6 +262,7 @@ export function createLivePosition(candidateId, candidate, decision, swap, reaso
   const sl = Number(decision.suggested_sl_percent || strat.sl_percent || numSetting('default_sl_percent', -25));
   const trailingEnabled = (strat.trailing_enabled ?? boolSetting('default_trailing_enabled', true)) ? 1 : 0;
   const trailingPercent = strat.trailing_percent ?? numSetting('default_trailing_percent', 20);
+  const trailingArmPercent = numSetting('trailing_arm_percent', 15);
 
   return db.transaction(() => {
     const existing = db.prepare(`SELECT id FROM dry_run_positions WHERE mint = ? AND status = 'open' LIMIT 1`).get(candidate.token.mint);
@@ -289,12 +291,12 @@ export function createLivePosition(candidateId, candidate, decision, swap, reaso
         candidate_id, mint, symbol, status, opened_at_ms, size_sol, entry_price, entry_mcap,
         token_amount_est, high_water_price, high_water_mcap, tp_percent, sl_percent,
         trailing_enabled, trailing_percent, trailing_armed, llm_decision_id,
-        execution_mode, entry_signature, token_amount_raw, strategy_id, entry_fee_sol, snapshot_json
-      ) VALUES (?, ?, ?, 'open', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0, ?, 'live', ?, ?, ?, ?, ?)
+        execution_mode, entry_signature, token_amount_raw, strategy_id, entry_fee_sol, trailing_arm_percent, snapshot_json
+      ) VALUES (?, ?, ?, 'open', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0, ?, 'live', ?, ?, ?, ?, ?, ?)
     `).run(
       candidateId, candidate.token.mint, candidate.token.symbol, now(), sizeSol, entryPrice, entryMcap, null,
       entryPrice, entryMcap, tp, sl, trailingEnabled, trailingPercent, decision.id || null,
-      swap.signature, swap.outputAmount || null, strat.id, Number(swap.feeSol || 0),
+      swap.signature, swap.outputAmount || null, strat.id, Number(swap.feeSol || 0), trailingArmPercent,
       json({ candidate, decision, reason, swap, strategy: strat.id, strategyFamily: candidate.signals?.strategyFamily || candidate.strategyFamily || 'edge1' }),
     );
     const positionId = Number(result.lastInsertRowid);

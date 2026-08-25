@@ -137,7 +137,9 @@ export function formatPosition(position) {
       ? `R: ${fmtR(currentR)} · Planned R:R: ${Number.isFinite(Number(position.planned_rr)) ? `1:${Number(position.planned_rr).toFixed(2)}` : '—'} · MFE: ${fmtR(position.mfe_r)} · MAE: ${fmtR(position.mae_r)}`
       : null,
     paper && position.research_data_quality ? `Data: ${escapeHtml(position.research_data_quality)}` : null,
-    `TP: ${fmtPct(position.tp_percent)} · SL: ${fmtPct(position.sl_percent)} · Trail: ${position.trailing_enabled ? `${fmtPct(position.trailing_percent)}` : 'off'}`,
+    `TP: ${fmtPct(position.tp_percent)} · SL: ${fmtPct(position.sl_percent)} · Trail: ${position.trailing_enabled
+      ? `${fmtPct(position.trailing_percent)} · ${position.trailing_armed ? 'ARMED' : `wait @ ${fmtPct(position.trailing_arm_percent ?? 15)}`}`
+      : 'off'}`,
     position.exit_reason ? `Exit: ${escapeHtml(position.exit_reason)} at ${fmtUsd(position.exit_mcap)} (${fmtPct(position.pnl_percent)})` : null,
     position.exit_signature ? `Exit TX: <a href="${txLink(position.exit_signature)}">${short(position.exit_signature)}</a>` : null,
   ].filter(Boolean).join('\n');

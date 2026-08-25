@@ -89,12 +89,16 @@ export function initDb() {
       sl_percent REAL NOT NULL,
       trailing_enabled INTEGER NOT NULL,
       trailing_percent REAL NOT NULL,
+      trailing_arm_percent REAL NOT NULL DEFAULT 15,
       trailing_armed INTEGER NOT NULL DEFAULT 0,
       exit_price REAL,
       exit_mcap REAL,
       exit_reason TEXT,
       pnl_percent REAL,
       pnl_sol REAL,
+      mark_pnl_percent REAL,
+      mark_pnl_sol REAL,
+      mark_updated_at_ms INTEGER,
       llm_decision_id INTEGER,
       execution_mode TEXT DEFAULT 'dry_run',
       entry_signature TEXT,
@@ -316,6 +320,10 @@ export function initDb() {
   ensureColumn('dry_run_positions', 'partial_tp_retry_after_ms', 'INTEGER DEFAULT 0');
   ensureColumn('dry_run_positions', 'realized_pnl_sol', 'REAL DEFAULT 0');
   ensureColumn('dry_run_positions', 'realized_cost_sol', 'REAL DEFAULT 0');
+  ensureColumn('dry_run_positions', 'trailing_arm_percent', 'REAL NOT NULL DEFAULT 15');
+  ensureColumn('dry_run_positions', 'mark_pnl_percent', 'REAL');
+  ensureColumn('dry_run_positions', 'mark_pnl_sol', 'REAL');
+  ensureColumn('dry_run_positions', 'mark_updated_at_ms', 'INTEGER');
   ensureColumn('decision_logs', 'strategy_id', 'TEXT');
   ensureColumn('strategy_evolution', 'config_json', 'TEXT');
   ensureColumn('strategy_evolution', 'created_at', 'INTEGER');
@@ -365,6 +373,12 @@ export function initDb() {
     market_allocator_changed_at_ms: '0',
     default_trailing_enabled: 'true',
     default_trailing_percent: '20',
+    paper_initial_balance_sol: process.env.PAPER_INITIAL_BALANCE_SOL || '10',
+    paper_live_parity_enabled: 'true',
+    trailing_arm_percent: process.env.TRAILING_ARM_PERCENT || '15',
+    trailing_floor_percent: process.env.TRAILING_FLOOR_PERCENT || '2',
+    break_even_threshold_percent: process.env.BREAK_EVEN_THRESHOLD_PERCENT || '15',
+    time_tighten_enabled: process.env.TIME_TIGHTEN_ENABLED || '0',
     default_partial_tp_enabled: '1',
     default_partial_tp_at_percent: '20',
     default_partial_tp_sell_percent: '25',

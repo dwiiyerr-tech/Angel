@@ -1,6 +1,7 @@
 import { db } from '../db/connection.js';
 import { now, json } from '../utils.js';
 import { numSetting, boolSetting, setting, activeStrategy } from '../db/settings.js';
+import { calculatePositionSizeSol } from '../db/positions.js';
 import { DRY_RUN_NETWORK_FEE_SOL, DRY_RUN_PRIORITY_FEE_SOL } from '../config.js';
 import { fetchDryRunEntryQuote } from '../enrichment/jupiter.js';
 import { ensureResearchSchema } from './schema.js';
@@ -11,6 +12,7 @@ import {
   fetchResearchEntryExecutionProfile,
   sizeImpactPct,
 } from './executionCost.js';
+import { assertPaperWalletCapacity } from './virtualWallet.js';
 
 export const RESEARCH_SIMULATOR_VERSION = 'zero_capital_execution_cost_v2';
 
@@ -31,7 +33,9 @@ export function researchReferenceNotionalSol() {
 }
 
 export function researchPositionCap() {
-  return Math.max(1, Math.min(100, Math.floor(numSetting('research_max_open_positions', 12))));
+  const configured = Math.max(1, Math.min(100, Math.floor(numSetting('research_max_open_positions', 12))));
+  const strategyMax = Number(activeStrategy()?.max_open_positions);
+  return Math.max(1, Math.min(configured, Number.isFinite(strategyMax) && strategyMax > 0 ? strategyMax : configured));
 }
 
 function persistedResearchPositionCount() {
@@ -150,7 +154,7 @@ export function createResearchPosition(candidateId, candidate, decision, quoteBu
   const executionProfile = quoteBundle?.executionProfile || null;
   const fallbackEntryFeeSol = Math.max(0, numSetting('dry_run_network_fee_sol', DRY_RUN_NETWORK_FEE_SOL))
     + Math.max(0, numSetting('dry_run_priority_fee_sol', DRY_RUN_PRIORITY_FEE_SOL));
-  const entryFeeSol = Math.max(0, Number(executionProfile?.entryFees?.totalFeeSol ?? fallbackEntryFeeSol));
+    const entryFeeSol = Math.max(0, Number(executionProfile?.entryFees?.totalFeeSol ?? fallbackEntryFeeSol));
   const expectedExitFeeSol = Math.max(0, Number(executionProfile?.expectedExitFees?.totalFeeSol ?? entryFeeSol));
   const riskSol = initialRiskSol({
     notionalSol,
@@ -172,9 +176,11 @@ export function createResearchPosition(candidateId, candidate, decision, quoteBu
   });
   const trailingEnabled = (strat.trailing_enabled ?? boolSetting('default_trailing_enabled', true)) ? 1 : 0;
   const trailingPercent = Number(strat.trailing_percent ?? numSetting('default_trailing_percent', 20));
+  const trailingArmPercent = numSetting('trailing_arm_percent', 15);
   const cooldownMs = Math.max(0, numSetting('research_reentry_cooldown_minutes', 30)) * 60_000;
 
   return db.transaction(() => {
+    assertPaperWalletCapacity(notionalSol, entryFeeSol);
     const existing = db.prepare(`
       SELECT id FROM dry_run_positions
       WHERE mint = ? AND status IN ('open', 'entry_unknown', 'exit_unknown', 'partial_exit_unknown')
@@ -216,13 +222,13 @@ export function createResearchPosition(candidateId, candidate, decision, quoteBu
       INSERT INTO dry_run_positions (
         candidate_id, mint, symbol, status, opened_at_ms, size_sol, entry_price, entry_mcap,
         token_amount_est, high_water_price, high_water_mcap, tp_percent, sl_percent,
-        trailing_enabled, trailing_percent, trailing_armed, llm_decision_id,
+        trailing_enabled, trailing_percent, trailing_arm_percent, trailing_armed, llm_decision_id,
         execution_mode, token_amount_raw, strategy_id, entry_fee_sol, snapshot_json,
         real_capital_sol, sim_notional_sol, initial_risk_percent, initial_risk_sol, planned_rr,
         low_water_price, low_water_mcap, mfe_percent, mae_percent, mfe_r, mae_r,
         research_data_quality, research_quote_ladder_json
       ) VALUES (
-        ?, ?, ?, 'open', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0, ?,
+        ?, ?, ?, 'open', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0, ?,
         'research', ?, ?, ?, ?, 0, ?, ?, ?, ?, ?, ?, 0, 0, 0, 0, ?, ?
       )
     `).run(
@@ -240,6 +246,7 @@ export function createResearchPosition(candidateId, candidate, decision, quoteBu
       sl,
       trailingEnabled,
       trailingPercent,
+      trailingArmPercent,
       decision?.id || null,
       String(entryQuote.outputAmountRaw),
       strat.id,
@@ -321,7 +328,12 @@ export async function executeResearchEntry(selectedRow, decision, reason = 'rese
     return { id: null, isNew: false, blockedBy: 'research_position_cap' };
   }
   try {
-    const notional = researchReferenceNotionalSol();
+    // PAPER uses the same strategy/risk sizing calculation as LIVE. The only
+    // difference is that this notional is reserved in the virtual wallet.
+    const notional = calculatePositionSizeSol(selectedRow.candidate, decision, activeStrategy());
+    if (!Number.isFinite(notional) || notional <= 0) {
+      return { id: null, isNew: false, blockedBy: 'below_minimum_economic_size' };
+    }
     const quoteBundle = await fetchResearchQuoteLadder(selectedRow.candidate, notional);
     return createResearchPosition(selectedRow.id, selectedRow.candidate, decision, quoteBundle, reason);
   } finally {

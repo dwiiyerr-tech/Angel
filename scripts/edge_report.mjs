@@ -4,6 +4,7 @@ import { safeJson } from '../src/utils.js';
 import { ensureResearchSchema } from '../src/research/schema.js';
 import { runnerLabelFromPosition, RUNNER_MODEL_VERSION } from '../src/edge/runnerModel.js';
 import { marketRegimeKey, ROUTE_EDGE_MODEL_VERSION } from '../src/edge/routeEdgeModel.js';
+import { paperWalletSummary } from '../src/research/virtualWallet.js';
 
 initDb();
 ensureResearchSchema();
@@ -86,5 +87,6 @@ console.log(JSON.stringify({
     nonRunners,
     unknown: unknownLabels,
   },
+  paperWallet: paperWalletSummary(),
   routeRegimes,
 }, null, 2));

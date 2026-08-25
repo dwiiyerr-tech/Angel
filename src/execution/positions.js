@@ -245,7 +245,11 @@ export async function refreshPosition(position, { autoExit = true, jupiterPnl = 
   const ENTRY_GRACE_MS = 90_000; // 90 seconds
   const inGracePeriod = ageMs < ENTRY_GRACE_MS;
   const slHit = !inGracePeriod && pnlPercent <= effectiveSlPercent && pnlPercent < 0;
-  const armThreshold = position.tp_percent ? Number(position.tp_percent) : numSetting('trailing_arm_percent', 10);
+  // Trailing has its own arm threshold. Tying it to TP made a position with a
+  // large TP (for example +200%) effectively have no protection in practice.
+  const armThreshold = Number.isFinite(Number(position.trailing_arm_percent))
+    ? Number(position.trailing_arm_percent)
+    : numSetting('trailing_arm_percent', 15);
   const armHit = pnlPercent >= armThreshold;
   const trailingArmed = position.trailing_armed || (position.trailing_enabled && armHit);
   const trailDrop = highWaterMcap > 0 ? Math.max(-100, (Number(mcap) / highWaterMcap - 1) * 100) : 0;
@@ -502,9 +506,18 @@ export async function refreshPosition(position, { autoExit = true, jupiterPnl = 
 
   db.prepare(`
     UPDATE dry_run_positions
-    SET high_water_mcap = ?, high_water_price = ?, trailing_armed = ?
+    SET high_water_mcap = ?, high_water_price = ?, trailing_armed = ?,
+        mark_pnl_percent = ?, mark_pnl_sol = ?, mark_updated_at_ms = ?
     WHERE id = ?
-  `).run(highWaterMcap, highWaterPrice, trailingArmed ? 1 : 0, position.id);
+  `).run(
+    highWaterMcap,
+    highWaterPrice,
+    trailingArmed ? 1 : 0,
+    Number.isFinite(Number(pnlPercent)) ? pnlPercent : null,
+    Number(position.realized_pnl_sol || 0) + Number(pnlSol || 0) - Number(position.entry_fee_sol || 0),
+    now(),
+    position.id,
+  );
 
   if (exitReason && autoExit && position.execution_mode === 'live') {
     if (sellInProgress.has(position.id)) return { ...position, exitReason: null };

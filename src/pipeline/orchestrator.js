@@ -14,13 +14,14 @@ import { candidateSummary } from '../telegram/format.js';
 import { createTradeIntent } from '../db/intents.js';
 import { recordSignalProcessed } from '../health/deadMansSwitch.js';
 import { refreshCandidateForExecution } from '../execution/positions.js';
-import { executeLiveBuy } from '../execution/router.js';
+import { executeLiveBuy, assertSafeLiveDecision } from '../execution/router.js';
 import { graduated } from '../signals/graduated.js';
 import { setDegenHandler } from '../signals/trending.js';
 import { setCandidateHandler } from '../signals/feeClaim.js';
 import { short, escapeHtml } from '../format.js';
 import { evaluateMarketAllocator, allocationAllowsCandidate } from '../execution/marketAllocator.js';
 import { applyContractSafetyGate } from '../execution/contractSafetyGate.js';
+import { assertContractSafetyForMoneyMode } from '../execution/contractSafetyGate.js';
 import { isResearchSimulationMode, requiresMoneyGradeEvidence } from '../research/policy.js';
 import {
   executeResearchEntry,
@@ -111,6 +112,11 @@ export async function processCandidateFromSignals(signals) {
 
 async function _processCandidateFromSignals(signals) {
   const researchMode = isResearchSimulationMode();
+  // PAPER follows the money-grade decision and market gates. Its execution
+  // branch remains non-broadcast, but it must not get a better admission path
+  // merely because the settlement currency is virtual.
+  const paperLiveParity = researchMode && boolSetting('paper_live_parity_enabled', true);
+  const strictPolicyMode = !researchMode || paperLiveParity;
   const capacity = activeCapacity(researchMode);
   if (!capacity.allowed) {
     console.log(`[agent] ${researchMode ? 'research' : 'execution'} max positions reached (${capacity.open}/${capacity.max}), skipping ${signals.mint.slice(0, 8)}...`);
@@ -122,11 +128,11 @@ async function _processCandidateFromSignals(signals) {
     try { return JSON.parse(setting('blocked_routes', '[]')); } catch { return []; }
   })();
   const adaptivelyBlockedRoute = blockedRoutes.some(route => String(signals.route || '').includes(route));
-  if (adaptivelyBlockedRoute && !researchMode) {
+  if (adaptivelyBlockedRoute && strictPolicyMode) {
     console.log(`[agent] blocked route ${signals.route} for ${signals.mint.slice(0, 8)}...`);
     return;
   }
-  if (adaptivelyBlockedRoute && researchMode) {
+  if (adaptivelyBlockedRoute && researchMode && !paperLiveParity) {
     console.log(`[research] observing adaptively-blocked route ${signals.route}; no capital is at risk`);
   }
 
@@ -143,7 +149,7 @@ async function _processCandidateFromSignals(signals) {
       return;
     }
 
-    if (researchMode) {
+    if (researchMode && !paperLiveParity) {
       const researchCooldownMs = Math.max(0, numSetting('research_reentry_cooldown_minutes', 30)) * 60_000;
       if (researchCooldownMs > 0) {
         const recentResearch = db.prepare(`
@@ -199,7 +205,7 @@ async function _processCandidateFromSignals(signals) {
   }
 
   // Decision cache is an execution optimization, not a research truth source.
-  if (!researchMode) {
+  if (strictPolicyMode) {
     const cachedDecision = checkDecisionCache(signals.mint, signals.mcap || null, signals.holders || null);
     if (cachedDecision) {
       const ageMin = ((now() - cachedDecision.cachedAt) / 60000).toFixed(1);
@@ -209,7 +215,7 @@ async function _processCandidateFromSignals(signals) {
   }
 
   const candidate = await buildCandidate(signals);
-  const moneyMode = requiresMoneyGradeEvidence();
+  const moneyMode = requiresMoneyGradeEvidence() || strictPolicyMode;
   await applyContractSafetyGate(candidate, {
     moneyMode,
     stage: 'screening',
@@ -219,7 +225,7 @@ async function _processCandidateFromSignals(signals) {
   const candidateId = upsertCandidate(candidate, signature);
 
   // Copycat history protects capital but should not censor zero-capital research.
-  if (!researchMode) {
+  if (strictPolicyMode) {
     try {
       const symbol = candidate.token?.symbol;
       if (symbol) {
@@ -236,9 +242,9 @@ async function _processCandidateFromSignals(signals) {
     }
   }
 
-  const filterAdmission = researchFilterAdmission(candidate, researchMode);
+  const filterAdmission = researchFilterAdmission(candidate, researchMode && !paperLiveParity);
   if (!filterAdmission.allowed) return;
-  if (researchMode && filterAdmission.softFailures.length > 0) {
+  if (researchMode && !paperLiveParity && filterAdmission.softFailures.length > 0) {
     console.log(`[research] soft-filter override ${candidate.token.mint.slice(0, 8)}... ${filterAdmission.softFailures.slice(0, 3).join('; ')}`);
   }
 
@@ -249,14 +255,14 @@ async function _processCandidateFromSignals(signals) {
     candidate.filters.preScore = preScore.score;
     candidate.filters.preScorePreferred = preScore.passed;
     const preScoreVetoFloor = Number(strat.prescore_veto_floor ?? -50);
-    if (!researchMode && preScore.score <= preScoreVetoFloor) {
+    if (strictPolicyMode && preScore.score <= preScoreVetoFloor) {
       console.log(`[prescore] catastrophic-veto ${candidate.token.mint.slice(0, 8)}... score ${preScore.score} <= ${preScoreVetoFloor}`);
       candidate.filters.passed = false;
       candidate.filters.failures.push(`prescore catastrophic veto: ${preScore.score} <= ${preScoreVetoFloor}`);
       updateCandidateSnapshot(candidateId, candidate, 'filtered');
       return;
     }
-    if (researchMode && preScore.score <= preScoreVetoFloor) {
+    if (researchMode && !paperLiveParity && preScore.score <= preScoreVetoFloor) {
       candidate.riskFlags = candidate.riskFlags || [];
       candidate.riskFlags.push({
         type: 'research_low_prescore',
@@ -270,8 +276,8 @@ async function _processCandidateFromSignals(signals) {
     const momentumResult = await momentumFilter(candidate, momentumVetoFloor);
     const isFreshRoute = ['pumpportal_graduated', 'pumpfun_pregrad'].includes(signals.route);
     const mlUnavailable = Number(momentumResult.score) < 0;
-    const liveMlUnavailable = requiresMoneyGradeEvidence() && mlUnavailable;
-    const catastrophicMomentum = !researchMode && !isFreshRoute && !mlUnavailable && Number(momentumResult.score) < momentumVetoFloor;
+    const liveMlUnavailable = (requiresMoneyGradeEvidence() || strictPolicyMode) && mlUnavailable;
+    const catastrophicMomentum = strictPolicyMode && !isFreshRoute && !mlUnavailable && Number(momentumResult.score) < momentumVetoFloor;
     if (liveMlUnavailable || catastrophicMomentum) {
       candidate.filters.passed = false;
       candidate.filters.failures.push(liveMlUnavailable
@@ -318,7 +324,7 @@ async function _processCandidateFromSignals(signals) {
 
   // In Research, LLM is advisory. A deterministic Hunter policy may sample an
   // otherwise contract-safe candidate when the LLM says WATCH/PASS.
-  if (researchMode && (!batchDecision?.selected_row || batchDecision.verdict !== 'BUY')) {
+  if (researchMode && !paperLiveParity && (!batchDecision?.selected_row || batchDecision.verdict !== 'BUY')) {
     const selfRow = candidateById(candidateId);
     const prescore = Number(candidate.filters?.preScore);
     const momentum = Number(candidate.filters?.momentumScore);
@@ -379,9 +385,9 @@ async function _processCandidateFromSignals(signals) {
   const isUsSessionExecute = currentUTCHourExecute >= 12 && currentUTCHourExecute <= 18;
   const configuredConfidence = numSetting('llm_min_confidence', 40);
   const sessionConfidenceFloor = 60;
-  const requiredConfidence = researchMode
-    ? Math.max(0, numSetting('research_min_confidence', 30))
-    : (isUsSessionExecute ? Math.max(configuredConfidence, sessionConfidenceFloor) : configuredConfidence);
+  const requiredConfidence = strictPolicyMode
+    ? (isUsSessionExecute ? Math.max(configuredConfidence, sessionConfidenceFloor) : configuredConfidence)
+    : Math.max(0, numSetting('research_min_confidence', 30));
 
   if (selectedRow && boolSetting('agent_enabled', true) && batchDecision.verdict === 'BUY' && batchDecision.confidence >= requiredConfidence) {
     const freshCapacity = activeCapacity(researchMode);
@@ -443,13 +449,26 @@ export async function handleApprovedBuy(selectedRow, decision, batchId, rows = [
   const mint = selectedRow.candidate.token.mint;
   if (executingMints.has(mint)) return;
 
-  // Research is separated before market allocator, wallet reserve, transaction
-  // simulation, live risk budget, and live config checks. Its only size is a
-  // Jupiter quote probe; real capital, signing, and broadcast are zero.
+  // PAPER follows the same market allocator, fresh market snapshot, contract
+  // safety, and decision validation as LIVE. Only the settlement is virtual.
   if (isResearchSimulationMode()) {
+    const allocation = evaluateMarketAllocator();
+    if (!allocationAllowsCandidate(selectedRow.candidate, allocation)) {
+      console.log(`[allocator] blocked ${mint.slice(0, 8)}... family=${selectedRow.candidate.signals?.strategyFamily || 'edge1'} mode=${allocation.mode}`);
+      return { id: null, isNew: false, blockedBy: 'market_allocator' };
+    }
+
     executingMints.add(mint);
     try {
-      const result = await executeResearchEntry(selectedRow, decision, `research_batch_${batchId ?? 'rule'}`);
+      const freshSelectedRow = await refreshCandidateForExecution(selectedRow).catch(err => {
+        throw new Error(`PAPER fresh execution check failed: ${err.message}`);
+      });
+      if (!freshSelectedRow.candidate.filters?.passed) {
+        throw new Error(`PAPER fresh execution guard failed: ${(freshSelectedRow.candidate.filters?.failures || []).join('; ')}`);
+      }
+      assertSafeLiveDecision(decision, activeStrategy());
+      await assertContractSafetyForMoneyMode(freshSelectedRow.candidate, { stage: 'pre_execution' });
+      const result = await executeResearchEntry(freshSelectedRow, decision, `paper_parity_batch_${batchId ?? 'rule'}`);
       logDecisionEvent({
         batchId,
         triggerCandidateId,
@@ -464,7 +483,7 @@ export async function handleApprovedBuy(selectedRow, decision, batchId, rows = [
           broadcast: false,
           walletRequired: false,
           plannedRr: result.plannedRr ?? null,
-          hunterPolicy: result.hunterPolicy ?? decision.research_hunter_policy ?? null,
+          hunterPolicy: result.hunterPolicy ?? null,
         },
         execution: { positionId: result.id, isNew: result.isNew },
       });

@@ -6,7 +6,8 @@ import { gmgnStatusText } from '../enrichment/gmgn.js';
 import { formatPosition } from './format.js';
 import { ENABLE_LLM, LLM_API_KEY } from '../config.js';
 import { configuredTradingMode } from '../research/policy.js';
-import { openResearchPositionCount, researchPositionCap, researchReferenceNotionalSol } from '../research/engine.js';
+import { openResearchPositionCount, researchPositionCap } from '../research/engine.js';
+import { paperWalletSummary, formatPaperWalletSummary } from '../research/virtualWallet.js';
 
 function modeMeta() {
   const mode = configuredTradingMode();
@@ -60,6 +61,7 @@ export function menuKeyboard() {
 
 export function filtersText() {
   const strat = activeStrategy();
+  const paperWallet = paperWalletSummary();
   return [
     '🛡️ <b>Safety & Market Filters</b>',
     `<i>${escapeHtml(strat.name)} strategy</i>`,
@@ -84,6 +86,10 @@ export function filtersText() {
     `• GMGN: token ${escapeHtml(gmgnStatusText('token'))} · trend ${escapeHtml(gmgnStatusText('trending'))}`,
     `• Min trend volume: ${fmtUsd(strat.trending_min_volume_usd)} · swaps: ${strat.trending_min_swaps}`,
     `• Max rug: ${fmtPct(strat.trending_max_rug_ratio * 100)} · bundler: ${fmtPct(strat.trending_max_bundler_rate * 100)}`,
+    '',
+    '<b>PAPER accounting</b>',
+    `• Starting virtual balance: ${paperWallet.initialBalanceSol.toFixed(4)} SOL`,
+    `• Configure: <code>/setfilter paper_initial_balance_sol &lt;SOL&gt;</code>`,
   ].filter(Boolean).join('\n');
 }
 
@@ -157,6 +163,7 @@ export function agentText() {
   const llmReady = Boolean(strat.use_llm && ENABLE_LLM && LLM_API_KEY);
   const paperOpen = openResearchPositionCount();
   const paperMax = researchPositionCap();
+  const paperWallet = paperWalletSummary();
   const liveOpen = openPositionCount();
   return [
     '🤖 <b>Angel Execution Console</b>',
@@ -172,7 +179,8 @@ export function agentText() {
     '',
     '<b>Paper trading laboratory</b>',
     `• Real capital: <b>0 SOL</b>`,
-    `• Executable quote probe: ${fmtSol(researchReferenceNotionalSol())} SOL`,
+    ...formatPaperWalletSummary(paperWallet).map(line => `• ${line}`),
+    '• Entry sizing: strategy/risk sized (same as LIVE)',
     `• Paper positions: ${paperOpen}/${paperMax}`,
     `• Simulates entry/exit friction, fees, TP/SL, trailing and partial TP`,
     '',
@@ -243,6 +251,7 @@ export function mainMenuText() {
   const strat = activeStrategy();
   const mode = modeMeta();
   const agentEnabled = boolSetting('agent_enabled', true);
+  const paperWallet = paperWalletSummary();
   return [
     '👼 <b>ANGEL CONTROL CENTER</b>',
     '<i>Solana trading research + owner-controlled live execution</i>',
@@ -250,7 +259,7 @@ export function mainMenuText() {
     `${mode.icon} Mode: <b>${mode.name}</b>`,
     `🤖 Agent: <b>${enabledText(agentEnabled)}</b>`,
     `🎯 Strategy: <b>${escapeHtml(strat.name)}</b>`,
-    `🧪 Paper: <b>${openResearchPositionCount()}/${researchPositionCap()}</b> · Capital: <b>0 SOL</b>`,
+    `🧪 Paper: <b>${openResearchPositionCount()}/${researchPositionCap()}</b> · Equity: <b>${paperWallet.equitySol.toFixed(4)} SOL</b>`,
     `📍 Live: <b>${openPositionCount()}/${strat.max_open_positions || '∞'}</b>`,
     '',
     `🛡️ <i>${mode.safety}</i>`,

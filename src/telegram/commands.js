@@ -35,6 +35,7 @@ import { setting } from '../db/settings.js';
 import { approveLiveConfigSnapshot, approvedLiveConfig, createLiveConfigSnapshot, liveConfigChecksum } from '../db/liveConfig.js';
 import { configuredTradingMode } from '../research/policy.js';
 import { recordResearchObservation } from '../research/engine.js';
+import { paperWalletSummary, formatPaperWalletSummary } from '../research/virtualWallet.js';
 
 const NO_BROADCAST_MODES = new Set(['paper']);
 
@@ -119,6 +120,7 @@ export async function handleMessage(msg) {
     const strat = activeStrategy();
     const unresolved = db.prepare("SELECT count(*) AS count FROM execution_operations WHERE status IN ('pending', 'outcome_unknown')").get().count;
     const circuitOpen = setting('live_circuit_breaker_open', 'false') === 'true';
+    const paperWallet = paperWalletSummary();
     let cal = 'No calibration data';
     try {
       cal = await runLLMCalibration() || cal;
@@ -133,6 +135,7 @@ export async function handleMessage(msg) {
       `🌐 Macro: <b>${escapeHtml(macro)}</b>`,
       `🛡️ Circuit breaker: <b>${circuitOpen ? 'OPEN' : 'CLOSED'}</b>`,
       `⚠️ Unresolved executions: <b>${unresolved}</b>`,
+      `🧪 PAPER equity: <b>${paperWallet.equitySol.toFixed(4)} SOL</b> · available: <b>${paperWallet.availableSol.toFixed(4)} SOL</b>`,
       '',
       '<b>LLM Calibration</b>',
       cal,
@@ -287,6 +290,7 @@ export async function handleMessage(msg) {
       'research_notional_sol',
       'research_max_open_positions',
       'research_min_confidence',
+      'paper_initial_balance_sol',
       'default_tp_percent',
       'default_sl_percent',
       'default_trailing_enabled',
@@ -483,9 +487,17 @@ async function sendMenu(chatId = TELEGRAM_CHAT_ID) {
 }
 
 async function sendPnl(chatId, query = null) {
+  const paperSummary = paperWalletSummary();
+  const paperText = [
+    '🧪 <b>PAPER Virtual Wallet</b>',
+    '',
+    ...formatPaperWalletSummary(paperSummary).map(line => `• ${line}`),
+    '',
+    '<i>This is simulated accounting only; LIVE wallet and PnL are separate.</i>',
+  ].join('\n');
   const wallets = savedWallets();
   if (!wallets.length) {
-    const text = '📊 <b>Wallet PnL</b>\n\nNo wallets saved. Use <code>/walletadd &lt;label&gt; &lt;address&gt;</code>.';
+    const text = `${paperText}\n\n📊 <b>Wallet PnL</b>\n\nNo wallets saved. Use <code>/walletadd &lt;label&gt; &lt;address&gt;</code>.`;
     return query ? editMenuMessage(query, text, navKeyboard()) : bot.sendMessage(chatId, text, { parse_mode: 'HTML' });
   }
   const chunks = [];
@@ -501,7 +513,7 @@ async function sendPnl(chatId, query = null) {
       `Trades: ${pnl.totalTrades} · Wins: ${pnl.wins}`,
     ].join('\n'));
   }
-  const text = `📊 <b>Wallet PnL</b>\n\n${chunks.join('\n\n')}`;
+  const text = `${paperText}\n\n📊 <b>Wallet PnL</b>\n\n${chunks.join('\n\n')}`;
   return query ? editMenuMessage(query, text, navKeyboard()) : bot.sendMessage(chatId, text, { parse_mode: 'HTML' });
 }
 
