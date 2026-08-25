@@ -37,14 +37,18 @@ function decisionSource(decision = {}) {
   return 'deterministic';
 }
 
+function storageModeForPublicMode(mode) {
+  const normalized = String(mode || '').toLowerCase();
+  if (normalized === 'paper') return 'research';
+  if (normalized === 'shadow_live') return 'research';
+  if (normalized === 'confirm') return 'live';
+  return normalized === 'live' ? 'live' : 'research';
+}
+
 export function canonicalDecisionVerdict(decision = {}) {
   const displayVerdict = String(decision?.verdict || '').toUpperCase();
   const underlyingVerdict = String(decision?.raw?.verdict || '').toUpperCase();
   const selected = decision?.selected_candidate_id != null || decision?.selected_mint || decision?.selected_row;
-  // The batch orchestrator uses WATCH as a display label for the current token
-  // when an LLM batch chose no candidate. Preserve a genuine underlying PASS in
-  // the immutable receipt so false-negative analysis does not collapse PASS into
-  // WATCH. A selected candidate or Hunter override always keeps the final verdict.
   if (displayVerdict === 'WATCH' && !selected && underlyingVerdict === 'PASS') return 'PASS';
   return displayVerdict;
 }
@@ -54,12 +58,14 @@ export function buildDecisionKnowledgeSnapshot({ candidateId, candidate, decisio
   const sl = Number(decision?.suggested_sl_percent);
   const plannedRr = plannedRiskReward(tp, sl);
   const edge = candidate?.edge || null;
+  const storageMode = storageModeForPublicMode(mode);
   return {
     version: DECISION_RECEIPT_VERSION,
     capturedAtMs: now(),
     knowledgeBoundary: 'decision_time_only',
     candidateId,
-    mode,
+    mode: storageMode,
+    publicMode: storageMode === 'live' ? 'live' : 'paper',
     source: decisionSource(decision),
     receiptVerdict,
     displayVerdict: String(decision?.verdict || '').toUpperCase() || null,
@@ -105,10 +111,9 @@ export function createDecisionReceipt({ decisionId, candidateId, candidate, deci
   const verdict = canonicalDecisionVerdict(decision);
   if (!['BUY', 'WATCH', 'PASS'].includes(verdict)) return null;
 
-  const snapshot = buildDecisionKnowledgeSnapshot({ candidateId, candidate, decision, mode, receiptVerdict: verdict });
+  const storageMode = storageModeForPublicMode(mode);
+  const snapshot = buildDecisionKnowledgeSnapshot({ candidateId, candidate, decision, mode: storageMode, receiptVerdict: verdict });
   const snapshotJson = canonical(snapshot);
-  // decisionId is part of receipt identity. Two identical knowledge snapshots in
-  // the same millisecond must still remain distinct immutable decisions.
   const receiptHash = createHash('sha256').update(canonical({ decisionId, snapshot })).digest('hex');
   const tp = Number(decision?.suggested_tp_percent);
   const sl = Number(decision?.suggested_sl_percent);
@@ -129,7 +134,7 @@ export function createDecisionReceipt({ decisionId, candidateId, candidate, deci
     verdict,
     Number(decision?.confidence || 0),
     route,
-    mode,
+    storageMode,
     createdAtMs,
     DECISION_RECEIPT_VERSION,
     Number.isFinite(tp) ? tp : null,
@@ -144,14 +149,15 @@ export function createDecisionReceipt({ decisionId, candidateId, candidate, deci
     : db.prepare('SELECT * FROM decision_receipts WHERE decision_id = ?').get(decisionId);
   if (!receipt) return null;
 
-  const probeStatus = mode === 'research' ? 'pending' : 'not_applicable_mode';
+  const paperReceipt = storageMode === 'research';
+  const probeStatus = paperReceipt ? 'pending' : 'not_applicable_mode';
   db.prepare(`
     INSERT OR IGNORE INTO decision_execution_probes
       (receipt_id, status, requested_at_ms, attempt_count)
     VALUES (?, ?, ?, 0)
   `).run(receipt.id, probeStatus, createdAtMs);
 
-  if (mode === 'research') {
+  if (paperReceipt) {
     const insertObservation = db.prepare(`
       INSERT OR IGNORE INTO decision_outcome_observations
         (receipt_id, horizon_ms, due_at_ms, status, attempt_count)
