@@ -17,6 +17,12 @@ function safeJson(value, fallback = null) {
   try { return JSON.parse(value); } catch { return fallback; }
 }
 
+function optionalNumber(value) {
+  if (value === null || value === undefined || value === '') return null;
+  const parsed = Number(value);
+  return Number.isFinite(parsed) ? parsed : null;
+}
+
 function boundedRetryAt(attempts) {
   const seconds = Math.min(300, 15 * (2 ** Math.max(0, attempts - 1)));
   return now() + seconds * 1000;
@@ -248,9 +254,9 @@ export async function processDueDecisionObservation(observationId) {
 }
 
 export function classifyDecisionOutcome(verdict, { finalR = null, sampledMfeR = null } = {}) {
-  const final = Number(finalR);
-  const mfe = Number(sampledMfeR);
-  if (!Number.isFinite(final) || !Number.isFinite(mfe)) return 'INCOMPLETE';
+  const final = optionalNumber(finalR);
+  const mfe = optionalNumber(sampledMfeR);
+  if (final == null || mfe == null) return 'INCOMPLETE';
   if (verdict === 'BUY') {
     if (final > 0) return 'TRUE_POSITIVE';
     if (mfe >= 1) return 'BUY_EXIT_DEPENDENT';
@@ -281,10 +287,10 @@ export function finalizeDecisionOutcomeIfReady(receiptId) {
   if (Number(last.due_at_ms) > now()) return false;
   if (observations.some(row => !['ready', 'failed'].includes(row.status))) return false;
 
-  const ready = observations.filter(row => row.status === 'ready' && Number.isFinite(Number(row.r_multiple)));
+  const ready = observations.filter(row => row.status === 'ready' && optionalNumber(row.r_multiple) != null);
   const finalReady = ready.find(row => row.horizon_ms === last.horizon_ms) || null;
-  const rValues = ready.map(row => Number(row.r_multiple));
-  const finalR = finalReady ? Number(finalReady.r_multiple) : null;
+  const rValues = ready.map(row => optionalNumber(row.r_multiple)).filter(value => value != null);
+  const finalR = finalReady ? optionalNumber(finalReady.r_multiple) : null;
   const sampledMfeR = rValues.length ? Math.max(...rValues) : null;
   const sampledMaeR = rValues.length ? Math.min(...rValues) : null;
   const classification = classifyDecisionOutcome(receipt.verdict, { finalR, sampledMfeR });
