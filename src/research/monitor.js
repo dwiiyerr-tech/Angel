@@ -11,6 +11,29 @@ import {
   settleResearchPartialExitV3,
 } from './exitSimulator.js';
 
+function repairResearchPartialTokenEstimate(beforePosition) {
+  const beforeEstimate = Number(beforePosition?.token_amount_est);
+  if (!Number.isFinite(beforeEstimate) || beforeEstimate < 0 || !beforePosition?.token_amount_raw) return null;
+  let beforeRaw;
+  try { beforeRaw = BigInt(String(beforePosition.token_amount_raw)); } catch { return null; }
+  if (beforeRaw <= 0n) return null;
+
+  const after = db.prepare('SELECT token_amount_raw, token_amount_est FROM dry_run_positions WHERE id = ?').get(beforePosition.id);
+  if (!after?.token_amount_raw) return null;
+  let afterRaw;
+  try { afterRaw = BigInt(String(after.token_amount_raw)); } catch { return null; }
+  if (afterRaw < 0n || afterRaw >= beforeRaw) return null;
+
+  // token_amount_est uses human token units while token_amount_raw uses mint raw
+  // units. Legacy partial accounting mixed the two when raw inventory existed.
+  // Preserve the human-unit estimate by scaling it with the exact raw ratio.
+  const ratioPpb = Number((afterRaw * 1_000_000_000n) / beforeRaw) / 1_000_000_000;
+  const corrected = beforeEstimate * ratioPpb;
+  db.prepare('UPDATE dry_run_positions SET token_amount_est = ? WHERE id = ? AND execution_mode = ?')
+    .run(corrected, beforePosition.id, 'research');
+  return corrected;
+}
+
 async function recordAndReportFinalSettlement(settlement) {
   if (!settlement?.ok || settlement.kind !== 'final' || !settlement.result) return false;
   const observation = recordResearchObservation(settlement.positionId, settlement.result, {
@@ -83,6 +106,7 @@ export async function monitorResearchPositions() {
         console.error(`[research-exit-v3] partial settlement failed for ${position.id}: ${error.message}`);
         return null;
       });
+      if (partialSettlement) repairResearchPartialTokenEstimate(position);
       if (partialSettlement?.pending) {
         console.warn(`[research-exit-v3] partial settlement #${partialSettlement.settlementId} pending for position ${position.id}`);
       }
