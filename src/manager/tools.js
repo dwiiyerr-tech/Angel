@@ -16,8 +16,11 @@ function tableExists(name) {
 }
 
 function windowFromQuestion(question) {
-  const match = String(question || '').toLowerCase().match(/\b(\d+(?:\.\d+)?\s*(?:m|h|d))\b/);
-  return parseWindowMs(match ? match[1].replace(/\s+/g, '') : '24h');
+  const text = String(question || '').toLowerCase();
+  const match = text.match(/\b(\d+(?:\.\d+)?\s*(?:m|h|d))\b/);
+  if (match) return parseWindowMs(match[1].replace(/\s+/g, ''));
+  const readinessIntent = /(readiness|kesiapan|siap\s+(?:untuk\s+)?(?:shadow|confirm|live)|ready\s+(?:for\s+)?(?:shadow|confirm|live)|layak\s+(?:naik|masuk|dipertimbangkan))/i.test(text);
+  return parseWindowMs(readinessIntent ? '7d' : '24h');
 }
 
 function receiptReferenceFromQuestion(question) {
