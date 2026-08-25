@@ -61,8 +61,11 @@ export function modeCapabilities(value = null) {
     research: !live,
     walletRequired: live,
     broadcastAllowed: live,
-    perTradeConfirmationRequired: false,
-    autonomousBroadcastAllowed: live,
+    // Every LIVE entry is owner-confirmed. Protective exits (TP/SL/trailing)
+    // remain automatic after an approved entry so risk controls cannot stall.
+    perTradeConfirmationRequired: live,
+    autonomousBroadcastAllowed: false,
+    protectiveExitBroadcastAllowed: live,
     moneyGradeEvidence: live,
     ownerApprovalRequired: live,
   };
