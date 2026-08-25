@@ -1,30 +1,30 @@
 import assert from 'node:assert/strict';
-import { modeCapabilities } from '../../src/research/policy.js';
+import { modeCapabilities, normalizeConfiguredMode } from '../../src/research/policy.js';
 
-const research = modeCapabilities('research');
-assert.equal(research.walletRequired, false);
-assert.equal(research.broadcastAllowed, false);
-assert.equal(research.perTradeConfirmationRequired, false);
-assert.equal(research.autonomousBroadcastAllowed, false);
+const paper = modeCapabilities('paper');
+assert.equal(paper.mode, 'paper');
+assert.equal(paper.walletRequired, false);
+assert.equal(paper.broadcastAllowed, false);
+assert.equal(paper.autonomousBroadcastAllowed, false);
+assert.equal(paper.ownerApprovalRequired, false);
 
-const shadow = modeCapabilities('shadow_live');
-assert.equal(shadow.walletRequired, true);
-assert.equal(shadow.broadcastAllowed, false);
-assert.equal(shadow.perTradeConfirmationRequired, false);
-assert.equal(shadow.autonomousBroadcastAllowed, false);
-
-const confirm = modeCapabilities('confirm');
-assert.equal(confirm.walletRequired, true);
-assert.equal(confirm.broadcastAllowed, true);
-assert.equal(confirm.perTradeConfirmationRequired, true);
-assert.equal(confirm.autonomousBroadcastAllowed, false);
-assert.equal(confirm.moneyGradeEvidence, true);
+// Legacy Shadow is now only a migration alias for PAPER.
+const legacyShadow = modeCapabilities('shadow_live');
+assert.deepEqual(legacyShadow, paper);
+assert.equal(normalizeConfiguredMode('shadow_live'), 'paper');
 
 const live = modeCapabilities('live');
+assert.equal(live.mode, 'live');
 assert.equal(live.walletRequired, true);
 assert.equal(live.broadcastAllowed, true);
-assert.equal(live.perTradeConfirmationRequired, false);
 assert.equal(live.autonomousBroadcastAllowed, true);
-assert.equal(live.moneyGradeEvidence, true);
+assert.equal(live.ownerApprovalRequired, true);
 
-console.log('[mode-capabilities] Research/Shadow/Confirm/Live metadata matches executor semantics');
+// Legacy Confirm is now only a migration alias for LIVE; it cannot create a
+// separate per-trade-confirmation runtime mode.
+const legacyConfirm = modeCapabilities('confirm');
+assert.deepEqual(legacyConfirm, live);
+assert.equal(normalizeConfiguredMode('confirm'), 'live');
+assert.equal(legacyConfirm.perTradeConfirmationRequired, false);
+
+console.log('[two-mode-capabilities] legacy Shadow/Confirm aliases collapse safely into PAPER/LIVE');
