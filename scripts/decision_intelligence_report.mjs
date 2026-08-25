@@ -19,9 +19,23 @@ if (jsonMode) {
   process.exit(0);
 }
 
-const fmtR = value => Number.isFinite(Number(value)) ? `${Number(value) >= 0 ? '+' : ''}${Number(value).toFixed(2)}R` : '—';
-const fmtPct = value => Number.isFinite(Number(value)) ? `${Number(value).toFixed(2)}%` : '—';
-const fmtMs = value => Number.isFinite(Number(value)) ? `${Math.round(Number(value))}ms` : '—';
+const numberOrNull = value => {
+  if (value === null || value === undefined || value === '') return null;
+  const parsed = Number(value);
+  return Number.isFinite(parsed) ? parsed : null;
+};
+const fmtR = value => {
+  const n = numberOrNull(value);
+  return n == null ? '—' : `${n >= 0 ? '+' : ''}${n.toFixed(2)}R`;
+};
+const fmtPct = value => {
+  const n = numberOrNull(value);
+  return n == null ? '—' : `${n.toFixed(2)}%`;
+};
+const fmtMs = value => {
+  const n = numberOrNull(value);
+  return n == null ? '—' : `${Math.round(n)}ms`;
+};
 
 console.log(`Angel Decision Intelligence V1 · ${formatWindow(windowMs)}`);
 console.log('================================================');
