@@ -15,8 +15,6 @@ export const CONTROL_PLANE_PROPOSABLE_SETTINGS = new Set([
   'blocked_routes',
   'min_opportunity_size_multiplier',
   'min_liquidity_usd',
-  'filter_extreme_bot_holders_pct',
-  'filter_extreme_dev_migrations',
   'flow_hard_price_change_pct',
   'flow_hard_net_buyer_ratio',
 ]);
@@ -25,8 +23,6 @@ const PROPOSABLE_NUMERIC_RANGES = Object.freeze({
   llm_min_confidence: [30, 90],
   min_opportunity_size_multiplier: [0.25, 0.75],
   min_liquidity_usd: [1000, 100000],
-  filter_extreme_bot_holders_pct: [25, 100],
-  filter_extreme_dev_migrations: [20, 1000],
   flow_hard_price_change_pct: [-80, 0],
   flow_hard_net_buyer_ratio: [-1, 0.5],
 });
@@ -169,16 +165,6 @@ function validateProposableNumber(key, number) {
   }
 }
 
-function validateManagedConfig(config = {}) {
-  const settings = config.settings || {};
-  const extremeBot = Number(settings.filter_extreme_bot_holders_pct ?? 70);
-  const softBot = Number(settings.filter_max_bot_holders_pct ?? 25);
-  if (Number.isFinite(extremeBot) && Number.isFinite(softBot) && extremeBot < softBot) {
-    throw new Error(`filter_extreme_bot_holders_pct (${extremeBot}) cannot be below soft bot threshold (${softBot})`);
-  }
-  return config;
-}
-
 export function validateProposalChanges(changes = []) {
   if (!Array.isArray(changes)) throw new Error('Proposal changes must be an array');
   if (changes.length > 6) throw new Error('A proposal may contain at most 6 changes');
@@ -212,7 +198,7 @@ export function applyChangesToConfig(parentConfig, changes) {
   const next = JSON.parse(JSON.stringify(parentConfig || {}));
   next.settings = { ...(next.settings || {}) };
   for (const change of validateProposalChanges(changes)) next.settings[change.key] = change.value;
-  return validateManagedConfig(next);
+  return next;
 }
 
 export function openStrategyProposal() {
