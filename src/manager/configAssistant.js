@@ -16,6 +16,15 @@ const ROUTES = new Set([
   'dual_source',
 ]);
 
+const RUNTIME_FALLBACKS = Object.freeze({
+  llm_min_confidence: '65',
+  min_liquidity_usd: '5000',
+  flow_hard_price_change_pct: '-10',
+  flow_hard_net_buyer_ratio: '0',
+  min_opportunity_size_multiplier: '0.35',
+  blocked_routes: '["trending","graduated_trending"]',
+});
+
 export const MANAGER_CONFIG_CATALOG = Object.freeze({
   confidence: {
     key: 'llm_min_confidence',
@@ -28,18 +37,6 @@ export const MANAGER_CONFIG_CATALOG = Object.freeze({
     label: 'minimum DEX liquidity',
     unit: 'USD',
     examples: ['5000', '7500', '10k'],
-  },
-  extreme_bot: {
-    key: 'filter_extreme_bot_holders_pct',
-    label: 'extreme bot-holder hard veto',
-    unit: '%',
-    examples: ['60', '70', '80'],
-  },
-  extreme_dev: {
-    key: 'filter_extreme_dev_migrations',
-    label: 'extreme developer-migration hard veto',
-    unit: 'count',
-    examples: ['75', '100', '150'],
   },
   flow_dump: {
     key: 'flow_hard_price_change_pct',
@@ -109,10 +106,6 @@ function resolveAlias(input) {
     ['konfidensi', 'confidence'],
     ['liq', 'liquidity'],
     ['likuiditas', 'liquidity'],
-    ['bot_extreme', 'extreme_bot'],
-    ['bot_hard', 'extreme_bot'],
-    ['dev_migrations', 'extreme_dev'],
-    ['dev_extreme', 'extreme_dev'],
     ['dump', 'flow_dump'],
     ['flow_price', 'flow_dump'],
     ['net_buyer', 'flow_net'],
@@ -158,8 +151,8 @@ export function managerConfigSnapshot() {
   const active = activeConfigVersion();
   const open = openStrategyProposal();
   const fields = Object.fromEntries(Object.entries(MANAGER_CONFIG_CATALOG).map(([alias, row]) => {
-    const fallback = active?.config?.settings?.[row.key] ?? null;
-    const current = setting(row.key, fallback == null ? '' : String(fallback));
+    const fallback = active?.config?.settings?.[row.key] ?? RUNTIME_FALLBACKS[row.key] ?? '';
+    const current = setting(row.key, String(fallback));
     return [alias, {
       key: row.key,
       label: row.label,
