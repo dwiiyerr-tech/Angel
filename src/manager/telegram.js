@@ -8,6 +8,8 @@ import {
   latestDecisionReceiptDetailsByMint,
   loadDecisionReceiptDetails,
 } from '../decisionIntelligence/report.js';
+import { preLiveReadinessReport } from '../readiness/engine.js';
+import { formatReadinessHtml } from '../readiness/format.js';
 import { clearManagerConversation, handleManagerMessage } from './index.js';
 
 let initialized = false;
@@ -71,6 +73,15 @@ async function sendDecision(chatId, arg) {
   });
 }
 
+function sendReadiness(chatId, windowArg = '7d') {
+  const windowMs = parseWindowMs(windowArg);
+  const report = preLiveReadinessReport(windowMs);
+  return bot.sendMessage(chatId, formatReadinessHtml(report), {
+    parse_mode: 'HTML',
+    disable_web_page_preview: true,
+  });
+}
+
 export function setupTelegramManager() {
   if (initialized) return;
   initialized = true;
@@ -83,7 +94,7 @@ export function setupTelegramManager() {
     if (text.startsWith('/ask')) {
       const question = text.replace(/^\/ask(?:@\S+)?\s*/i, '').trim();
       if (!question) {
-        bot.sendMessage(msg.chat.id, 'Usage: /ask <question>\nOr simply send a normal message to chat with Angel Manager.').catch(() => {});
+        bot.sendMessage(msg.chat.id, 'Usage: /ask <question>\nOr simply send a normal message to chat with Angel Manager V2.').catch(() => {});
         return;
       }
       handleManagerMessage(msg.chat.id, question).catch(error => console.error(`[manager] /ask failed: ${error.message}`));
@@ -91,6 +102,15 @@ export function setupTelegramManager() {
     }
     if (text.startsWith('/managerclear')) {
       clearManagerConversation(msg.chat.id).catch(error => console.error(`[manager] clear failed: ${error.message}`));
+      return;
+    }
+    if (text.startsWith('/readiness')) {
+      const windowArg = text.split(/\s+/)[1] || '7d';
+      try {
+        sendReadiness(msg.chat.id, windowArg).catch(error => console.error(`[manager] readiness failed: ${error.message}`));
+      } catch (error) {
+        bot.sendMessage(msg.chat.id, `Readiness report failed: ${error.message}`).catch(() => {});
+      }
       return;
     }
     if (text.startsWith('/decision')) {

@@ -9,14 +9,18 @@ import {
   recentDecisionReceipts,
 } from '../decisionIntelligence/report.js';
 import { ensureDecisionIntelligenceSchema } from '../decisionIntelligence/schema.js';
+import { preLiveReadinessReport } from '../readiness/engine.js';
 
 function tableExists(name) {
   return Boolean(db.prepare("SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = ?").get(name));
 }
 
 function windowFromQuestion(question) {
-  const match = String(question || '').toLowerCase().match(/\b(\d+(?:\.\d+)?\s*(?:m|h|d))\b/);
-  return parseWindowMs(match ? match[1].replace(/\s+/g, '') : '24h');
+  const text = String(question || '').toLowerCase();
+  const match = text.match(/\b(\d+(?:\.\d+)?\s*(?:m|h|d))\b/);
+  if (match) return parseWindowMs(match[1].replace(/\s+/g, ''));
+  const readinessIntent = /(readiness|kesiapan|siap\s+(?:untuk\s+)?(?:shadow|confirm|live)|ready\s+(?:for\s+)?(?:shadow|confirm|live)|layak\s+(?:naik|masuk|dipertimbangkan))/i.test(text);
+  return parseWindowMs(readinessIntent ? '7d' : '24h');
 }
 
 function receiptReferenceFromQuestion(question) {
@@ -167,7 +171,7 @@ export function buildManagerEvidence(question) {
   else if (mint) focusDecision = compactDetails(latestDecisionReceiptDetailsByMint(mint));
 
   return {
-    evidenceVersion: 'angel-manager-evidence-v1',
+    evidenceVersion: 'angel-manager-evidence-v2',
     generatedAtMs: Date.now(),
     questionWindowMs: windowMs,
     authority: {
@@ -182,6 +186,7 @@ export function buildManagerEvidence(question) {
     },
     system: systemSnapshot(),
     controlPlane: controlPlaneSnapshot(),
+    preLiveReadiness: preLiveReadinessReport(windowMs),
     decisionIntelligence: decisionIntelligenceSummary(windowMs),
     recentDecisions: recentDecisionReceipts(10),
     recentPositions: positionsSnapshot(8),

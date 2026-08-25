@@ -27,10 +27,13 @@ function chunkText(text, max = 3800) {
 function fallbackSummary(evidence, error) {
   const d = evidence?.decisionIntelligence || {};
   const s = evidence?.system || {};
+  const readiness = evidence?.preLiveReadiness?.evaluation?.currentStage || {};
   return [
-    '👼 Angel Manager sedang tidak bisa menghubungi LLM, tetapi read-only evidence masih tersedia.',
+    '👼 Angel Manager V2 sedang tidak bisa menghubungi LLM, tetapi deterministic read-only evidence masih tersedia.',
     '',
     `Mode: ${s.mode || 'unknown'}`,
+    `Readiness: ${readiness.status || 'NOT_READY'} (${readiness.score || 0}/100)`,
+    `Hard blockers: ${readiness.hardBlockers?.length || 0}`,
     `Decisions window: ${d.total || 0} (BUY ${d.verdicts?.BUY || 0} / WATCH ${d.verdicts?.WATCH || 0} / PASS ${d.verdicts?.PASS || 0})`,
     `Finalized outcomes: ${d.outcomes?.finalized || 0}`,
     `Median final R: ${Number.isFinite(Number(d.outcomes?.medianFinalR)) ? Number(d.outcomes.medianFinalR).toFixed(2) + 'R' : '—'}`,
@@ -38,7 +41,7 @@ function fallbackSummary(evidence, error) {
     `Circuit breaker: ${s.liveSafety?.circuitOpen ? 'OPEN' : 'CLOSED'}`,
     '',
     `LLM error: ${error.message}`,
-    'Tidak ada setting, approval, atau transaksi yang diubah.',
+    'Tidak ada setting, approval, mode, atau transaksi yang diubah.',
   ].join('\n');
 }
 
@@ -48,9 +51,9 @@ export async function handleManagerMessage(chatId, question) {
 
   if (liveAuthorizationIntent(text)) {
     const reply = [
-      '🔐 Angel Manager bersifat read-only dan tidak memiliki fungsi untuk approve atau mengaktifkan Live.',
+      '🔐 Angel Manager V2 bersifat read-only dan tidak memiliki fungsi untuk approve atau mengaktifkan Live.',
       '',
-      'Saya bisa menilai kesiapan, menjelaskan risk/evidence, dan merekomendasikan apakah Live layak dipertimbangkan.',
+      'Saya bisa membaca deterministic readiness, menjelaskan risk/evidence, dan merekomendasikan apakah Live layak dipertimbangkan.',
       'Otorisasi Live tetap harus dilakukan sendiri oleh owner melalui kontrol deterministik /livestatus dan /liveapprove.',
     ].join('\n');
     storeManagerMessage(chatId, 'user', text);
