@@ -4,6 +4,7 @@ import { GMGN_API_KEY } from '../config.js';
 
 const execFileAsync = promisify(execFile);
 const SOL_MINT_RE = /\b[1-9A-HJ-NP-Za-km-z]{32,44}\b/g;
+const SOL_MINT_EXACT_RE = /^[1-9A-HJ-NP-Za-km-z]{32,44}$/;
 const READ_ONLY_ACTIONS = new Set([
   'market_trending',
   'market_trenches',
@@ -109,12 +110,8 @@ export function buildGmgnResearchPlan(question) {
 
 function actionArgs(action, args = {}) {
   const address = String(args.address || '');
-  if (action.startsWith('token_') || action === 'market_kline') {
-    if (!SOL_MINT_RE.test(address)) {
-      SOL_MINT_RE.lastIndex = 0;
-      throw new Error('Invalid Solana token address');
-    }
-    SOL_MINT_RE.lastIndex = 0;
+  if ((action.startsWith('token_') || action === 'market_kline') && !SOL_MINT_EXACT_RE.test(address)) {
+    throw new Error('Invalid Solana token address');
   }
 
   switch (action) {
