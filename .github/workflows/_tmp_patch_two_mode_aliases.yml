@@ -26,8 +26,8 @@ jobs:
           old = "coalesce(execution_mode, 'dry_run') != 'research'"
           new = "lower(trim(coalesce(execution_mode, 'dry_run'))) IN ('live', 'confirm')"
           count = text.count(old)
-          if count != 7:
-              raise SystemExit(f'expected 7 legacy capital predicates in {positions}, found {count}')
+          if count != 8:
+              raise SystemExit(f'expected 8 legacy capital predicates in {positions}, found {count}')
           positions.write_text(text.replace(old, new))
 
           engine = Path('src/research/engine.js')
