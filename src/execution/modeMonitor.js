@@ -5,6 +5,7 @@ import { fetchJupiterWalletPnl } from '../enrichment/jupiter.js';
 import { liveWalletPubkey } from '../liveExecutor.js';
 import { sendPositionExit } from '../telegram/send.js';
 import { reconcileUnknownExecutions } from './reconciler.js';
+import { publicExecutionMode } from '../tradingModePresentation.js';
 
 async function monitorExecutionPositions() {
   const positions = db.prepare(`
@@ -17,20 +18,27 @@ async function monitorExecutionPositions() {
   let checked = 0;
   let walletPnlData = {};
   const pubkey = liveWalletPubkey();
-  if (pubkey && positions.some(position => position.execution_mode === 'live')) {
+  if (pubkey && positions.some(position => publicExecutionMode(position.execution_mode) === 'LIVE')) {
     walletPnlData = await fetchJupiterWalletPnl(pubkey);
   }
 
   for (const position of positions) {
     checked += 1;
+    const isLivePosition = publicExecutionMode(position.execution_mode) === 'LIVE';
+    // Historical `confirm` is a LIVE compatibility alias. Normalize it only in
+    // memory so the shared position engine applies real-money protective-exit
+    // semantics without rewriting historical storage rows.
+    const monitoredPosition = isLivePosition && position.execution_mode !== 'live'
+      ? { ...position, execution_mode: 'live' }
+      : position;
     try {
       // Missing/ambiguous live token amounts are resolved only by the durable
       // finalized-signature reconciler. Position monitoring must not infer a
       // completed swap from a current wallet balance alone.
-      const jupiterPnl = position.execution_mode === 'live'
+      const jupiterPnl = isLivePosition
         ? (walletPnlData[position.mint]?.pnl || null)
         : null;
-      const result = await refreshPosition(position, { autoExit: true, jupiterPnl });
+      const result = await refreshPosition(monitoredPosition, { autoExit: true, jupiterPnl });
       if (result?.exitReason) {
         try {
           await sendPositionExit(result);
@@ -40,7 +48,7 @@ async function monitorExecutionPositions() {
       }
     } catch (error) {
       console.error(`[mode-monitor] position ${position.id} (${position.execution_mode}) ${error.message}`);
-      if (position.execution_mode === 'live') liveFailures += 1;
+      if (isLivePosition) liveFailures += 1;
     }
   }
 

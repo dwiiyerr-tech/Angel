@@ -43,7 +43,8 @@ function persistedResearchPositionCount() {
   return Number(db.prepare(`
     SELECT COUNT(*) AS count
     FROM dry_run_positions
-    WHERE execution_mode = 'research' AND status = 'open'
+    WHERE status = 'open'
+      AND lower(trim(coalesce(execution_mode, 'dry_run'))) NOT IN ('live', 'confirm')
   `).get()?.count || 0);
 }
 
