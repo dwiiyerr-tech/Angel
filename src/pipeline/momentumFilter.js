@@ -41,12 +41,14 @@ function attachEdgeEvidence(candidate, momentumScore) {
     candidate.filters.needleScore = needle.score;
     candidate.filters.needleClassification = needle.classification;
     candidate.filters.needleEvidenceCoverage = needle.evidenceCoveragePercent;
+    candidate.filters.needleChallengerScore = needle.challenger?.score ?? null;
+    candidate.filters.needleChallengerReady = Boolean(needle.challenger?.promotionReady);
     candidate.filters.needleDimensions = Object.fromEntries(
       Object.entries(needle.dimensions || {}).map(([key, value]) => [key, value.score]),
     );
   } catch (error) {
     candidate.needle = {
-      version: 'needle-score-v1',
+      version: 'needle-score-v2',
       score: null,
       classification: 'UNAVAILABLE',
       hardReject: false,

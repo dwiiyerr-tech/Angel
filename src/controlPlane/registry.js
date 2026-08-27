@@ -6,6 +6,7 @@ import { configuredTradingMode } from '../research/policy.js';
 import { RESEARCH_SIMULATOR_VERSION } from '../research/engine.js';
 import { RUNNER_MODEL_VERSION } from '../edge/runnerModel.js';
 import { ROUTE_EDGE_MODEL_VERSION } from '../edge/routeEdgeModel.js';
+import { validateNeedleWeights } from '../edge/needleWeights.js';
 import { ensureControlPlaneSchema } from './schema.js';
 
 export const STRATEGY_PROMPT_SET_VERSION = 'strategy-control-v1';
@@ -17,6 +18,7 @@ export const CONTROL_PLANE_PROPOSABLE_SETTINGS = new Set([
   'min_liquidity_usd',
   'flow_hard_price_change_pct',
   'flow_hard_net_buyer_ratio',
+  'needle_weights_json',
 ]);
 
 const PROPOSABLE_NUMERIC_RANGES = Object.freeze({
@@ -179,6 +181,8 @@ export function validateProposalChanges(changes = []) {
     let value;
     if (key === 'blocked_routes') {
       value = normalizedBlockedRoutes(item.value);
+    } else if (key === 'needle_weights_json') {
+      value = canonicalJson(validateNeedleWeights(item.value));
     } else {
       const number = Number(item.value);
       if (!Number.isFinite(number)) throw new Error(`${key} must be numeric`);

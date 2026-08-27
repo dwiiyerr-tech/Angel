@@ -24,12 +24,16 @@ export function candidateSummary(candidate, decision = null) {
     || candidate.chart?.windows?.find(row => row.label === 'recent_24h_5m' && row.available);
   const route = candidate.signals?.label || signalLabel(candidate.signals);
   const needleScore = Number(candidate.needle?.score);
+  const needleChallengerScore = Number(candidate.needle?.challenger?.score);
   const lines = [
     `🛶 <b>Angel Candidate</b>`,
     '',
     `Signal: <b>${escapeHtml(route)}</b>`,
     Number.isFinite(needleScore)
       ? `🪡 Needle: <b>${needleScore.toFixed(1)}/100 · ${escapeHtml(candidate.needle?.classification || 'UNRANKED')}</b> · Evidence ${Number(candidate.needle?.evidenceCoveragePercent || 0).toFixed(0)}%`
+      : null,
+    candidate.needle?.challenger?.suggestionReady && Number.isFinite(needleChallengerScore)
+      ? `🧪 Needle challenger: <b>${needleChallengerScore.toFixed(1)}/100</b> · ${candidate.needle?.challenger?.promotionReady ? 'OOS READY' : 'learning'} · n=${Number(candidate.needle?.challenger?.usableSample || 0)}`
       : null,
     candidate.token?.name || candidate.token?.symbol ? `Name: <b>${escapeHtml(candidate.token?.name || candidate.token?.symbol)}${candidate.token?.symbol && candidate.token?.name ? ` (${escapeHtml(candidate.token.symbol)})` : ''}</b>` : null,
     `Token: <a href="${gmgnLink(candidate.token?.mint)}">${short(candidate.token?.mint)}</a>`,
