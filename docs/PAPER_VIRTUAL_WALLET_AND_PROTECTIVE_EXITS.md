@@ -12,8 +12,11 @@ The settlement is virtual and therefore does not sign or broadcast.
 - `paper_initial_balance_sol` defaults to `10` and can be changed with
   `/setfilter paper_initial_balance_sol <sol>`.
 - `virtual equity = initial balance + closed PnL + marked open PnL`.
-- `committed` is the remaining position notional plus partial-sold cost basis
-  and entry fee.
+- `committed` is the remaining open position notional plus its entry fee.
+  `size_sol` is reduced when a partial exit settles, so sold cost basis is
+  historical accounting only and is not reserved a second time.
+- Partial exits therefore release their returned virtual principal back into
+  `available`, while realized profit/loss is applied separately.
 - `available` is enforced for new PAPER entry reservations; existing positions
   remain open until their normal exit rule fires.
 - Open marks are refreshed by the shared position monitor and stored with a
