@@ -6,6 +6,7 @@ import { configuredTradingMode } from '../research/policy.js';
 import { RESEARCH_SIMULATOR_VERSION } from '../research/engine.js';
 import { RUNNER_MODEL_VERSION } from '../edge/runnerModel.js';
 import { ROUTE_EDGE_MODEL_VERSION } from '../edge/routeEdgeModel.js';
+import { validateNeedleWeights } from '../edge/needleWeights.js';
 import { ensureControlPlaneSchema } from './schema.js';
 
 export const STRATEGY_PROMPT_SET_VERSION = 'strategy-control-v1';
@@ -17,6 +18,7 @@ export const CONTROL_PLANE_PROPOSABLE_SETTINGS = new Set([
   'min_liquidity_usd',
   'flow_hard_price_change_pct',
   'flow_hard_net_buyer_ratio',
+  'needle_weights_json',
 ]);
 
 const PROPOSABLE_NUMERIC_RANGES = Object.freeze({
@@ -179,6 +181,8 @@ export function validateProposalChanges(changes = []) {
     let value;
     if (key === 'blocked_routes') {
       value = normalizedBlockedRoutes(item.value);
+    } else if (key === 'needle_weights_json') {
+      value = canonicalJson(validateNeedleWeights(item.value));
     } else {
       const number = Number(item.value);
       if (!Number.isFinite(number)) throw new Error(`${key} must be numeric`);
@@ -443,7 +447,15 @@ export function rollbackToParent(targetVersion, reason = 'manual rollback', acto
   db.transaction(() => {
     if (configuredTradingMode() !== 'paper') setSetting('trading_mode', 'paper');
     for (const key of CONTROL_PLANE_PROPOSABLE_SETTINGS) {
-      if (target.config?.settings?.[key] !== undefined) setSetting(key, target.config.settings[key]);
+      if (target.config?.settings?.[key] !== undefined) {
+        setSetting(key, target.config.settings[key]);
+      } else {
+        // A child config may introduce a newly managed setting (for example
+        // Needle weights) that did not exist in its parent. Rollback must
+        // restore absence as well as values or the parent config hash cannot
+        // be reconstructed exactly. This runs only after forcing PAPER mode.
+        db.prepare('DELETE FROM settings WHERE key = ?').run(key);
+      }
     }
     const actualHash = hashJson(currentManagedConfig());
     if (actualHash !== target.config_hash) throw new Error('Rollback config hash mismatch');

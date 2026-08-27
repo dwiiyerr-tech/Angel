@@ -32,6 +32,9 @@ function cleanControlPlane() {
 cleanControlPlane();
 resetControlPlaneSchemaForTests();
 ensureControlPlaneSchema();
+// Simulate upgrading an older active config that predates Needle v2. The
+// parent legitimately has no needle_weights_json key.
+db.prepare("DELETE FROM settings WHERE key = 'needle_weights_json'").run();
 
 const originalMode = setting('trading_mode', 'dry_run');
 setSetting('trading_mode', 'research');
@@ -123,6 +126,32 @@ const restored = rollbackToParent(1, 'unit test rollback', 'unit_test');
 assert.equal(restored.version, 1);
 assert.equal(Number(setting('llm_min_confidence')), currentConfidence);
 assert.equal(activeConfigVersion().version, 1);
+
+// Regression: a child may introduce a setting that the parent did not have.
+// Promotion writes it; rollback must delete it again to reconstruct the exact
+// immutable parent hash.
+const needleWeights = JSON.stringify({
+  safety: 20, devQuality: 10, holderDistribution: 10, organicFlow: 11,
+  liquidityStructure: 10, narrative: 7, earlyAsymmetry: 13,
+  runnerProbability: 12, expectedR: 7,
+});
+const needleProposal = createStrategyProposal({
+  changes: [{ key: 'needle_weights_json', value: needleWeights, rationale: 'rollback regression' }],
+  evidence: { ...evidence, totalClosed: 100 },
+  analysis: { rationale: 'rollback newly introduced setting' },
+  source: 'unit_test',
+  analystMode: 'deterministic',
+  actor: 'unit_test',
+});
+approveProposalForTest(needleProposal.proposalId, 'unit_test');
+db.prepare("UPDATE strategy_proposals SET status = 'promotion_ready' WHERE id = ?").run(needleProposal.proposalId);
+db.prepare("UPDATE config_versions SET status = 'promotion_ready' WHERE version = ?").run(needleProposal.proposedVersion);
+const needlePromoted = promoteProposal(needleProposal.proposalId, 'unit_test');
+assert.equal(needlePromoted.version, needleProposal.proposedVersion);
+assert.ok(setting('needle_weights_json', ''), 'promotion must persist Needle weights');
+const needleRolledBack = rollbackToParent(1, 'needle setting absence regression', 'unit_test');
+assert.equal(needleRolledBack.version, 1);
+assert.equal(setting('needle_weights_json', ''), '', 'rollback must restore parent absence, not leave child-only setting behind');
 
 const analyst = deterministicStrategyAnalysis({
   proposalEligible: true,

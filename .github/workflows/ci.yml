@@ -53,6 +53,11 @@ jobs:
           DB_PATH: /tmp/angel-edge-report.sqlite
         run: npm run edge:report
 
+      - name: Needle calibration report smoke test
+        env:
+          DB_PATH: /tmp/angel-needle-calibration-report.sqlite
+        run: npm run needle:report
+
       - name: Strategy control-plane report smoke test
         env:
           DB_PATH: /tmp/angel-control-plane-report.sqlite

@@ -10,11 +10,17 @@ import {
   rollbackToParent,
 } from './registry.js';
 import { ensureControlPlaneSchema } from './schema.js';
+import { evaluateNeedleWeightComparison } from '../edge/needleCalibration.js';
+import { BASE_NEEDLE_WEIGHTS, parseNeedleWeights, scoreNeedleDimensions } from '../edge/needleWeights.js';
 
 function finite(value) {
   if (value === null || value === undefined || value === '') return null;
   const number = Number(value);
   return Number.isFinite(number) ? number : null;
+}
+
+function parsePayload(value) {
+  try { return JSON.parse(value || '{}'); } catch { return {}; }
 }
 
 function parseBlockedRoutes(value) {
@@ -47,10 +53,13 @@ export function evaluateEntryPolicy(candidate = {}, decision = {}, config = {}) 
   const flowPriceFloor = finite(settings.flow_hard_price_change_pct) ?? -10;
   const flowNetFloor = finite(settings.flow_hard_net_buyer_ratio) ?? 0;
   const sourceWeight = finite(candidate?.filters?.sourceWeight) ?? 1;
+  const needleDimensions = candidate?.needle?.dimensions || null;
+  const needleWeights = parseNeedleWeights(settings.needle_weights_json, BASE_NEEDLE_WEIGHTS);
+  const needleScore = needleDimensions ? scoreNeedleDimensions(needleDimensions, needleWeights) : null;
   const liquidity = finite(candidate?.metrics?.liquidityUsd ?? candidate?.jupiterAsset?.liquidityUsd ?? candidate?.gmgn?.liquidity) ?? 0;
   const priceChange1h = finite(candidate?.flowAssessment?.priceChange1h ?? candidate?.jupiterAsset?.stats1h?.priceChange);
   const netBuyerRatio = candidateNetBuyerRatio(candidate);
-  const evidence = { liquidity, priceChange1h, netBuyerRatio, liquidityFloor, flowPriceFloor, flowNetFloor };
+  const evidence = { liquidity, priceChange1h, netBuyerRatio, liquidityFloor, flowPriceFloor, flowNetFloor, needleScore, needleWeights };
 
   if (verdict !== 'BUY') return { eligible: false, reason: `verdict_${verdict.toLowerCase()}`, route, confidence, sourceWeight, evidence };
   if (blockedRoutes.has(route)) return { eligible: false, reason: 'blocked_route', route, confidence, sourceWeight, evidence };
@@ -90,6 +99,7 @@ export function recordChallengerObservation(candidateId, candidate = {}, decisio
     challenger: challengerResult,
     edge: candidate?.edge?.combined || null,
     quality: candidate?.edge?.quality || null,
+    needle: candidate?.needle || null,
   };
 
   db.prepare(`
@@ -176,8 +186,8 @@ export function evaluateChallenger(proposalId) {
     throw new Error('Proposal is not in challenger evaluation state');
   }
   const rows = db.prepare(`
-    SELECT o.active_eligible, o.challenger_eligible, o.route, o.confidence,
-           p.realized_r, p.pnl_percent
+    SELECT o.active_eligible, o.challenger_eligible, o.route, o.confidence, o.payload_json,
+           p.realized_r, p.pnl_percent, p.mfe_r, p.mae_r, p.closed_at_ms
     FROM challenger_observations o
     LEFT JOIN dry_run_positions p
       ON p.candidate_id = o.candidate_id
@@ -185,12 +195,47 @@ export function evaluateChallenger(proposalId) {
      AND p.execution_mode IN ('research', 'shadow_live')
     WHERE o.proposal_id = ?
   `).all(proposal.id);
-  const evaluation = evaluateChallengerRows(rows, {
-    minSample: Number(proposal.min_test_sample || 30),
-    minAgeMs: Math.max(0, numSetting('control_plane_min_test_hours', 24)) * 60 * 60 * 1000,
-    startedAtMs: Number(proposal.test_started_at_ms || proposal.created_at_ms),
-    minimumExpectancyDeltaR: numSetting('control_plane_min_expectancy_delta_r', 0.05),
-  });
+  const minSample = Number(proposal.min_test_sample || 30);
+  const minAgeMs = Math.max(0, numSetting('control_plane_min_test_hours', 24)) * 60 * 60 * 1000;
+  const startedAtMs = Number(proposal.test_started_at_ms || proposal.created_at_ms);
+  const needleWeightChange = (proposal?.proposal?.changes || []).some(change => change?.key === 'needle_weights_json');
+  let evaluation;
+  if (needleWeightChange) {
+    const control = configVersionByNumber(proposal.parent_version);
+    const challengerConfig = configVersionByNumber(proposal.proposed_version);
+    const activeWeights = parseNeedleWeights(control?.config?.settings?.needle_weights_json, BASE_NEEDLE_WEIGHTS);
+    const challengerWeights = parseNeedleWeights(challengerConfig?.config?.settings?.needle_weights_json, BASE_NEEDLE_WEIGHTS);
+    const needleRows = rows.map(row => {
+      const payload = parsePayload(row.payload_json);
+      const dimensions = payload?.needle?.dimensions;
+      if (!dimensions || finite(row.mfe_r) == null) return null;
+      return {
+        dimensions,
+        mfeR: finite(row.mfe_r),
+        maeR: finite(row.mae_r),
+        realizedR: finite(row.realized_r),
+        closedAtMs: finite(row.closed_at_ms),
+      };
+    }).filter(Boolean);
+    evaluation = {
+      evaluationType: 'needle_weight_ranking',
+      activeWeights,
+      challengerWeights,
+      ...evaluateNeedleWeightComparison(needleRows, activeWeights, challengerWeights, {
+        minSample,
+        minAgeMs,
+        startedAtMs,
+        minUtilityLift: numSetting('needle_challenger_min_utility_lift', 0.01),
+      }),
+    };
+  } else {
+    evaluation = evaluateChallengerRows(rows, {
+      minSample,
+      minAgeMs,
+      startedAtMs,
+      minimumExpectancyDeltaR: numSetting('control_plane_min_expectancy_delta_r', 0.05),
+    });
+  }
 
   const now = Date.now();
   let nextStatus = proposal.status;

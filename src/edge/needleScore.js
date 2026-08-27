@@ -1,14 +1,11 @@
-const WEIGHTS = Object.freeze({
-  safety: 20,
-  devQuality: 10,
-  holderDistribution: 10,
-  organicFlow: 15,
-  liquidityStructure: 10,
-  narrative: 7,
-  earlyAsymmetry: 13,
-  runnerProbability: 10,
-  expectedR: 5,
-});
+import { setting } from '../db/settings.js';
+import { needleCalibrationSnapshot } from './needleCalibration.js';
+import {
+  BASE_NEEDLE_WEIGHTS,
+  needleEvidenceCoverage,
+  parseNeedleWeights,
+  scoreNeedleDimensions,
+} from './needleWeights.js';
 
 function finite(value) {
   if (value === null || value === undefined || value === '') return null;
@@ -239,8 +236,19 @@ export function scoreExpectedR(candidate = {}) {
   return { score: clamp((expectedR + 1) / 3 * 100), known: true, coverage: 1 };
 }
 
+function configuredNeedleWeights() {
+  try {
+    const raw = setting('needle_weights_json', '');
+    if (!raw) return { weights: { ...BASE_NEEDLE_WEIGHTS }, source: 'needle_v1_base' };
+    const parsed = parseNeedleWeights(raw, BASE_NEEDLE_WEIGHTS);
+    return { weights: parsed, source: 'control_plane_promoted' };
+  } catch {
+    return { weights: { ...BASE_NEEDLE_WEIGHTS }, source: 'needle_v1_base' };
+  }
+}
+
 export function calculateNeedleScore(candidate = {}) {
-  const dimensions = {
+  const rawDimensions = {
     safety: scoreSafety(candidate),
     devQuality: scoreDevQuality(candidate),
     holderDistribution: scoreHolderDistribution(candidate),
@@ -251,29 +259,47 @@ export function calculateNeedleScore(candidate = {}) {
     runnerProbability: scoreRunnerProbability(candidate),
     expectedR: scoreExpectedR(candidate),
   };
+  const dimensions = Object.fromEntries(Object.entries(rawDimensions).map(([key, value]) => [key, {
+    score: Number(clamp(value?.score ?? 50).toFixed(2)),
+    known: Boolean(value?.known),
+    coverage: Number(clamp((value?.coverage ?? 0) * 100).toFixed(1)),
+  }]));
 
-  const hardReject = dimensions.safety.hardReject === true;
-  const score = Object.entries(WEIGHTS).reduce((sum, [key, weight]) => (
-    sum + clamp(dimensions[key]?.score ?? 50) * weight / 100
-  ), 0);
-  const evidenceCoverage = Object.entries(WEIGHTS).reduce((sum, [key, weight]) => (
-    sum + (dimensions[key]?.known ? weight : weight * clamp(dimensions[key]?.coverage ?? 0, 0, 1))
-  ), 0);
-  const finalScore = hardReject ? 0 : clamp(score);
+  const hardReject = rawDimensions.safety.hardReject === true;
+  const active = configuredNeedleWeights();
+  const calibration = needleCalibrationSnapshot(active.weights);
+  const baseScore = hardReject ? 0 : scoreNeedleDimensions(dimensions, BASE_NEEDLE_WEIGHTS);
+  const activeScore = hardReject ? 0 : scoreNeedleDimensions(dimensions, active.weights);
+  const challengerWeights = parseNeedleWeights(calibration?.challengerWeights, active.weights);
+  const challengerScore = hardReject ? 0 : scoreNeedleDimensions(dimensions, challengerWeights);
 
   return {
-    version: 'needle-score-v1',
-    score: Number(finalScore.toFixed(2)),
-    classification: classification(finalScore, hardReject),
+    version: 'needle-score-v2',
+    score: Number(activeScore.toFixed(2)),
+    baseScore: Number(baseScore.toFixed(2)),
+    classification: classification(activeScore, hardReject),
     hardReject,
-    evidenceCoveragePercent: Number(clamp(evidenceCoverage).toFixed(1)),
-    weights: WEIGHTS,
-    dimensions: Object.fromEntries(Object.entries(dimensions).map(([key, value]) => [key, {
-      score: Number(clamp(value?.score ?? 50).toFixed(2)),
-      known: Boolean(value?.known),
-      coverage: Number(clamp((value?.coverage ?? 0) * 100).toFixed(1)),
-    }])),
+    evidenceCoveragePercent: Number(needleEvidenceCoverage(dimensions, active.weights).toFixed(1)),
+    weightSource: active.source,
+    weights: active.weights,
+    baseWeights: BASE_NEEDLE_WEIGHTS,
+    challenger: {
+      version: calibration?.version || null,
+      score: Number(challengerScore.toFixed(2)),
+      classification: classification(challengerScore, hardReject),
+      weights: challengerWeights,
+      usableSample: Number(calibration?.usableSample || 0),
+      trainingSample: Number(calibration?.trainingSample || 0),
+      validationSample: Number(calibration?.validationSample || 0),
+      blend: Number(calibration?.blend || 0),
+      suggestionReady: Boolean(calibration?.suggestionReady),
+      promotionReady: Boolean(calibration?.promotionReady),
+      validation: calibration?.validation || null,
+      diagnostics: calibration?.diagnostics || {},
+      error: calibration?.error || null,
+    },
+    dimensions,
   };
 }
 
-export { WEIGHTS as NEEDLE_SCORE_WEIGHTS };
+export { BASE_NEEDLE_WEIGHTS as NEEDLE_SCORE_WEIGHTS };
