@@ -28,7 +28,7 @@ export function openPositions() {
 export function openExecutionPositions() {
   return db.prepare(`
     SELECT * FROM dry_run_positions
-    WHERE status = 'open' AND coalesce(execution_mode, 'dry_run') != 'research'
+    WHERE status = 'open' AND lower(trim(coalesce(execution_mode, 'dry_run'))) IN ('live', 'confirm')
     ORDER BY opened_at_ms DESC
   `).all();
 }
@@ -46,7 +46,7 @@ export function decrementPendingPosition() {
 function executionOpenCount() {
   return Number(db.prepare(`
     SELECT COUNT(*) AS count FROM dry_run_positions
-    WHERE status = 'open' AND coalesce(execution_mode, 'dry_run') != 'research'
+    WHERE status = 'open' AND lower(trim(coalesce(execution_mode, 'dry_run'))) IN ('live', 'confirm')
   `).get()?.count || 0);
 }
 
@@ -93,7 +93,7 @@ export function liveEntryBlockReason(mint, strat = activeStrategy()) {
   const recentClosed = db.prepare(`
     SELECT id FROM dry_run_positions
     WHERE mint = ? AND status = 'closed'
-      AND coalesce(execution_mode, 'dry_run') != 'research'
+      AND lower(trim(coalesce(execution_mode, 'dry_run'))) IN ('live', 'confirm')
       AND closed_at_ms > ?
     LIMIT 1
   `).get(mint, now() - 24 * 60 * 60 * 1000);
@@ -103,7 +103,7 @@ export function liveEntryBlockReason(mint, strat = activeStrategy()) {
   const pastWin = db.prepare(`
     SELECT id FROM dry_run_positions
     WHERE mint = ? AND status = 'closed' AND pnl_percent > 0
-      AND coalesce(execution_mode, 'dry_run') != 'research'
+      AND lower(trim(coalesce(execution_mode, 'dry_run'))) IN ('live', 'confirm')
       AND closed_at_ms > ?
     LIMIT 1
   `).get(mint, now() - blockDays * 24 * 60 * 60 * 1000);
@@ -196,7 +196,7 @@ export function createDryRunPosition(candidateId, candidate, decision, reason = 
     const recentClosed = db.prepare(`
       SELECT id FROM dry_run_positions
       WHERE mint = ? AND status = 'closed'
-        AND coalesce(execution_mode, 'dry_run') != 'research'
+        AND lower(trim(coalesce(execution_mode, 'dry_run'))) IN ('live', 'confirm')
         AND closed_at_ms > ?
       LIMIT 1
     `).get(candidate.token.mint, now() - 86400000);
@@ -211,7 +211,7 @@ export function createDryRunPosition(candidateId, candidate, decision, reason = 
     const pastWin = db.prepare(`
       SELECT id, pnl_sol, closed_at_ms FROM dry_run_positions
       WHERE mint = ? AND status = 'closed' AND pnl_percent > 0
-        AND coalesce(execution_mode, 'dry_run') != 'research'
+        AND lower(trim(coalesce(execution_mode, 'dry_run'))) IN ('live', 'confirm')
         AND closed_at_ms > ?
       ORDER BY closed_at_ms DESC LIMIT 1
     `).get(candidate.token.mint, now() - WIN_BLOCK_DAYS * 86400000);
@@ -270,7 +270,7 @@ export function createLivePosition(candidateId, candidate, decision, swap, reaso
     const recentClosed = db.prepare(`
       SELECT id FROM dry_run_positions
       WHERE mint = ? AND status = 'closed'
-        AND coalesce(execution_mode, 'dry_run') != 'research'
+        AND lower(trim(coalesce(execution_mode, 'dry_run'))) IN ('live', 'confirm')
         AND closed_at_ms > ?
       LIMIT 1
     `).get(candidate.token.mint, now() - 86400000);
@@ -281,7 +281,7 @@ export function createLivePosition(candidateId, candidate, decision, swap, reaso
     const pastWin = db.prepare(`
       SELECT id FROM dry_run_positions
       WHERE mint = ? AND status = 'closed' AND pnl_percent > 0
-        AND coalesce(execution_mode, 'dry_run') != 'research'
+        AND lower(trim(coalesce(execution_mode, 'dry_run'))) IN ('live', 'confirm')
         AND closed_at_ms > ?
       LIMIT 1
     `).get(candidate.token.mint, now() - WIN_BLOCK_DAYS * 86400000);
