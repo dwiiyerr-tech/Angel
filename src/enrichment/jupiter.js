@@ -228,8 +228,15 @@ function summarizeCandles(label, candles) {
   const avgVolume = rows => rows.length ? rows.reduce((sum, candle) => sum + Number(candle.volume || 0), 0) / rows.length : null;
   const recentHigh = Math.max(...recentWindow.map(candle => Number(candle.high || 0)));
   const recentLow = Math.min(...recentWindow.map(candle => Number(candle.low || Infinity)));
+  const priorHigh = priorWindow.length ? Math.max(...priorWindow.map(candle => Number(candle.high || 0))) : null;
   const priorLow = priorWindow.length ? Math.min(...priorWindow.map(candle => Number(candle.low || Infinity))) : null;
   const higherLow = Number.isFinite(priorLow) && Number.isFinite(recentLow) ? recentLow >= priorLow : null;
+  const priorAvgVolume = avgVolume(priorWindow);
+  const recentAvgVolume = avgVolume(recentWindow);
+  const rangeCompression = priorHigh > priorLow && recentHigh > recentLow
+    ? (recentHigh - recentLow) / (priorHigh - priorLow)
+    : null;
+  const lastVolume = Number(last.volume || 0);
   return {
     label,
     available: true,
@@ -246,9 +253,17 @@ function summarizeCandles(label, candles) {
     aboveLowPercent: low > 0 && Number.isFinite(low) ? (current / low - 1) * 100 : null,
     recentHigh,
     recentLow,
+    priorHigh,
+    priorLow,
     recentRangePercent: recentHigh > 0 ? (recentHigh / Math.max(recentLow, Number.EPSILON) - 1) * 100 : null,
-    recentVolumeVsPrior: avgVolume(priorWindow) > 0 ? avgVolume(recentWindow) / avgVolume(priorWindow) : null,
+    priorAvgVolume,
+    recentAvgVolume,
+    recentVolumeVsPrior: priorAvgVolume > 0 ? recentAvgVolume / priorAvgVolume : null,
+    lastVolume,
+    lastVolumeVsRecent: recentAvgVolume > 0 ? lastVolume / recentAvgVolume : null,
+    rangeCompression,
     higherLow,
+    reclaimOfPriorHigh: priorHigh > 0 && current >= priorHigh,
     candleDataQuality: candles.length >= 24 ? 'verified' : 'insufficient',
   };
 }

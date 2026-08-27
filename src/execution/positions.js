@@ -64,6 +64,7 @@ export async function refreshCandidateForExecution(row) {
   const mint = candidate.token.mint;
   const route = candidate.signals?.route || '';
   const isFresh = route.includes('pumpportal_graduated');
+  const isSecondWave = candidate.signals?.strategyLane === 'second_wave';
 
   let gmgn, asset, holders, chart;
 
@@ -76,6 +77,15 @@ export async function refreshCandidateForExecution(row) {
       fetchJupiterHolders(mint),
     ]);
     chart = null;
+  } else if (isSecondWave) {
+    // The second-wave setup depends on chart structure at the moment of
+    // entry, so refresh the same chart windows used by its deterministic gate.
+    [gmgn, asset, holders, chart] = await Promise.all([
+      fetchGmgnTokenInfo(mint, false),
+      fetchJupiterAsset(mint, { useCache: false }),
+      fetchJupiterHolders(mint),
+      fetchJupiterChartContext(mint),
+    ]);
   } else {
     [gmgn, asset, holders] = await Promise.all([
       fetchGmgnTokenInfo(mint, false),

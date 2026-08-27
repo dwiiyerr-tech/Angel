@@ -130,6 +130,14 @@ export async function startAngel() {
   fetchGmgnTrending().catch(err => console.log(`[trending] initial fetch failed: ${err.message}`));
   setInterval(nonOverlapping('trending poll', () => trackTrending(() => fetchGmgnTrending())), TRENDING_POLL_MS);
 
+  // Second-wave has its own universe poll so it can coexist with the current
+  // trenching workflow without changing the default active strategy.
+  const { fetchSecondWaveUniverse, setCandidateHandler: setSecondWaveCandidateHandler } = await import('./signals/secondWave.js');
+  setSecondWaveCandidateHandler(processCandidateFromSignals);
+  const secondWavePollMs = Math.max(60_000, Number(process.env.SECOND_WAVE_POLL_MS || 300_000));
+  fetchSecondWaveUniverse().catch(err => console.log(`[second-wave] initial fetch failed: ${err.message}`));
+  setInterval(nonOverlapping('second-wave universe', () => fetchSecondWaveUniverse()), secondWavePollMs);
+
   if (PREGRAD_ENABLED) {
     const { startPumpfunPregrad, setCandidateHandler: setPregradHandler } = await import('./signals/pumpfunPregrad.js');
     setPregradHandler(processCandidateFromSignals);

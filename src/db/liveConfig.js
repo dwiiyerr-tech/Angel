@@ -24,6 +24,7 @@ export const LIVE_SETTING_KEYS = new Set([
   'min_executable_position_sol', 'min_opportunity_size_multiplier', 'min_risk_reward_ratio',
   'min_liquidity_usd', 'min_mcap_usd', 'needle_weights_json', 'sideways_timeout_minutes',
   'smart_money_enabled', 'time_tighten_enabled', 'trailing_arm_percent',
+  'second_wave_enabled', 'second_wave_live_enabled', 'second_wave_scan_limit', 'second_wave_source',
   'trailing_floor_percent', 'trailing_tight_from_percent', 'trailing_tight_percent',
   'trending_allow_degen', 'trending_enabled', 'trending_max_bot_degen_rate',
   'trending_max_bundler_rate', 'trending_max_mcap_usd', 'trending_max_rug_ratio',

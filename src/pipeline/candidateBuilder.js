@@ -8,6 +8,7 @@ import { gmgnLink } from '../format.js';
 import { effectivePositionSizeSol } from './llm.js';
 import { openPositionCount } from '../db/positions.js';
 import { observeVolumeAcceleration } from './volumeAcceleration.js';
+import { assessSecondWaveCandidate, isSecondWaveStrategy } from './secondWave.js';
 
 // Track A: High-conviction routes that bypass LLM/ML/soft-scoring for sub-second execution
 // User requested full pipeline (ML + LLM) for all routes, so this is empty.
@@ -70,6 +71,21 @@ export function filterCandidate(candidate) {
   const rugRatio = nullableNumber(candidate.trending?.rug_ratio);
   const bundlerRate = nullableNumber(candidate.trending?.bundler_rate);
   const freshGrad = isFreshlyGraduated(candidate);
+  const secondWave = isSecondWaveStrategy(strat);
+
+  if (secondWave) {
+    const assessment = assessSecondWaveCandidate(candidate, {
+      minMcapUsd: strat.second_wave_min_mcap_usd,
+      maxMcapUsd: strat.second_wave_max_mcap_usd,
+      minLiquidityUsd: strat.second_wave_min_liquidity_usd,
+      minAgeMs: strat.second_wave_min_age_ms,
+    });
+    candidate.secondWave = assessment;
+    for (const failure of assessment.hardFailures) failures.push(`second-wave: ${failure}`);
+    if (!assessment.eligible && assessment.hardFailures.length === 0) {
+      opportunityWarnings.push(`second-wave score ${assessment.score}/12 not entry-ready`);
+    }
+  }
 
   if (candidate.jupiterAsset?._dataQuality?.stale) {
     failures.push(`Jupiter asset stale: age ${candidate.jupiterAsset._dataQuality.ageMs}ms`);
@@ -434,6 +450,7 @@ export function filterCandidate(candidate) {
     'trending': 0.5,               // Trending route — historically worst performer
     'graduated_trending': 0.8,     // Independent confirmation, route-risk adjusted
     'dual_source': 0.8,            // Independent confirmation must not be penalized as noise
+    'second_wave': 0.9,             // Established-token setup; risk remains structure-dependent
   };
   const signalRouteWeight = candidate.signals?.route || '';
   const routeWeight = SOURCE_WEIGHTS[signalRouteWeight] ?? 0.8;
@@ -763,7 +780,7 @@ function globalOpenPositionCount() {
     return 0;
   }
 }
-export async function buildCandidate({ mint, fee = null, signature = null, graduatedCoin = null, trendingToken = null, trenchesEntry = null, pregradToken = null, route }) {
+export async function buildCandidate({ mint, fee = null, signature = null, graduatedCoin = null, trendingToken = null, trenchesEntry = null, pregradToken = null, gmgnSignal = null, smartMoneySignal = null, secondWaveSignal = null, route }) {
   const strat = activeStrategy();
   const isFreshlyGraduated = route === 'pumpportal_graduated';
 
@@ -860,6 +877,10 @@ export async function buildCandidate({ mint, fee = null, signature = null, gradu
     },
     signals: {
       route: signalRoute,
+      // Keep the existing allocator family contract; the lane distinguishes
+      // the second-wave route without changing allocator calibration buckets.
+      strategyFamily: 'edge1',
+      strategyLane: isSecondWaveStrategy(strat) ? 'second_wave' : 'trenching',
       label: signalLabel({
         hasFeeClaim: Boolean(fee),
         hasGraduated: Boolean(graduatedCoin),
@@ -875,6 +896,9 @@ export async function buildCandidate({ mint, fee = null, signature = null, gradu
     trending: trendingToken,
     trenchesEntry,
     feeClaim: fee ? buildFeeSnapshot(fee, signature) : null,
+    gmgnSignal,
+    smartMoneySignal,
+    secondWaveSignal,
     gmgn,
     jupiterAsset,
     holders,

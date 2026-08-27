@@ -3,7 +3,7 @@ import { numSetting, boolSetting, setting } from '../db/settings.js';
 import { db } from '../db/connection.js';
 import { upsertCandidate, updateCandidateStatus, updateCandidateSnapshot, recentEligibleCandidates, candidateById } from '../db/candidates.js';
 import { storeDecision, storeBatchDecision, logDecisionEvent, checkDecisionCache } from '../db/decisions.js';
-import { buildCandidate } from './candidateBuilder.js';
+import { buildCandidate, filterCandidate } from './candidateBuilder.js';
 import { preScoreCandidate } from './preScorer.js';
 import { momentumFilter } from './momentumFilter.js';
 import { decideCandidateBatch } from './llm.js';
@@ -22,7 +22,7 @@ import { short, escapeHtml } from '../format.js';
 import { evaluateMarketAllocator, allocationAllowsCandidate } from '../execution/marketAllocator.js';
 import { applyContractSafetyGate } from '../execution/contractSafetyGate.js';
 import { assertContractSafetyForMoneyMode } from '../execution/contractSafetyGate.js';
-import { isResearchSimulationMode, requiresMoneyGradeEvidence } from '../research/policy.js';
+import { configuredTradingMode, isResearchSimulationMode, requiresMoneyGradeEvidence } from '../research/policy.js';
 import {
   executeResearchEntry,
   canOpenResearchPosition,
@@ -30,6 +30,7 @@ import {
   researchPositionCap,
 } from '../research/engine.js';
 import { hunterPolicy } from './hunterPolicy.js';
+import { assessSecondWaveCandidate, isSecondWaveStrategy, secondWaveDecision } from './secondWave.js';
 
 // Fast-track bypass remains disabled. Research aggression comes from explicit
 // policy and zero-capital sampling, never from skipping contract safety.
@@ -124,6 +125,11 @@ async function _processCandidateFromSignals(signals) {
   }
 
   const strat = activeStrategy();
+  const secondWaveMode = isSecondWaveStrategy(strat);
+  if (secondWaveMode && configuredTradingMode() === 'live' && !boolSetting('second_wave_live_enabled', false)) {
+    console.log(`[second-wave] LIVE gate is disabled; observing ${signals.mint.slice(0, 8)}... without entry`);
+    return;
+  }
   const blockedRoutes = (() => {
     try { return JSON.parse(setting('blocked_routes', '[]')); } catch { return []; }
   })();
@@ -221,6 +227,29 @@ async function _processCandidateFromSignals(signals) {
     stage: 'screening',
     fetchRugcheck: moneyMode,
   });
+  if (secondWaveMode) {
+    candidate.secondWave = assessSecondWaveCandidate(candidate, {
+      minAgeMs: strat.second_wave_min_age_ms,
+      minMcapUsd: strat.second_wave_min_mcap_usd,
+      maxMcapUsd: strat.second_wave_max_mcap_usd,
+      minLiquidityUsd: strat.second_wave_min_liquidity_usd,
+    });
+    // Recompute the persisted filter result after the safety gate and attach
+    // second-wave hard failures to the normal candidate audit trail.
+    const secondWaveFilters = filterCandidate(candidate);
+    candidate.filters = {
+      ...secondWaveFilters,
+      passed: secondWaveFilters.passed !== false && candidate.contractSafety?.passed !== false,
+      failures: [...new Set([
+        ...(secondWaveFilters.failures || []),
+        ...(candidate.contractSafety?.failures || []),
+      ])],
+      opportunityWarnings: [...new Set([
+        ...(secondWaveFilters.opportunityWarnings || []),
+        ...(candidate.contractSafety?.warnings || []),
+      ])],
+    };
+  }
   const signature = signals.signature || null;
   const candidateId = upsertCandidate(candidate, signature);
 
@@ -298,7 +327,31 @@ async function _processCandidateFromSignals(signals) {
   let batchDecision;
   let batchId;
 
-  if (!strat.use_llm || isTrackA) {
+  if (secondWaveMode) {
+    const selfRow = candidateById(candidateId);
+    const advisory = strat.use_llm
+      ? await decideCandidateBatch(selfRow ? [selfRow] : [], candidateId)
+      : { verdict: 'WATCH', confidence: 0, reason: 'LLM disabled for advisory layer.', risks: ['llm_disabled'] };
+    const deterministic = secondWaveDecision(candidate, candidate.secondWave);
+    const finalVerdict = deterministic.verdict === 'REJECT' ? 'PASS' : deterministic.verdict;
+    rows = selfRow ? [selfRow] : [];
+    batchDecision = {
+      ...advisory,
+      verdict: finalVerdict,
+      confidence: deterministic.confidence,
+      selected_candidate_id: finalVerdict === 'BUY' ? candidateId : null,
+      selected_mint: finalVerdict === 'BUY' ? candidate.token.mint : null,
+      selected_row: finalVerdict === 'BUY' ? selfRow : null,
+      reason: `${deterministic.reason} LLM advisory: ${advisory.reason || 'unavailable'}`,
+      risks: [...new Set([...(advisory.risks || []), ...((candidate.secondWave?.hardFailures || []))])],
+      suggested_tp_percent: deterministic.suggestedTpPercent ?? strat.tp_percent ?? numSetting('default_tp_percent', 50),
+      suggested_sl_percent: deterministic.suggestedSlPercent ?? strat.sl_percent ?? numSetting('default_sl_percent', -25),
+      second_wave: candidate.secondWave,
+      llm_advisory: advisory,
+      decision_authority: 'deterministic_second_wave_score',
+    };
+    batchId = storeBatchDecision(candidateId, rows, batchDecision);
+  } else if (!strat.use_llm || isTrackA) {
     const selfRow = candidateById(candidateId);
     rows = selfRow ? [selfRow] : [];
     batchId = null;
@@ -324,7 +377,7 @@ async function _processCandidateFromSignals(signals) {
 
   // In Research, LLM is advisory. A deterministic Hunter policy may sample an
   // otherwise contract-safe candidate when the LLM says WATCH/PASS.
-  if (researchMode && !paperLiveParity && (!batchDecision?.selected_row || batchDecision.verdict !== 'BUY')) {
+  if (!secondWaveMode && researchMode && !paperLiveParity && (!batchDecision?.selected_row || batchDecision.verdict !== 'BUY')) {
     const selfRow = candidateById(candidateId);
     const prescore = Number(candidate.filters?.preScore);
     const momentum = Number(candidate.filters?.momentumScore);
@@ -448,6 +501,12 @@ async function _processCandidateFromSignals(signals) {
 export async function handleApprovedBuy(selectedRow, decision, batchId, rows = [], triggerCandidateId = null) {
   const mint = selectedRow.candidate.token.mint;
   if (executingMints.has(mint)) return;
+  if (isSecondWaveStrategy(activeStrategy())
+      && configuredTradingMode() === 'live'
+      && !boolSetting('second_wave_live_enabled', false)) {
+    console.warn(`[second-wave] blocked direct entry for ${mint.slice(0, 8)}... because second_wave_live_enabled=false`);
+    return { id: null, isNew: false, blockedBy: 'second_wave_live_disabled' };
+  }
 
   // PAPER follows the same market allocator, fresh market snapshot, contract
   // safety, and decision validation as LIVE. Only the settlement is virtual.

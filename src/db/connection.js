@@ -408,6 +408,12 @@ export function initDb() {
     trending_min_swaps: process.env.TRENDING_MIN_SWAPS || '0',
     trending_max_rug_ratio: process.env.TRENDING_MAX_RUG_RATIO || '0.3',
     trending_max_bundler_rate: process.env.TRENDING_MAX_BUNDLER_RATE || '0.5',
+    // Second-wave is opt-in at the strategy level and remains PAPER-only by
+    // default until its independent evidence gate is validated.
+    second_wave_enabled: process.env.SECOND_WAVE_ENABLED || 'true',
+    second_wave_live_enabled: 'false',
+    second_wave_scan_limit: process.env.SECOND_WAVE_SCAN_LIMIT || '50',
+    second_wave_source: process.env.SECOND_WAVE_SOURCE || 'gmgn',
   };
   const insert = db.prepare('INSERT OR IGNORE INTO settings (key, value) VALUES (?, ?)');
   for (const [key, value] of Object.entries(defaults)) insert.run(key, value);
@@ -521,6 +527,48 @@ export function initDb() {
     max_hold_ms: 1800000,
     use_llm: true,
     llm_min_confidence: 70,
+  }), ts);
+
+  stratInsert.run('second_wave_smart_money', 'Second-Wave Smart Money', 0, JSON.stringify({
+    entry_mode: 'second_wave',
+    strategy_lane: 'second_wave',
+    min_source_count: 1,
+    require_fee_claim: false,
+    // The legacy max-age field is not used for this lane. The second-wave
+    // evaluator requires a minimum age instead.
+    token_age_max_ms: 0,
+    second_wave_min_age_ms: 86400000,
+    second_wave_min_mcap_usd: 80000,
+    second_wave_max_mcap_usd: 3000000,
+    second_wave_min_liquidity_usd: 25000,
+    min_mcap_usd: 80000,
+    max_mcap_usd: 3000000,
+    min_fee_claim_sol: 0,
+    min_gmgn_total_fee_sol: 0,
+    min_holders: 0,
+    max_top20_holder_percent: 100,
+    min_saved_wallet_holders: 0,
+    max_ath_distance_pct: 0,
+    min_graduated_volume_usd: 0,
+    trending_min_volume_usd: 0,
+    trending_min_swaps: 0,
+    trending_max_rug_ratio: 1,
+    trending_max_bundler_rate: 1,
+    position_size_sol: 0.05,
+    max_open_positions: 2,
+    tp_percent: 100,
+    sl_percent: -25,
+    use_dynamic_sl: false,
+    trailing_enabled: true,
+    trailing_percent: 15,
+    partial_tp: true,
+    partial_tp_at_percent: 100,
+    partial_tp_sell_percent: 50,
+    max_hold_ms: 3600000,
+    use_llm: true,
+    // LLM output is retained as advisory analysis; the deterministic score
+    // controls entry eligibility for this strategy.
+    llm_min_confidence: 0,
   }), ts);
 
   stratInsert.run('degen', 'Degen', 0, JSON.stringify({

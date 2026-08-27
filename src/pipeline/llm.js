@@ -207,7 +207,9 @@ export function compactCandidateForLlm(row) {
     jupiterAsset: compactJupiter,
     holders: compactHolders,
     chart: {
-      purpose: 'ATH/range context only. Do not treat large 24h change as bullish/bearish momentum by itself.',
+      purpose: c.signals?.strategyLane === 'second_wave'
+        ? 'Second-wave structure/volume context. Analyze the supplied deterministic fields; never invent missing chart facts.'
+        : 'ATH/range context only. Do not treat large 24h change as bullish/bearish momentum by itself.',
       currentNative: c.chart?.currentNative,
       rangeHighNative: c.chart?.rangeHighNative,
       distanceFromAthPercent: c.chart?.distanceFromAthPercent ?? c.chart?.belowRangeHighPercent,
@@ -220,6 +222,10 @@ export function compactCandidateForLlm(row) {
         aboveLowPercent: athWindow.aboveLowPercent,
       } : null,
     },
+    secondWave: c.secondWave || null,
+    secondWaveSignal: c.secondWaveSignal || null,
+    smartMoneySignal: c.smartMoneySignal || null,
+    gmgnSignal: c.gmgnSignal || null,
     savedWalletExposure: c.savedWalletExposure,
     twitterNarrative: c.twitterNarrative,
     volumeAcceleration: c.volumeAcceleration?.valid ? {
@@ -303,6 +309,11 @@ export async function decideCandidateBatch(rows, triggerCandidateId) {
     '  - If price response is weak despite net inflow, this is silent re-accumulation.',
     '  - Verdict: WATCH if missing a breakout catalyst; BUY if breaking out.',
     '',
+    '== STRATEGY: SECOND-WAVE SMART MONEY ==',
+    'For strategy_lane=second_wave, you are an advisory analyst only. The deterministic secondWave score and hard gates control execution.',
+    'Explain the prior-run, drawdown, base/reclaim, volume sequence, smart-money flow, and safety evidence using only supplied fields.',
+    'Call out missing confirmations, distribution, liquidity collapse, and invalidation risk. Your BUY/WATCH/PASS verdict is advisory and will be ignored for execution authority.',
+    '',
     '== UNIVERSAL RISK MANAGEMENT (R:R & M:M) ==',
     'Do not hesitate endlessly. If a token has strong ML Momentum or smart money, TAKE THE SHOT.',
     'Apply strict Money Management (M:M) by adjusting your Confidence Score (which dictates position size):',
@@ -323,7 +334,7 @@ export async function decideCandidateBatch(rows, triggerCandidateId) {
     'If you detect this exact flow, REJECT immediately with verdict PASS.',
   ].join('\n');
   const user = {
-    task: 'Pick the best dry-run buy candidate from this recent batch, or choose none.',
+    task: 'Analyze the recent candidate batch. For second-wave, provide advisory strategy analysis only; never treat your verdict as execution authority.',
     recent_lessons: promptLessons,
     output_schema: {
       verdict: 'BUY|WATCH|PASS',
