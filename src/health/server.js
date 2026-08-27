@@ -29,8 +29,8 @@ export function startHealthServer() {
         const positionCounts = db.prepare(`
           SELECT
             count(*) AS total,
-            sum(CASE WHEN execution_mode = 'research' THEN 1 ELSE 0 END) AS research,
-            sum(CASE WHEN coalesce(execution_mode, 'dry_run') != 'research' THEN 1 ELSE 0 END) AS execution
+            sum(CASE WHEN lower(trim(coalesce(execution_mode, 'dry_run'))) IN ('live', 'confirm') THEN 0 ELSE 1 END) AS paper,
+            sum(CASE WHEN lower(trim(coalesce(execution_mode, 'dry_run'))) IN ('live', 'confirm') THEN 1 ELSE 0 END) AS live
           FROM dry_run_positions
           WHERE status IN ('open', 'entry_unknown', 'exit_unknown', 'partial_exit_unknown')
         `).get();
@@ -56,12 +56,18 @@ export function startHealthServer() {
         if (signalAgeMs > 30 * 60 * 1000) degradedReasons.push('signals_stale');
         if (backupAgeMs > 8 * 60 * 60 * 1000) degradedReasons.push('backup_stale');
         if (unresolvedExecutions > 0) degradedReasons.push('unresolved_execution');
+        const paperPositions = Number(positionCounts?.paper || 0);
+        const livePositions = Number(positionCounts?.live || 0);
         const payload = {
           status: degradedReasons.length ? 'degraded' : 'ok',
           uptime_seconds: Math.floor((Date.now() - bootTime) / 1000),
           open_positions: Number(positionCounts?.total || 0),
-          research_positions: Number(positionCounts?.research || 0),
-          execution_positions: Number(positionCounts?.execution || 0),
+          paper_positions: paperPositions,
+          live_positions: livePositions,
+          // Backward-compatible health keys retain their old names but now use
+          // the canonical public two-mode classification.
+          research_positions: paperPositions,
+          execution_positions: livePositions,
           research_real_capital_sol: 0,
           last_signal_processed_ms: lastSignalMs,
           last_signal_age_seconds: Math.floor((Date.now() - lastSignalMs) / 1000),
