@@ -5,9 +5,11 @@ import { fetchJupiterAsset, fetchJupiterHolders, fetchJupiterChartContext } from
 import { fetchSavedWalletExposure } from '../enrichment/wallets.js';
 import { fetchTwitterNarrative } from '../enrichment/twitter.js';
 import { gmgnLink } from '../format.js';
-import { effectivePositionSizeSol } from './llm.js';
 import { openPositionCount } from '../db/positions.js';
 import { observeVolumeAcceleration } from './volumeAcceleration.js';
+import { buildDomainEvidence } from '../edge/domainEvidence.js';
+import { candidateRoutes } from './routePolicy.js';
+import { primaryRouteFor } from './signalEvidence.js';
 
 // Track A: High-conviction routes that bypass LLM/ML/soft-scoring for sub-second execution
 // User requested full pipeline (ML + LLM) for all routes, so this is empty.
@@ -42,8 +44,8 @@ export function signalLabel(signals = {}) {
 
 // Detect freshly graduated tokens: route is pumpportal_graduated (token just graduated, filters relaxed)
 function isFreshlyGraduated(candidate) {
-  const route = candidate.signals?.route || '';
-  return route.includes('pumpportal_graduated') || route.includes('pumpfun_pregrad');
+  const routes = new Set(candidateRoutes(candidate));
+  return routes.has('pumpportal_graduated') || routes.has('pumpfun_pregrad');
 }
 
 export function filterCandidate(candidate) {
@@ -389,6 +391,7 @@ export function filterCandidate(candidate) {
   // === v45 Soft Scoring System ===
   // Score each candidate on a 0-100 scale. Route-aware weights.
   // Score >= soft_threshold: PASS to LLM. Below: REJECT (unless hard_floor_override).
+  candidate.domainEvidence = buildDomainEvidence(candidate);
   const softScore = computeSoftScore(candidate, strat, freshGrad);
   
   // Dynamic threshold: tighten when many positions open, loosen when idle
@@ -434,6 +437,8 @@ export function filterCandidate(candidate) {
     'trending': 0.5,               // Trending route — historically worst performer
     'graduated_trending': 0.8,     // Independent confirmation, route-risk adjusted
     'dual_source': 0.8,            // Independent confirmation must not be penalized as noise
+    'smart_money': 0.8,
+    'gmgn_smart_money': 0.8,
   };
   const signalRouteWeight = candidate.signals?.route || '';
   const routeWeight = SOURCE_WEIGHTS[signalRouteWeight] ?? 0.8;
@@ -567,7 +572,7 @@ export function evaluateHybridAdmission(candidate, softScore, softThreshold, fre
 // v45 Soft Scoring Engine
 // ============================================================
 
-function computeSoftScore(candidate, strat, isFreshGrad) {
+export function computeSoftScore(candidate, strat, isFreshGrad) {
   const ROUTE_WEIGHTS = {
     'trenches_completed': 1.1,
     'pumpportal_graduated': 1.05,
@@ -576,156 +581,25 @@ function computeSoftScore(candidate, strat, isFreshGrad) {
     'dual_source': 1.0,
     'graduated_trending': 1.0,
   };
-  let score = 100;
+  // Four independent domains are the score authority. The old implementation
+  // started at 100 while the pass threshold was 25-55, making weak candidates
+  // pass before any evidence was evaluated.
+  const evidence = candidate.domainEvidence || buildDomainEvidence(candidate);
+  let score = Number(evidence.compositeScore ?? 0);
   const route = candidate.signals?.route || '';
   
-  const mcap = Number(candidate.metrics?.marketCapUsd || candidate.jupiterAsset?.marketCapUsd || 0);
-  const liquidityUsd = Number(candidate.metrics?.liquidityUsd || candidate.jupiterAsset?.liquidityUsd || candidate.gmgn?.liquidity || 0);
-  const holderCount = Number(candidate.metrics?.holderCount || candidate.jupiterAsset?.holderCount || candidate.gmgn?.holder_count || 0);
-  const botHolders = Number(candidate.jupiterAsset?.audit?.botHoldersCount || 0);
-  const botPct = candidate.jupiterAsset?.audit?.botHoldersPercentage;
-  const top10Pct = candidate.jupiterAsset?.audit?.topHoldersPercentage;
-  const devMigrations = candidate.jupiterAsset?.audit?.devMigrations;
   const athDistance = candidate.chart?.distanceFromAthPercent;
-  const smartDegens = Number(candidate.trending?.smart_degen_count || candidate.jupiterAsset?.stats5m?.numOrganicBuyers || 0);
-  const organicScore = Number(candidate.trending?.organic_score || candidate.jupiterAsset?.organicScore || candidate.gmgn?.organic_score || 0);
-  const bundlerRate = nullableNumber(candidate.trending?.bundler_rate);
 
-  // --- NEGATIVE: Liquidity (all routes) ---
-  // Removed to catch all markets >= 5k
-
-  // --- NEGATIVE: Bot holders (route-specific weight) ---
-  if (route === 'pumpportal_graduated') {
-    if (botHolders >= 80) { score -= 40; }
-    else if (botHolders >= 50) { score -= 30; }
-    else if (botHolders >= 30) { score -= 15; }
-  } else if (route === 'trenches_completed') {
-    // Trenches: high bot = more tolerant (smart money + bots coexist)
-    if (botHolders >= 100) { score -= 25; }
-    else if (botHolders >= 50) { score -= 10; }
-  } else if (route === 'fee_trending') {
-    if (botHolders >= 100) { score -= 30; }
-    else if (botHolders >= 50) { score -= 15; }
-  }
-
-  // --- NEGATIVE: Bot percentage (all routes) ---
-  if (botPct != null && botPct > 0) {
-    if (botPct > 50) { score -= 25; }
-    else if (botPct > 30) { score -= 15; }
-  }
-
-  // --- NEGATIVE: Top10 concentration (route-specific zones) ---
-  if (top10Pct != null && top10Pct > 0) {
-    if (route === 'pumpportal_graduated') {
-      if (top10Pct >= 15 && top10Pct < 25) { score -= 30; } // Rug zone
-      else if (top10Pct >= 50) { score -= 20; }
-    } else if (route === 'trenches_completed') {
-      if (top10Pct >= 25 && top10Pct < 35) { score -= 20; } // Trenches rug zone
-      else if (top10Pct >= 50) { score -= 15; }
-    } else {
-      if (top10Pct >= 50) { score -= 20; }
-    }
-  }
-
-  // --- NEGATIVE: Dev migrations (non-fresh, all routes) ---
-  if (!isFreshGrad && devMigrations != null) {
-    if (devMigrations >= 15) { score -= 30; }
-    else if (devMigrations >= 7) { score -= 20; }
-    else if (devMigrations >= 3) { score -= 5; }
-  }
-
-  // --- NEGATIVE: Missing Audit Data Penalty ---
-  const botPctAudit = candidate.jupiterAsset?.audit?.botHoldersPercentage ?? null;
-  const devMigAudit = candidate.jupiterAsset?.audit?.devMigrations ?? null;
-  if (isFreshGrad && (botPctAudit === null || devMigAudit === null)) {
-    score -= 15; // Deduct score when audit data has not populated yet
-  }
-
-  // --- NEGATIVE: Holder count (non-fresh, route-specific) ---
-  if (!isFreshGrad && holderCount > 0) {
-    if (route === 'pumpportal_graduated') {
-      if (holderCount < 30) { score -= 20; }
-      else if (holderCount < 50) { score -= 10; }
-    } else if (route === 'trenches_completed') {
-      if (holderCount < 30) { score -= 10; }
-    }
-  }
-
-  // --- NEGATIVE: ATH distance (non-fresh) ---
+  // Small, bounded timing penalties may modify the evidence score. Structural
+  // and flow inputs already live in their domains and are not counted twice.
   if (!isFreshGrad && athDistance != null) {
-    if (athDistance > -20) { score -= 15; }
-    else if (athDistance > -30) { score -= 10; }
+    if (athDistance > -15) score -= 10;
+    else if (athDistance > -25) score -= 5;
   }
-
-  // --- NEGATIVE: Mcap range (route-specific) ---
-  // Removed to catch all markets
-
-  // --- NEGATIVE: Bundler rate ---
-  if (bundlerRate != null) {
-    if (bundlerRate > 0.5) { score -= 20; }
-    else if (bundlerRate > 0.3) { score -= 10; }
-  }
-
-  // --- Sniper Logic: Target if mcap < 50k, Avoid if mcap >= 50k ---
-  const sniperPct = Number(candidate.jupiterAsset?.audit?.sniperPct || 0);
-  if (sniperPct > 0) {
-    if (mcap < 50000) {
-      // Mengincar sniper (bonus skor)
-      if (sniperPct > 15) { score += 25; }
-      else if (sniperPct > 10) { score += 15; }
-      else if (sniperPct > 5) { score += 5; }
-    } else {
-      // Menghindari sniper (penalti skor)
-      if (sniperPct > 15) { score -= 25; }
-      else if (sniperPct > 10) { score -= 15; }
-      else if (sniperPct > 5) { score -= 5; }
-    }
-  }
-
-  // --- POSITIVE: Smart money ---
-  if (smartDegens >= 5) { score += 30; }       // Strong cluster signal
-  else if (smartDegens >= 3) { score += 20; }  // Moderate cluster
-  else if (smartDegens >= 1) { score += 10; }  // Some smart money
-  else { score -= 10; }                        // No smart money = penalty
-
-  // --- POSITIVE: Organic score ---
-  if (organicScore >= 70) { score += 20; }
-  else if (organicScore >= 50) { score += 10; }
-  else if (organicScore >= 30) { score += 5; }
-
-  // --- POSITIVE: Clean bundler ---
-  if (bundlerRate != null && bundlerRate < 0.1) { score += 15; }
-  else if (bundlerRate != null && bundlerRate < 0.3) { score += 5; }
-
-  // --- POSITIVE: Fresh grad momentum ---
-  if (isFreshGrad && route === 'pumpportal_graduated') {
-    score += 10;
-  }
-
-  // --- POSITIVE: Twitter Organic Sentiment ---
-  if (candidate.twitterNarrative?.virality) {
-    const followers = Number(candidate.twitterNarrative.metrics?.authorFollowers || 0);
-    const engPerFol = candidate.twitterNarrative.virality.engagementPerFollower;
-    if (followers > 500 && engPerFol != null) {
-      if (engPerFol > 10) { score += 20; }
-      else if (engPerFol > 5) { score += 10; }
-      else if (engPerFol > 1) { score += 5; }
-    }
-  }
-
-  // --- POSITIVE: Smart Money / Whale Wallet Exposure ---
-  if (candidate.savedWalletExposure?.holderCount > 0) {
-    const wCount = candidate.savedWalletExposure.holderCount;
-    if (wCount >= 3) { score += 25; }
-    else if (wCount >= 2) { score += 15; }
-    else { score += 10; }
-  }
-
-  // Route weight multiplier (data-driven from backtest)
-  const routeWeight = ROUTE_WEIGHTS[route] || 0.8;
+  const routeWeight = ROUTE_WEIGHTS[route] || 0.95;
   score = Math.round(score * routeWeight);
 
-  return Math.max(0, Math.min(150, score));
+  return Math.max(0, Math.min(100, score));
 }
 
 function softScoreThreshold(strat) {
@@ -763,7 +637,7 @@ function globalOpenPositionCount() {
     return 0;
   }
 }
-export async function buildCandidate({ mint, fee = null, signature = null, graduatedCoin = null, trendingToken = null, trenchesEntry = null, pregradToken = null, route }) {
+export async function buildCandidate({ mint, fee = null, signature = null, graduatedCoin = null, trendingToken = null, trenchesEntry = null, pregradToken = null, smartMoneySignal = null, signalRoutes = null, route }) {
   const strat = activeStrategy();
   const isFreshlyGraduated = route === 'pumpportal_graduated';
 
@@ -820,7 +694,8 @@ export async function buildCandidate({ mint, fee = null, signature = null, gradu
     trenchesEntry?.marketCap,
     trenchesEntry?.fdv,
   );
-  const signalRoute = route || [
+  const rawRoutes = [...new Set([...(signalRoutes || []), route].filter(Boolean).filter(value => value !== 'dual_source'))];
+  const signalRoute = rawRoutes.length > 1 ? 'dual_source' : route || [
     fee ? 'fee' : null,
     graduatedCoin ? 'graduated' : null,
     pregradToken ? 'pregrad' : null,
@@ -868,12 +743,17 @@ export async function buildCandidate({ mint, fee = null, signature = null, gradu
       hasFeeClaim: Boolean(fee),
       hasGraduated: Boolean(graduatedCoin),
       hasTrending: Boolean(trendingToken || trenchesEntry),
+      hasSmartMoney: Boolean(smartMoneySignal),
+      routes: rawRoutes.length ? rawRoutes : [signalRoute],
+      primaryRoute: primaryRouteFor(rawRoutes.length ? rawRoutes : [signalRoute]),
+      sourceCount: rawRoutes.length || 1,
       triggerSignature: signature,
       strategy: strat.id,
     },
     graduation: graduatedCoin,
     trending: trendingToken,
     trenchesEntry,
+    smartMoneySignal,
     feeClaim: fee ? buildFeeSnapshot(fee, signature) : null,
     gmgn,
     jupiterAsset,

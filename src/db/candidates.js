@@ -1,6 +1,7 @@
 import { db } from './connection.js';
 import { now, safeJson, json } from '../utils.js';
 import { numSetting, setting } from './settings.js';
+import { isRouteBlocked, parseBlockedRoutes } from '../pipeline/routePolicy.js';
 
 export function candidateSignalKey(candidate, signature = null) {
   const route = candidate.signals?.route || 'signal';
@@ -18,9 +19,10 @@ export function upsertCandidate(candidate, signature) {
       SELECT id FROM candidates
       WHERE signal_key = ?
          OR (? IS NOT NULL AND signature = ? AND mint = ?)
+         OR (mint = ? AND created_at_ms >= ?)
       ORDER BY id DESC
       LIMIT 1
-    `).get(signalKey, signature, signature, candidate.token.mint);
+    `).get(signalKey, signature, signature, candidate.token.mint, candidate.token.mint, now() - 10 * 60_000);
     if (existing) {
       db.prepare(`
         UPDATE candidates
@@ -117,15 +119,7 @@ export function recentEligibleCandidates(limit = 10) {
   const cutoff = now() - Math.max(30_000, maxAgeMs);
   // Lesson #3: block unprofitable routes at query level — prevents blocked routes from drowning out profitable ones
   // pumpfun_pregrad: pre-grad tokens still on bonding curve, can't reliably trade yet — keep for data only
-  let BLOCKED_ROUTES = [];
-  try {
-    BLOCKED_ROUTES = JSON.parse(setting('blocked_routes', '[]')).filter(r => r);
-  } catch (e) {
-    BLOCKED_ROUTES = [];
-  }
-  const blockedClause = BLOCKED_ROUTES.length > 0 
-    ? BLOCKED_ROUTES.map(() => `signal_key NOT LIKE ? || ':%'`).join(' AND ') 
-    : '1=1';
+  const blockedRoutes = parseBlockedRoutes(setting('blocked_routes', '[]'));
   const rows = db.prepare(`
     SELECT c.*
     FROM candidates c
@@ -135,7 +129,6 @@ export function recentEligibleCandidates(limit = 10) {
       WHERE status IN ('candidate', 'watch', 'buy', 'pass')
         AND created_at_ms >= ?
         AND id NOT IN (SELECT COALESCE(candidate_id, -1) FROM dry_run_positions WHERE status = 'open')
-        AND ${blockedClause}
         AND (
           json_extract(candidate_json, '$.filters.passed') IS NULL
           OR json_extract(candidate_json, '$.filters.passed') = 1
@@ -144,6 +137,10 @@ export function recentEligibleCandidates(limit = 10) {
     ) latest ON c.id = latest.max_id
     ORDER BY c.id DESC
     LIMIT ?
-  `).all(cutoff, ...BLOCKED_ROUTES, limit);
-  return rows.map(row => ({ ...row, candidate: safeJson(row.candidate_json, {}) })).reverse();
+  `).all(cutoff, Math.max(limit, limit * 4));
+  return rows
+    .map(row => ({ ...row, candidate: safeJson(row.candidate_json, {}) }))
+    .filter(row => !isRouteBlocked(row.candidate, blockedRoutes))
+    .slice(0, limit)
+    .reverse();
 }

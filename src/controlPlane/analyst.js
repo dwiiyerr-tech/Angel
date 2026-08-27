@@ -117,7 +117,7 @@ async function llmAnalysis(evidence, active, fallback) {
           content: [
             'You are Angel Strategy Analyst. Return strict JSON only.',
             'You review supplied Research/Shadow evidence and may PROPOSE a bounded challenger or HOLD.',
-            'Allowed keys only: llm_min_confidence, blocked_routes, min_opportunity_size_multiplier.',
+            'Allowed keys only: llm_min_confidence, blocked_routes, min_opportunity_size_multiplier, min_liquidity_usd, flow_hard_price_change_pct, flow_hard_net_buyer_ratio, edge_min_quality_score, edge_min_survival_probability, edge_min_runner_probability, edge_min_expected_r, probe_entry_fraction, runner_weakening_buyer_ratio.',
             'Safety Kernel, wallet, exposure, slippage, contract-safety, circuit-breaker and position-size keys are protected.',
             'Never invent evidence. Prefer one or two small changes. Optimize expectancy and robustness, not win rate alone.',
           ].join(' '),
@@ -152,7 +152,7 @@ async function llmAnalysis(evidence, active, fallback) {
   }
 }
 
-export async function runStrategyReview({ windowMs = 7 * 24 * 60 * 60 * 1000, source = 'manual', actor = 'strategy_analyst' } = {}) {
+export async function runStrategyReview({ windowMs = 14 * 24 * 60 * 60 * 1000, source = 'manual', actor = 'strategy_analyst' } = {}) {
   ensureControlPlaneSchema();
   bootstrapConfigRegistry();
   const active = assertRegistryAligned();

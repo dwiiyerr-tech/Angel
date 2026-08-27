@@ -324,6 +324,12 @@ export function initDb() {
   ensureColumn('dry_run_positions', 'mark_pnl_percent', 'REAL');
   ensureColumn('dry_run_positions', 'mark_pnl_sol', 'REAL');
   ensureColumn('dry_run_positions', 'mark_updated_at_ms', 'INTEGER');
+  ensureColumn('dry_run_positions', 'position_stage', "TEXT NOT NULL DEFAULT 'LEGACY'");
+  ensureColumn('dry_run_positions', 'target_size_sol', 'REAL');
+  ensureColumn('dry_run_positions', 'scale_count', 'INTEGER NOT NULL DEFAULT 0');
+  ensureColumn('dry_run_positions', 'last_scale_at_ms', 'INTEGER');
+  ensureColumn('dry_run_positions', 'late_evidence_json', 'TEXT');
+  ensureColumn('dry_run_positions', 'last_evidence_at_ms', 'INTEGER');
   ensureColumn('decision_logs', 'strategy_id', 'TEXT');
   ensureColumn('strategy_evolution', 'config_json', 'TEXT');
   ensureColumn('strategy_evolution', 'created_at', 'INTEGER');
@@ -379,6 +385,42 @@ export function initDb() {
     trailing_floor_percent: process.env.TRAILING_FLOOR_PERCENT || '2',
     break_even_threshold_percent: process.env.BREAK_EVEN_THRESHOLD_PERCENT || '15',
     time_tighten_enabled: process.env.TIME_TIGHTEN_ENABLED || '0',
+    catastrophic_loss_percent: process.env.CATASTROPHIC_LOSS_PERCENT || '-25',
+    catastrophic_liquidity_retention: process.env.CATASTROPHIC_LIQUIDITY_RETENTION || '0.35',
+    runner_lifecycle_paper_enabled: process.env.RUNNER_LIFECYCLE_PAPER_ENABLED || '1',
+    runner_lifecycle_live_enabled: process.env.RUNNER_LIFECYCLE_LIVE_ENABLED || '0',
+    probe_scale_paper_enabled: process.env.PROBE_SCALE_PAPER_ENABLED || '1',
+    probe_scale_live_enabled: process.env.PROBE_SCALE_LIVE_ENABLED || '0',
+    probe_entry_fraction: process.env.PROBE_ENTRY_FRACTION || '0.20',
+    probe_validation_min_seconds: process.env.PROBE_VALIDATION_MIN_SECONDS || '30',
+    probe_validation_max_seconds: process.env.PROBE_VALIDATION_MAX_SECONDS || '90',
+    probe_confirmation_pnl_percent: process.env.PROBE_CONFIRMATION_PNL_PERCENT || '3',
+    probe_thesis_loss_percent: process.env.PROBE_THESIS_LOSS_PERCENT || '-10',
+    probe_min_buyer_ratio: process.env.PROBE_MIN_BUYER_RATIO || '0.10',
+    runner_weakening_buyer_ratio: process.env.RUNNER_WEAKENING_BUYER_RATIO || '-0.15',
+    survival_horizon_seconds: process.env.SURVIVAL_HORIZON_SECONDS || '120',
+    survival_failure_r: process.env.SURVIVAL_FAILURE_R || '1',
+    survival_model_min_sample: process.env.SURVIVAL_MODEL_MIN_SAMPLE || '30',
+    survival_model_prior_strength: process.env.SURVIVAL_MODEL_PRIOR_STRENGTH || '16',
+    survival_model_history_limit: process.env.SURVIVAL_MODEL_HISTORY_LIMIT || '1500',
+    edge_min_quality_score: process.env.EDGE_MIN_QUALITY_SCORE || '45',
+    edge_min_survival_probability: process.env.EDGE_MIN_SURVIVAL_PROBABILITY || '0.55',
+    edge_min_runner_probability: process.env.EDGE_MIN_RUNNER_PROBABILITY || '0.35',
+    edge_min_expected_r: process.env.EDGE_MIN_EXPECTED_R || '0.15',
+    edge_admission_paper_enabled: process.env.EDGE_ADMISSION_PAPER_ENABLED || '1',
+    edge_admission_live_enabled: process.env.EDGE_ADMISSION_LIVE_ENABLED || '0',
+    signal_fanin_window_ms: process.env.SIGNAL_FANIN_WINDOW_MS || '1500',
+    late_evidence_window_ms: process.env.LATE_EVIDENCE_WINDOW_MS || String(3 * 60 * 1000),
+    control_plane_test_days: process.env.CONTROL_PLANE_TEST_DAYS || '14',
+    control_plane_min_test_hours: process.env.CONTROL_PLANE_MIN_TEST_HOURS || String(14 * 24),
+    control_plane_min_test_sample: process.env.CONTROL_PLANE_MIN_TEST_SAMPLE || '100',
+    control_plane_min_route_sample: process.env.CONTROL_PLANE_MIN_ROUTE_SAMPLE || '30',
+    control_plane_rollback_min_sample: process.env.CONTROL_PLANE_ROLLBACK_MIN_SAMPLE || '30',
+    control_plane_rollback_max_drawdown_r: process.env.CONTROL_PLANE_ROLLBACK_MAX_DRAWDOWN_R || '5',
+    control_plane_rollback_catastrophic_rate: process.env.CONTROL_PLANE_ROLLBACK_CATASTROPHIC_RATE || '0.20',
+    release_rollback_enabled: process.env.RELEASE_ROLLBACK_ENABLED || '0',
+    release_current_label: process.env.ANGEL_RELEASE_VERSION || 'v33',
+    release_parent_label: process.env.ANGEL_PARENT_RELEASE_VERSION || 'v32',
     default_partial_tp_enabled: '1',
     default_partial_tp_at_percent: '20',
     default_partial_tp_sell_percent: '25',

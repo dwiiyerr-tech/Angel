@@ -1,6 +1,8 @@
 import { qualityScoreCandidate } from './qualityScore.js';
 import { estimateRunnerProbability } from './runnerModel.js';
 import { estimateRouteEdge } from './routeEdgeModel.js';
+import { estimateSurvivalProbability } from './survivalModel.js';
+import { numSetting } from '../db/settings.js';
 
 function clamp(value, min = 0, max = 100) {
   return Math.max(min, Math.min(max, Number(value) || 0));
@@ -12,7 +14,73 @@ function finite(value) {
   return Number.isFinite(n) ? n : null;
 }
 
-export function combineEdgeAssessment({ quality, runner, route, momentumScore = null } = {}) {
+export function evaluateEdgeAdmission({ quality, survival, runner, route, domains = null } = {}, {
+  minimumQuality = 45,
+  minimumSurvivalProbability = 0.55,
+  minimumRunnerProbability = 0.35,
+  minimumExpectedR = 0.15,
+} = {}) {
+  const qualityScore = finite(quality?.score);
+  const survivalP = survival?.decisionEligible ? finite(survival?.probability) : null;
+  const runnerP = runner?.decisionEligible ? finite(runner?.probability) : null;
+  const expectedR = route?.decisionEligible ? finite(route?.expectedR) : null;
+  const missing = [];
+  if (qualityScore == null) missing.push('quality');
+  if (survivalP == null) missing.push('survival_model');
+  if (runnerP == null) missing.push('runner_model');
+  if (expectedR == null) missing.push('route_expected_r');
+  if (domains && Number(domains.independentKnownCount || 0) < 2) missing.push('independent_domains');
+  if (missing.length) {
+    return {
+      version: 'edge-admission-v1',
+      action: 'LEARN',
+      decisionEligible: false,
+      recommendedSizeFraction: 0,
+      reasons: missing.map(value => `missing:${value}`),
+      thresholds: { minimumQuality, minimumSurvivalProbability, minimumRunnerProbability, minimumExpectedR },
+    };
+  }
+
+  const reasons = [];
+  if (qualityScore < minimumQuality) reasons.push(`quality:${qualityScore.toFixed(2)}<${minimumQuality}`);
+  if (survivalP < minimumSurvivalProbability) reasons.push(`survival:${survivalP.toFixed(4)}<${minimumSurvivalProbability}`);
+  if (runnerP < minimumRunnerProbability) reasons.push(`runner:${runnerP.toFixed(4)}<${minimumRunnerProbability}`);
+  if (expectedR < minimumExpectedR) reasons.push(`expected_r:${expectedR.toFixed(4)}<${minimumExpectedR}`);
+  if (domains && Number(domains.coreStrongCount || 0) < 2) {
+    reasons.push(`domain_confirmation:${Number(domains.coreStrongCount || 0)}<2`);
+  }
+  if (domains?.flow?.score != null && Number(domains.flow.score) < 45) {
+    reasons.push(`flow_domain:${Number(domains.flow.score).toFixed(2)}<45`);
+  }
+  if (reasons.length) {
+    return {
+      version: 'edge-admission-v1',
+      action: 'REJECT',
+      decisionEligible: true,
+      recommendedSizeFraction: 0,
+      reasons,
+      thresholds: { minimumQuality, minimumSurvivalProbability, minimumRunnerProbability, minimumExpectedR },
+    };
+  }
+
+  let recommendedSizeFraction = 0.25;
+  if (survivalP >= 0.70 && runnerP >= 0.55 && expectedR >= 0.50) recommendedSizeFraction = 0.75;
+  else if (survivalP >= 0.62 && runnerP >= 0.45 && expectedR >= 0.30) recommendedSizeFraction = 0.50;
+  if (survivalP >= 0.78 && runnerP >= 0.65 && expectedR >= 0.80
+      && survival?.quality === 'HIGH' && runner?.quality === 'HIGH' && route?.quality === 'HIGH') {
+    recommendedSizeFraction = 1;
+  }
+  return {
+    version: 'edge-admission-v1',
+    action: 'GOOD',
+    decisionEligible: true,
+    recommendedSizeFraction,
+    reasons: ['independent_survival_runner_ev_confirmed'],
+    thresholds: { minimumQuality, minimumSurvivalProbability, minimumRunnerProbability, minimumExpectedR },
+  };
+}
+
+export function combineEdgeAssessment({ quality, survival = null, runner, route, momentumScore = null } = {}) {
   const qualityNorm = clamp(quality?.score ?? 50) / 100;
   const momentum = finite(momentumScore);
   const momentumNorm = momentum == null || momentum < 0 ? 0.5 : Math.max(0, Math.min(1, momentum));
@@ -51,9 +119,12 @@ export function combineEdgeAssessment({ quality, runner, route, momentumScore = 
     : availableModels >= 1 ? 'MEDIUM' : 'LOW';
 
   return {
-    version: 'edge-assessment-v1',
+    version: 'edge-assessment-v2',
     opportunityProbability: Number(opportunityProbability.toFixed(4)),
     opportunityConfidence: Number(opportunityConfidence.toFixed(2)),
+    survivalProbability: survival?.decisionEligible && finite(survival?.probability) != null
+      ? Number(survival.probability)
+      : null,
     expectedR: route?.decisionEligible && finite(route?.expectedR) != null ? Number(route.expectedR) : null,
     evidenceQuality,
     decisionEligible: availableModels > 0,
@@ -64,8 +135,21 @@ export function combineEdgeAssessment({ quality, runner, route, momentumScore = 
 
 export function assessCandidateEdge(candidate = {}) {
   const quality = qualityScoreCandidate(candidate);
+  let survival;
   let runner;
   let route;
+  try {
+    survival = estimateSurvivalProbability(candidate, quality);
+  } catch (error) {
+    survival = {
+      version: 'survival-path-bayes-v1',
+      probability: null,
+      sample: 0,
+      decisionEligible: false,
+      quality: 'LOW',
+      error: error.message,
+    };
+  }
   try {
     runner = estimateRunnerProbability(candidate, quality);
   } catch (error) {
@@ -93,9 +177,16 @@ export function assessCandidateEdge(candidate = {}) {
   }
   const combined = combineEdgeAssessment({
     quality,
+    survival,
     runner,
     route,
     momentumScore: candidate?.filters?.momentumScore,
   });
-  return { quality, runner, route, combined };
+  const admission = evaluateEdgeAdmission({ quality, survival, runner, route, domains: candidate?.domainEvidence }, {
+    minimumQuality: numSetting('edge_min_quality_score', 45),
+    minimumSurvivalProbability: numSetting('edge_min_survival_probability', 0.55),
+    minimumRunnerProbability: numSetting('edge_min_runner_probability', 0.35),
+    minimumExpectedR: numSetting('edge_min_expected_r', 0.15),
+  });
+  return { quality, survival, runner, route, combined, admission };
 }

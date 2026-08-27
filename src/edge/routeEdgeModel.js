@@ -2,6 +2,7 @@ import { db } from '../db/connection.js';
 import { numSetting } from '../db/settings.js';
 import { safeJson } from '../utils.js';
 import { ensureResearchSchema } from '../research/schema.js';
+import { counterfactualOutcomeRecords } from '../decisionIntelligence/learning.js';
 
 const MODEL_VERSION = 'route-edge-bayes-v1';
 let historyCache = { at: 0, limit: 0, records: null };
@@ -18,6 +19,16 @@ function clamp01(value) {
 
 function historyCacheMs() {
   return Math.max(0, Math.min(5 * 60_000, Math.floor(numSetting('edge_model_cache_ms', 30_000))));
+}
+
+function blendHistory(primary, supplemental, limit) {
+  const supplementCount = Math.min(supplemental.length, Math.max(1, Math.floor(limit * 0.35)));
+  const primaryCount = Math.min(primary.length, limit - supplementCount);
+  const remaining = Math.max(0, limit - primaryCount - supplementCount);
+  return [
+    ...primary.slice(0, primaryCount + remaining),
+    ...supplemental.slice(0, supplementCount),
+  ].slice(0, limit);
 }
 
 export function resetRouteEdgeCacheForTests() {
@@ -127,22 +138,30 @@ function researchEdgeRecords(limit = 2000) {
     LIMIT ?
   `).all(limit);
 
-  const records = rows.map(row => {
+  const positionRecords = rows.map(row => {
     const snapshot = safeJson(row.snapshot_json, {});
     const candidate = snapshot?.candidate || {};
     return {
       id: Number(row.id),
       realizedR: Number(row.realized_r),
-      route: String(snapshot?.signalRoute || candidate?.signals?.route || 'unknown'),
+      route: String(candidate?.signals?.primaryRoute || snapshot?.signalRoute || candidate?.signals?.route || 'unknown'),
       regime: String(candidate?.edge?.route?.regime || marketRegimeKey(candidate)),
     };
   }).filter(row => Number.isFinite(row.realizedR));
+  const counterfactualRecords = counterfactualOutcomeRecords(limit).map(row => ({
+    id: `decision:${row.id}`,
+    realizedR: Number(row.finalR),
+    route: String(row.candidate?.signals?.primaryRoute || row.route || row.candidate?.signals?.route || 'unknown'),
+    regime: String(row.candidate?.edge?.route?.regime || marketRegimeKey(row.candidate)),
+    counterfactual: true,
+  })).filter(row => Number.isFinite(row.realizedR));
+  const records = blendHistory(positionRecords, counterfactualRecords, limit);
   historyCache = { at: Date.now(), limit, records };
   return records;
 }
 
 export function estimateRouteEdge(candidate = {}) {
-  const route = String(candidate?.signals?.route || 'unknown');
+  const route = String(candidate?.signals?.primaryRoute || candidate?.signals?.route || 'unknown');
   const regime = marketRegimeKey(candidate);
   const priorStrength = Math.max(1, numSetting('route_edge_prior_strength', 20));
   const minRouteSample = Math.max(10, Math.floor(numSetting('route_edge_min_sample', 20)));

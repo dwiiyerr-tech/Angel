@@ -13,8 +13,9 @@ import {
   sizeImpactPct,
 } from './executionCost.js';
 import { assertPaperWalletCapacity } from './virtualWallet.js';
+import { pathLabelsFromObservations } from '../learning/pathLabels.js';
 
-export const RESEARCH_SIMULATOR_VERSION = 'zero_capital_execution_cost_v2';
+export const RESEARCH_SIMULATOR_VERSION = 'v33_probe_scale_execution_cost_v3';
 
 let pendingResearchPositionCount = 0;
 
@@ -143,6 +144,7 @@ export function createResearchPosition(candidateId, candidate, decision, quoteBu
   ensureResearchSchema();
   const strat = activeStrategy();
   const notionalSol = Number(quoteBundle?.referenceNotional);
+  const targetNotionalSol = Math.max(notionalSol, Number(quoteBundle?.targetNotionalSol) || notionalSol);
   const entryQuote = quoteBundle?.primary;
   if (!Number.isFinite(notionalSol) || notionalSol <= 0 || !entryQuote?.outputAmountRaw) {
     throw new Error('Research position requires positive virtual notional and executable entry quote.');
@@ -214,6 +216,13 @@ export function createResearchPosition(candidateId, candidate, decision, quoteBu
       llmConfidence: decision?.confidence ?? null,
       signalRoute: candidate.signals?.route ?? null,
       hunterPolicy: policy,
+      edgeAdmission: candidate?.edge?.admission || null,
+      lifecycle: {
+        version: 'runner-lifecycle-v1',
+        stage: 'PROBE',
+        probeNotionalSol: notionalSol,
+        targetNotionalSol,
+      },
       broadcast: false,
       walletRequired: false,
     };
@@ -226,10 +235,11 @@ export function createResearchPosition(candidateId, candidate, decision, quoteBu
         execution_mode, token_amount_raw, strategy_id, entry_fee_sol, snapshot_json,
         real_capital_sol, sim_notional_sol, initial_risk_percent, initial_risk_sol, planned_rr,
         low_water_price, low_water_mcap, mfe_percent, mae_percent, mfe_r, mae_r,
-        research_data_quality, research_quote_ladder_json
+        research_data_quality, research_quote_ladder_json,
+        position_stage, target_size_sol, scale_count
       ) VALUES (
         ?, ?, ?, 'open', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0, ?,
-        'research', ?, ?, ?, ?, 0, ?, ?, ?, ?, ?, ?, 0, 0, 0, 0, ?, ?
+        'research', ?, ?, ?, ?, 0, ?, ?, ?, ?, ?, ?, 0, 0, 0, 0, ?, ?, 'PROBE', ?, 0
       )
     `).run(
       candidateId,
@@ -260,6 +270,7 @@ export function createResearchPosition(candidateId, candidate, decision, quoteBu
       entryMcap,
       executionProfile?.quality || 'entry_executable',
       json(quoteBundle.quotes),
+      targetNotionalSol,
     );
 
     const positionId = Number(result.lastInsertRowid);
@@ -315,6 +326,7 @@ export function createResearchPosition(candidateId, candidate, decision, quoteBu
       isNew: true,
       realCapitalSol: 0,
       simNotionalSol: notionalSol,
+      targetNotionalSol,
       plannedRr,
       initialRiskSol: riskSol,
       executionCost: executionProfile,
@@ -328,13 +340,25 @@ export async function executeResearchEntry(selectedRow, decision, reason = 'rese
     return { id: null, isNew: false, blockedBy: 'research_position_cap' };
   }
   try {
-    // PAPER uses the same strategy/risk sizing calculation as LIVE. The only
-    // difference is that this notional is reserved in the virtual wallet.
-    const notional = calculatePositionSizeSol(selectedRow.candidate, decision, activeStrategy());
-    if (!Number.isFinite(notional) || notional <= 0) {
+    // PAPER first derives the same hard-capped size as LIVE, then exposes only
+    // a small probe. Scaling is allowed later only after price+flow validate it.
+    const fullPermittedNotional = calculatePositionSizeSol(selectedRow.candidate, decision, activeStrategy());
+    if (!Number.isFinite(fullPermittedNotional) || fullPermittedNotional <= 0) {
       return { id: null, isNew: false, blockedBy: 'below_minimum_economic_size' };
     }
+    const admission = selectedRow.candidate?.edge?.admission;
+    const edgeFraction = admission?.action === 'GOOD'
+      ? Math.max(0.25, Math.min(1, Number(admission.recommendedSizeFraction) || 0.25))
+      : admission?.action === 'REJECT' ? Math.max(0.05, numSetting('probe_entry_fraction', 0.20)) : 1;
+    const targetNotional = fullPermittedNotional * edgeFraction;
+    const probeEnabled = boolSetting('probe_scale_paper_enabled', true);
+    const probeFraction = probeEnabled
+      ? Math.max(0.05, Math.min(1, numSetting('probe_entry_fraction', 0.20)))
+      : 1;
+    const minimumEconomic = Math.max(0.001, numSetting('min_executable_position_sol', 0.001));
+    const notional = Math.min(targetNotional, Math.max(minimumEconomic, targetNotional * probeFraction));
     const quoteBundle = await fetchResearchQuoteLadder(selectedRow.candidate, notional);
+    quoteBundle.targetNotionalSol = targetNotional;
     return createResearchPosition(selectedRow.id, selectedRow.candidate, decision, quoteBundle, reason);
   } finally {
     releaseResearchPositionSlot();
@@ -461,5 +485,15 @@ export function recordResearchObservation(positionId, result, { exitFees = null 
     }),
   );
 
-  return { ...excursion, realizedR, dataQuality, pnlSol, pnlPercent, modeledExitFeeSol };
+  const pathLabels = pathLabelsFromObservations(db.prepare(`
+    SELECT at_ms, r_multiple FROM research_observations
+    WHERE position_id = ? ORDER BY at_ms ASC
+  `).all(positionId), {
+    openedAtMs: row.opened_at_ms,
+    failureR: Math.max(0.5, numSetting('survival_failure_r', 1)),
+  });
+  db.prepare('UPDATE dry_run_positions SET path_labels_json = ?, runner_class = ? WHERE id = ?')
+    .run(json(pathLabels), pathLabels.runnerClass, positionId);
+
+  return { ...excursion, realizedR, dataQuality, pnlSol, pnlPercent, modeledExitFeeSol, pathLabels };
 }

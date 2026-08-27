@@ -12,8 +12,9 @@ import { updateCandidateSnapshot } from '../db/candidates.js';
 import { trending } from '../signals/trending.js';
 import { executeLiveSell } from './router.js';
 import { sendPositionExit } from '../telegram/send.js';
+import { evaluateRunnerLifecycle, marketFlowSnapshot } from './runnerLifecycle.js';
 
-export function relativeTrailPercent({ peakPnl, atrPercent = null, ageMinutes = 0, baseTrail = 12 }) {
+export function relativeTrailPercent({ peakPnl, atrPercent = null, ageMinutes = 0, baseTrail = 12, adjustmentPercent = 0 }) {
   const peak = Math.max(0, Number(peakPnl) || 0);
   let trail = Math.abs(Number(baseTrail) || 12);
   if (peak >= 200) trail = 25;
@@ -24,6 +25,7 @@ export function relativeTrailPercent({ peakPnl, atrPercent = null, ageMinutes = 
   if (Number.isFinite(atr) && atr > 0) trail += Math.min(5, atr * 0.2);
   if (Number(ageMinutes) > 20) trail -= 5;
   else if (Number(ageMinutes) > 10) trail -= 2;
+  trail += Number(adjustmentPercent) || 0;
   return Math.max(8, Math.min(30, trail));
 }
 
@@ -238,11 +240,10 @@ export async function refreshPosition(position, { autoExit = true, jupiterPnl = 
   }
   const tpHit = pnlPercent >= Number(position.tp_percent);
 
-  // === FIX: Entry Grace Period (90 seconds) ===
-  // 54% of all exits are SL hits. Many occur in the first 1-2 minutes from market noise.
-  // Give the coin 90 seconds to settle after entry before allowing SL to trigger.
+  // Normal volatility may use a short grace period, but catastrophic invalidation
+  // is evaluated independently below and is never disabled during that window.
   const ageMs = now() - position.opened_at_ms;
-  const ENTRY_GRACE_MS = 90_000; // 90 seconds
+  const ENTRY_GRACE_MS = Math.max(0, numSetting('probe_validation_max_seconds', 90)) * 1000;
   const inGracePeriod = ageMs < ENTRY_GRACE_MS;
   const slHit = !inGracePeriod && pnlPercent <= effectiveSlPercent && pnlPercent < 0;
   // Trailing has its own arm threshold. Tying it to TP made a position with a
@@ -263,13 +264,48 @@ export async function refreshPosition(position, { autoExit = true, jupiterPnl = 
   const peakPnl = Number(position.entry_mcap) > 0
     ? (highWaterMcap / Number(position.entry_mcap) - 1) * 100
     : pnlPercent;
+  const positionSnapshot = safeJson(position.snapshot_json, {});
+  const entryLiquidityUsd = Number(
+    positionSnapshot?.candidate?.metrics?.liquidityUsd
+      || positionSnapshot?.candidate?.jupiterAsset?.liquidity
+      || 0,
+  ) || null;
+  const lifecycleFlow = marketFlowSnapshot(asset, { entryLiquidityUsd });
+  const lateEvidence = safeJson(position.late_evidence_json, null);
+  lifecycleFlow.lateFlowScore = Number.isFinite(Number(lateEvidence?.domainEvidence?.flow?.score))
+    ? Number(lateEvidence.domainEvidence.flow.score)
+    : null;
+  lifecycleFlow.sourceCount = Number(lateEvidence?.sourceCount || positionSnapshot?.candidate?.signals?.sourceCount || 1);
+  const lifecycleEnabled = position.execution_mode === 'live'
+    ? boolSetting('runner_lifecycle_live_enabled', false)
+    : boolSetting('runner_lifecycle_paper_enabled', true);
+  const lifecycle = evaluateRunnerLifecycle({
+    persistedState: position.position_stage || 'LEGACY',
+    ageMs,
+    pnlPercent,
+    peakPnl,
+    flow: lifecycleFlow,
+  }, {
+    validationMinMs: Math.max(5, numSetting('probe_validation_min_seconds', 30)) * 1000,
+    validationMaxMs: Math.max(10, numSetting('probe_validation_max_seconds', 90)) * 1000,
+    confirmationPnlPercent: numSetting('probe_confirmation_pnl_percent', 3),
+    thesisLossPercent: numSetting('probe_thesis_loss_percent', -10),
+    catastrophicLossPercent: numSetting('catastrophic_loss_percent', -25),
+    catastrophicLiquidityRetention: numSetting('catastrophic_liquidity_retention', 0.35),
+    minimumBuyerRatio: numSetting('probe_min_buyer_ratio', 0.10),
+    weakeningBuyerRatio: numSetting('runner_weakening_buyer_ratio', -0.15),
+  });
+  const catastrophicHit = lifecycle.reason === 'catastrophic_invalidation';
+  const thesisFailed = lifecycleEnabled && lifecycle.action === 'EXIT' && !catastrophicHit;
   const effectiveTrailPct = relativeTrailPercent({
     peakPnl,
     atrPercent,
     ageMinutes: ageMs / 60000,
     baseTrail: Number(position.trailing_percent),
+    adjustmentPercent: lifecycleEnabled ? lifecycle.trailAdjustmentPercent : 0,
   });
-  const trailingFloor = numSetting('trailing_floor_percent', 3);
+  const trailingFloor = numSetting('trailing_floor_percent', 3)
+    + (lifecycleEnabled ? Number(lifecycle.floorAdjustmentPercent || 0) : 0);
   const trailingHit = shouldExitTrailing({
     armed: trailingArmed,
     enabled: position.trailing_enabled,
@@ -334,7 +370,9 @@ export async function refreshPosition(position, { autoExit = true, jupiterPnl = 
   let closed = false;
 
   // Standard exit checks (Highest Priority)
-  if (profitLockHit) exitReason = 'PROFIT_LOCK';
+  if (catastrophicHit) exitReason = 'CATASTROPHIC_STOP';
+  else if (thesisFailed) exitReason = 'THESIS_FAILED';
+  else if (profitLockHit) exitReason = 'PROFIT_LOCK';
   else if (trailingHit) exitReason = 'TRAILING_TP';
   else if (slHit) exitReason = 'SL';
   else if (breakEvenHit) exitReason = 'BREAK_EVEN';
@@ -507,7 +545,7 @@ export async function refreshPosition(position, { autoExit = true, jupiterPnl = 
   db.prepare(`
     UPDATE dry_run_positions
     SET high_water_mcap = ?, high_water_price = ?, trailing_armed = ?,
-        mark_pnl_percent = ?, mark_pnl_sol = ?, mark_updated_at_ms = ?
+        mark_pnl_percent = ?, mark_pnl_sol = ?, mark_updated_at_ms = ?, position_stage = ?
     WHERE id = ?
   `).run(
     highWaterMcap,
@@ -516,6 +554,7 @@ export async function refreshPosition(position, { autoExit = true, jupiterPnl = 
     Number.isFinite(Number(pnlPercent)) ? pnlPercent : null,
     Number(position.realized_pnl_sol || 0) + Number(pnlSol || 0) - Number(position.entry_fee_sol || 0),
     now(),
+    lifecycleEnabled || catastrophicHit ? lifecycle.state : (position.position_stage || 'LEGACY'),
     position.id,
   );
 
@@ -594,6 +633,8 @@ export async function refreshPosition(position, { autoExit = true, jupiterPnl = 
     exit_reason: closed ? exitReason : position.exit_reason,
     exit_mcap: closed ? mcap : position.exit_mcap,
     exit_price: closed ? price : position.exit_price,
+    positionStage: lifecycleEnabled || catastrophicHit ? lifecycle.state : (position.position_stage || 'LEGACY'),
+    lifecycle,
   };
 }
 

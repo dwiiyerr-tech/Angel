@@ -5,7 +5,7 @@
 
 **Angel** adalah bot Telegram cerdas berbasis Node.js untuk memonitor, memfilter dengan Machine Learning, dan mengeksekusi trading token Solana pump.fun via Jupiter Exchange.
 
-Angel berawal sebagai fork dari [Charon](https://github.com/yunus-0x/charon) oleh [@yunus-0x](https://github.com/yunus-0x), dan kini telah berkembang menjadi bot mandiri dengan lapisan filter momentum ML, guard eksekusi ketat, dan cache keputusan LLM. Tiga mode utama yang didukung: `dry_run` (paper trading ke SQLite), `confirm` (tombol approve/reject via Telegram), dan `live` (swap asli).
+Angel berawal sebagai fork dari [Charon](https://github.com/yunus-0x/charon) oleh [@yunus-0x](https://github.com/yunus-0x), dan kini telah berkembang menjadi bot mandiri dengan filter momentum ML, empat domain evidence, model Edge deterministik, dan guard eksekusi ketat. Mode publiknya adalah `paper` (nol modal riil) dan `live` (tetap memerlukan approval owner).
 
 ## What changed in this fork
 
@@ -26,7 +26,11 @@ Everything from the original still applies: signal server, strategies (`sniper`,
 
 This fork now includes:
 
-- **LLM Decision Cache** (`migrations/001_decision_cache.sql`) — WATCH/PASS verdicts cached 10min/60min to cut redundant LLM calls by ~60-70%. Invalidates on >20% mcap or >30% holder change.
+- **Deterministic Edge authority** — Safety veto, Market/On-chain/Flow/Narrative evidence, calibrated survival/runner/route models, and bounded position sizing. LLM is configuration-analysis only.
+- **Asymmetric runner lifecycle** — PAPER probe-to-scale, immediate catastrophic stop, flow-aware trailing, first-passage labels, and gap-aware executable v32-v33 replay.
+- **Counterfactual reject tracking** — WATCH/PASS and early screening rejects receive executable outcome probes, so missed runners train the models instead of disappearing.
+- **Versioned rollback** — human-gated config challengers plus an optional VPS release-slot guard for atomic v33-to-v32 rollback. Both remain PAPER-only by default.
+- **Multi-source signal fan-in** — exact route blocking plus PumpPortal, Trending, trenches, fee, pre-grad, and smart-money evidence merging per mint.
 - **ML Momentum Filter** (`src/pipeline/momentumFilter.js` + `src/pipeline/predict_momentum.py`) — Python subprocess scoring candidates 0.0-1.0 using the bundled model artifacts in `models/`. Uses `momentum_threshold` (default `0.5`). The model, scaler, and feature metadata are included in the repository, so forks can run momentum scoring immediately.
 - **Hybrid Filter Strategy** (`OPTION_C_IMPLEMENTATION.md`) — bot holders ≥25% → HARD REJECT; holder deadzone [100,400] + dev migrations ≥20 → 50% size cut. Expected +20 SOL uplift based on 30-day backtest.
 - **Tier 1 Universal Filters** (`TIER1_FILTERS.md`) — 3 data-driven filters from 634-trade backtest with bucketed evidence.
@@ -71,7 +75,7 @@ Optional subsystems are off by default and stay off until you set their flag:
 - `GMGN_ENABLED=true` — enrichment via GMGN (on by default; set `false` to fall back to Jupiter data)
 - `PUMPPORTAL_ENABLED=true` — real-time WebSocket signals, needs `PUMPPORTAL_API_KEY`
 - `PREGRAD_ENABLED=true` — pre-graduation scanner
-- `ENABLE_LLM=true` — LLM entry selection (on by default; needs `LLM_API_KEY`)
+- `ENABLE_LLM=true` — optional configuration analyst; it cannot select entries, bypass Safety/Risk, promote itself, or enable LIVE
 
 Strategy parameters live in SQLite, not `.env`, and are hot-read — most tuning happens from the Telegram chat without restarts. API keys and RPC URLs are env values, so those need a restart.
 
@@ -79,7 +83,7 @@ Strategy parameters live in SQLite, not `.env`, and are hot-read — most tuning
 
 Run it, open Telegram, `/menu`.
 
-Start with `TRADING_MODE=dry_run`. Watch it for a week. Dry-run now uses executable Jupiter quotes for both entry and exit, but it is still an estimate: RPC/API failures can trigger fallbacks and live swaps add wallet state, confirmation, and timing risk. Only then decide if live is worth it.
+Start with `TRADING_MODE=paper`. Collect at least 14 days, 100 total outcomes, and 30 outcomes per represented route. PAPER uses executable Jupiter quotes for entry and exit, but it remains an estimate: live swaps add wallet state, finality, and timing risk. LIVE v33 authorities remain disabled until explicitly approved.
 
 ## Honest warnings
 

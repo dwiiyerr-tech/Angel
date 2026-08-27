@@ -4,6 +4,7 @@ import { sendPositionExit } from '../telegram/send.js';
 import { ensureResearchSchema } from './schema.js';
 import { recordResearchObservation } from './engine.js';
 import { estimateResearchTransactionFees } from './executionCost.js';
+import { maybeScaleResearchProbe } from './probeScale.js';
 import {
   ensureResearchExitSimulatorSchema,
   researchPositionHasPendingExitSettlement,
@@ -94,6 +95,7 @@ export async function monitorResearchPositions() {
     checked += 1;
     const cycleStartedAtMs = Date.now();
     try {
+      let monitoredPosition = position;
       // Do not let a later TP/SL/trailing decision overtake an earlier partial
       // settlement whose executable economics are still unresolved. The pending
       // row is retried by the durable settlement runner above. This preserves
@@ -103,26 +105,31 @@ export async function monitorResearchPositions() {
         continue;
       }
 
+      const scaleResult = await maybeScaleResearchProbe(monitoredPosition);
+      if (scaleResult?.scaled) {
+        monitoredPosition = db.prepare('SELECT * FROM dry_run_positions WHERE id = ?').get(position.id);
+      }
+
       // Keep TP/SL/trailing/profit-lock/time-exit authority in the mature shared
       // position engine. Exit Simulator V3 only replaces virtual settlement
       // economics after that engine has emitted an exit or partial-TP action.
-      const result = await refreshPosition(position, { autoExit: true, jupiterPnl: null });
+      const result = await refreshPosition(monitoredPosition, { autoExit: true, jupiterPnl: null });
       if (!result) continue;
 
       const partialSettlement = await settleResearchPartialExitV3({
-        beforePosition: position,
+        beforePosition: monitoredPosition,
         cycleStartedAtMs,
       }).catch(error => {
         console.error(`[research-exit-v3] partial settlement failed for ${position.id}: ${error.message}`);
         return null;
       });
-      if (partialSettlement) repairResearchPartialTokenEstimate(position);
+      if (partialSettlement) repairResearchPartialTokenEstimate(monitoredPosition);
       if (partialSettlement?.pending) {
         console.warn(`[research-exit-v3] partial settlement #${partialSettlement.settlementId} pending for position ${position.id}`);
       }
 
       if (result.exitReason) {
-        const finalSettlement = await settleResearchFinalExitV3({ beforePosition: position, result }).catch(error => {
+        const finalSettlement = await settleResearchFinalExitV3({ beforePosition: monitoredPosition, result }).catch(error => {
           console.error(`[research-exit-v3] final settlement failed for ${position.id}: ${error.message}`);
           return null;
         });

@@ -27,6 +27,8 @@ const POSITION_COLUMNS = {
   modeled_exit_fee_sol: 'REAL',
   modeled_net_pnl_sol: 'REAL',
   modeled_net_pnl_percent: 'REAL',
+  path_labels_json: 'TEXT',
+  runner_class: 'TEXT',
 };
 
 let initialized = false;

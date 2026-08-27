@@ -72,6 +72,22 @@ export function ensureControlPlaneSchema() {
       UNIQUE(proposal_id, candidate_id)
     );
 
+    CREATE TABLE IF NOT EXISTS challenger_replays (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      proposal_id INTEGER NOT NULL,
+      candidate_id INTEGER NOT NULL,
+      receipt_id INTEGER NOT NULL,
+      computed_at_ms INTEGER NOT NULL,
+      active_config_version INTEGER NOT NULL,
+      challenger_config_version INTEGER NOT NULL,
+      active_eligible INTEGER NOT NULL,
+      challenger_eligible INTEGER NOT NULL,
+      active_r REAL,
+      challenger_r REAL,
+      payload_json TEXT NOT NULL,
+      UNIQUE(proposal_id, receipt_id)
+    );
+
     CREATE TABLE IF NOT EXISTS config_events (
       id INTEGER PRIMARY KEY AUTOINCREMENT,
       at_ms INTEGER NOT NULL,
@@ -93,6 +109,18 @@ export function ensureControlPlaneSchema() {
       proposal_id INTEGER
     );
 
+    CREATE TABLE IF NOT EXISTS release_rollback_requests (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      requested_at_ms INTEGER NOT NULL,
+      from_release TEXT NOT NULL,
+      to_release TEXT NOT NULL,
+      config_version INTEGER,
+      reason TEXT NOT NULL,
+      status TEXT NOT NULL DEFAULT 'pending',
+      consumed_at_ms INTEGER,
+      result_json TEXT
+    );
+
     CREATE INDEX IF NOT EXISTS idx_config_versions_status
       ON config_versions(status, version);
     CREATE UNIQUE INDEX IF NOT EXISTS idx_config_versions_single_active
@@ -103,10 +131,14 @@ export function ensureControlPlaneSchema() {
       ON strategy_proposals(status, created_at_ms);
     CREATE INDEX IF NOT EXISTS idx_challenger_observations_proposal
       ON challenger_observations(proposal_id, at_ms);
+    CREATE INDEX IF NOT EXISTS idx_challenger_replays_proposal
+      ON challenger_replays(proposal_id, computed_at_ms);
     CREATE INDEX IF NOT EXISTS idx_config_events_version
       ON config_events(config_version, at_ms);
     CREATE INDEX IF NOT EXISTS idx_strategy_review_runs_created
       ON strategy_review_runs(created_at_ms);
+    CREATE INDEX IF NOT EXISTS idx_release_rollback_status
+      ON release_rollback_requests(status, requested_at_ms);
 
     CREATE TRIGGER IF NOT EXISTS trg_config_versions_immutable
     BEFORE UPDATE ON config_versions

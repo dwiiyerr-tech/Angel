@@ -1,0 +1,10 @@
+[Unit]
+Description=Angel atomic release rollback guard
+After=network.target
+
+[Service]
+Type=oneshot
+EnvironmentFile=/etc/angel/angel.env
+WorkingDirectory=/opt/angel/current
+ExecStart=/usr/bin/node /opt/angel/current/scripts/release_guard.mjs
+ExecStartPost=/bin/systemctl try-restart angel.service

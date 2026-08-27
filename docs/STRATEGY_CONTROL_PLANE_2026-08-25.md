@@ -24,11 +24,16 @@ Live requires a fresh /liveapprove snapshot
 
 `/configapprove` means **approve for challenger testing**, not approve for Live.
 
-The Strategy Analyst can only propose these soft-policy keys in v1:
+The Strategy Analyst can only propose bounded soft-policy keys, including:
 
 - `llm_min_confidence`
 - `blocked_routes`
 - `min_opportunity_size_multiplier`
+- `min_liquidity_usd`
+- severe flow floors
+- calibrated quality/survival/runner/expected-R floors
+- PAPER probe fraction
+- runner weakening threshold
 
 Everything else is protected from analyst mutation. In particular the analyst cannot change wallet, signer, exposure, slippage, contract safety, circuit breaker, hard risk caps, or position-size authority.
 
@@ -50,9 +55,9 @@ SQLite triggers reject attempts to rewrite an existing config payload, model-ver
 
 ## Evidence gate
 
-A weekly review uses Research plus compatible Shadow evidence. A proposal is not eligible until at least 50 version-compatible closed observations are present and either:
+A 14-day review uses PAPER plus compatible no-broadcast evidence. A proposal is not eligible until at least 100 compatible closed outcomes are present and either:
 
-- Research itself has at least 50 closed outcomes, or
+- Research itself has at least 100 closed outcomes, or
 - the Shadow learning window passes the existing data-quality gate.
 
 If the evidence is insufficient, the analyst returns `HOLD`/`insufficient`; no config is created and no settings change.
@@ -75,17 +80,18 @@ the proposal enters `testing` for seven days by default. Active settings remain 
 
 For each candidate, Angel records whether the active policy and challenger policy would admit it using:
 
-- BUY/WATCH/PASS verdict,
+- decision-time Safety and filter evidence,
 - route block state,
-- LLM confidence floor,
-- opportunity-size floor.
+- confidence and opportunity-size floors,
+- calibrated quality, survival, runner, and expected-R floors.
 
-Closed Research/Shadow outcomes are then joined to those observations and compared by expectancy-R and win rate.
+The active and challenger configs then replay their own entry eligibility and exit policy over the same executable Decision Intelligence quote path. Partial TP and gap fills are included. A changed setting that cannot be reconstructed from stored telemetry blocks promotion instead of being guessed.
 
 Default promotion evidence requires:
 
-- at least 30 challenger outcomes,
-- at least 24 hours of test age,
+- at least 100 challenger outcomes,
+- at least 14 days of test age,
+- at least 30 outcomes for every represented route,
 - non-negative challenger expectancy,
 - at least +0.05R expectancy improvement when the control sample is mature,
 - no more than 5 percentage points win-rate degradation.
@@ -119,6 +125,8 @@ Only the direct parent may be restored.
 The automatic performance guard runs only in Research/Shadow. After at least 30 post-promotion outcomes, it can roll back when expectancy is both materially negative and materially worse than the proposal's evidence baseline.
 
 The automatic guard deliberately does **not** mutate config while Live. Live safety incidents remain owned by the existing circuit breaker, reconciliation, and startup downgrade system.
+
+An optional external release guard can also consume a durable rollback request and atomically switch a VPS from the v33 release slot to v32. This is disabled by default and requires the release-slot installation described in `V33_RELEASE_ROLLBACK.md`.
 
 ## Telegram commands
 

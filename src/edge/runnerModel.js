@@ -3,6 +3,7 @@ import { numSetting } from '../db/settings.js';
 import { safeJson } from '../utils.js';
 import { ensureResearchSchema } from '../research/schema.js';
 import { netBuyerRatio, qualityScoreCandidate } from './qualityScore.js';
+import { counterfactualOutcomeRecords } from '../decisionIntelligence/learning.js';
 
 const MODEL_VERSION = 'runner-path-bayes-v1';
 let historyCache = { at: 0, key: '', records: null };
@@ -28,6 +29,16 @@ function bucket(value, cuts, labels) {
 
 function historyCacheMs() {
   return Math.max(0, Math.min(5 * 60_000, Math.floor(numSetting('edge_model_cache_ms', 30_000))));
+}
+
+function blendHistory(primary, supplemental, limit) {
+  const supplementCount = Math.min(supplemental.length, Math.max(1, Math.floor(limit * 0.35)));
+  const primaryCount = Math.min(primary.length, limit - supplementCount);
+  const remaining = Math.max(0, limit - primaryCount - supplementCount);
+  return [
+    ...primary.slice(0, primaryCount + remaining),
+    ...supplemental.slice(0, supplementCount),
+  ].slice(0, limit);
 }
 
 export function resetRunnerModelCacheForTests() {
@@ -62,7 +73,7 @@ export function runnerFeatureSnapshot(candidate = {}, quality = null) {
   const buyerRatio = netBuyerRatio(candidate);
   const priceChange1h = finite(candidate?.jupiterAsset?.stats1h?.priceChange);
   return {
-    route: String(candidate?.signals?.route || 'unknown'),
+    route: String(candidate?.signals?.primaryRoute || candidate?.signals?.route || 'unknown'),
     momentum,
     preScore,
     qualityScore,
@@ -159,7 +170,7 @@ function recordsFromResearchHistory({ runnerMfeR, maxMaeR, maxTimeToMfeMs, limit
     LIMIT ?
   `).all(limit);
 
-  const records = rows.map(row => {
+  const positionRecords = rows.map(row => {
     const snapshot = safeJson(row.snapshot_json, {});
     const candidate = snapshot?.candidate || {};
     const historicalQuality = candidate?.edge?.quality || qualityScoreCandidate(candidate);
@@ -179,6 +190,31 @@ function recordsFromResearchHistory({ runnerMfeR, maxMaeR, maxTimeToMfeMs, limit
       },
     };
   });
+  const counterfactualRecords = counterfactualOutcomeRecords(limit).map(row => {
+    const candidate = row.candidate || {};
+    const historicalQuality = candidate?.edge?.quality || qualityScoreCandidate(candidate);
+    const features = runnerFeatureSnapshot(candidate, historicalQuality);
+    const label = runnerLabelFromPosition({
+      mfe_r: row.sampledMfeR,
+      mae_r: row.sampledMaeR,
+      time_to_mfe_ms: runnerMfeR === 3 ? row.first3rHorizonMs : null,
+    }, { runnerMfeR, maxMaeR, maxTimeToMfeMs });
+    return {
+      id: `decision:${row.id}`,
+      isRunner: label.isRunner,
+      label: label.label,
+      counterfactual: true,
+      features: {
+        route: features.route,
+        momentum: features.buckets.momentum,
+        quality: features.buckets.quality,
+        liquidity: features.buckets.liquidity,
+        holders: features.buckets.holders,
+        flow: features.buckets.flow,
+      },
+    };
+  });
+  const records = blendHistory(positionRecords, counterfactualRecords, limit);
   historyCache = { at: Date.now(), key, records };
   return records;
 }

@@ -27,7 +27,7 @@ function authorized(msg) {
 function parseWindow(value) {
   const text = String(value || '7d').trim().toLowerCase();
   const match = text.match(/^(\d+)(h|d)$/);
-  if (!match) return 7 * 24 * 60 * 60 * 1000;
+  if (!match) return 14 * 24 * 60 * 60 * 1000;
   const amount = Math.max(1, Math.min(30, Number(match[1])));
   return amount * (match[2] === 'h' ? 60 * 60 * 1000 : 24 * 60 * 60 * 1000);
 }
@@ -189,6 +189,11 @@ export function setupControlPlaneTelegram() {
       `Control: n=${result.active.sample} · WR ${pct(result.active.winRate)} · Exp ${r(result.active.expectancyR)}`,
       `Challenger: n=${result.challenger.sample} · WR ${pct(result.challenger.winRate)} · Exp ${r(result.challenger.expectancyR)}`,
       `Δ Expectancy: ${r(result.expectancyDeltaR)}`,
+      `Replay: ${escapeHtml(result.replay?.source || 'legacy')} · n=${Number(result.replay?.sample || 0)}`,
+      `Flow telemetry: ${pct(result.replay?.flowTelemetryCoverage)}`,
+      ...(result.replay?.unsupportedKeys?.length
+        ? [`Blocked telemetry: <code>${escapeHtml(result.replay.unsupportedKeys.join(', '))}</code>`]
+        : []),
       `Promotion ready: <b>${result.promotionReady ? 'YES' : 'NO'}</b>`,
     ].join('\n');
   }));

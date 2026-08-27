@@ -1,7 +1,7 @@
 import { createHash } from 'node:crypto';
 import { db } from '../db/connection.js';
 import { currentLiveConfig } from '../db/liveConfig.js';
-import { setSetting } from '../db/settings.js';
+import { numSetting, setSetting } from '../db/settings.js';
 import { configuredTradingMode } from '../research/policy.js';
 import { RESEARCH_SIMULATOR_VERSION } from '../research/engine.js';
 import { RUNNER_MODEL_VERSION } from '../edge/runnerModel.js';
@@ -17,6 +17,12 @@ export const CONTROL_PLANE_PROPOSABLE_SETTINGS = new Set([
   'min_liquidity_usd',
   'flow_hard_price_change_pct',
   'flow_hard_net_buyer_ratio',
+  'edge_min_quality_score',
+  'edge_min_survival_probability',
+  'edge_min_runner_probability',
+  'edge_min_expected_r',
+  'probe_entry_fraction',
+  'runner_weakening_buyer_ratio',
 ]);
 
 const PROPOSABLE_NUMERIC_RANGES = Object.freeze({
@@ -25,6 +31,12 @@ const PROPOSABLE_NUMERIC_RANGES = Object.freeze({
   min_liquidity_usd: [1000, 100000],
   flow_hard_price_change_pct: [-80, 0],
   flow_hard_net_buyer_ratio: [-1, 0.5],
+  edge_min_quality_score: [35, 80],
+  edge_min_survival_probability: [0.45, 0.85],
+  edge_min_runner_probability: [0.2, 0.75],
+  edge_min_expected_r: [-0.1, 1.5],
+  probe_entry_fraction: [0.05, 0.25],
+  runner_weakening_buyer_ratio: [-0.5, 0.2],
 });
 
 const KNOWN_ROUTES = new Set([
@@ -35,6 +47,8 @@ const KNOWN_ROUTES = new Set([
   'trending',
   'graduated_trending',
   'dual_source',
+  'smart_money',
+  'gmgn_smart_money',
 ]);
 
 const NON_VERSIONED_OPERATIONAL_SETTINGS = new Set([
@@ -293,7 +307,7 @@ export function createStrategyProposal({
       proposedHash,
       evidenceJson,
       evidenceHash,
-      30,
+      Math.max(30, Math.floor(numSetting('control_plane_min_test_sample', 100))),
     );
     const proposalId = Number(result.lastInsertRowid);
     db.prepare(`
@@ -323,7 +337,7 @@ export function approveProposalForTest(id, actor = 'human') {
   }
   assertRegistryAligned();
   const now = Date.now();
-  const testDays = 7;
+  const testDays = Math.max(14, Math.floor(numSetting('control_plane_test_days', 14)));
   const until = now + testDays * 24 * 60 * 60 * 1000;
   const approvalHash = createHash('sha256')
     .update(`${proposal.proposal_hash}:${actor}:${now}`)

@@ -130,6 +130,12 @@ export async function startAngel() {
   fetchGmgnTrending().catch(err => console.log(`[trending] initial fetch failed: ${err.message}`));
   setInterval(nonOverlapping('trending poll', () => trackTrending(() => fetchGmgnTrending())), TRENDING_POLL_MS);
 
+  const { fetchSmartMoney, setCandidateHandler: setSmartMoneyHandler } = await import('./signals/smartMoney.js');
+  setSmartMoneyHandler(processCandidateFromSignals);
+  const trackSmartMoney = makeFailureTracker('smart money poll', (msg) => sendTelegram(msg));
+  fetchSmartMoney().catch(err => console.log(`[smart_money] initial fetch failed: ${err.message}`));
+  setInterval(nonOverlapping('smart money', () => trackSmartMoney(() => fetchSmartMoney())), 60_000);
+
   if (PREGRAD_ENABLED) {
     const { startPumpfunPregrad, setCandidateHandler: setPregradHandler } = await import('./signals/pumpfunPregrad.js');
     setPregradHandler(processCandidateFromSignals);
@@ -176,8 +182,8 @@ export async function startAngel() {
 
   // Durable weekly learning remains advisory-only. Zero-capital research does
   // not modify strategy/live configuration automatically.
-  const LEARNING_INTERVAL_MS = 7 * 24 * 60 * 60 * 1000;
-  const LEARNING_WINDOW_MS = 7 * 24 * 60 * 60 * 1000;
+  const LEARNING_INTERVAL_MS = 14 * 24 * 60 * 60 * 1000;
+  const LEARNING_WINDOW_MS = 14 * 24 * 60 * 60 * 1000;
   async function runPeriodicLearning() {
     try {
       const summary = summarizeLearningWindow(LEARNING_WINDOW_MS);
@@ -200,7 +206,7 @@ export async function startAngel() {
     scheduleLearning(LEARNING_INTERVAL_MS);
   }, delayMs);
   scheduleLearning(firstLearningDelay);
-  console.log(`[bot] learning cycle scheduled in ${(firstLearningDelay / 3600000).toFixed(1)}h, then every 7 days (7-day evidence window)`);
+  console.log(`[bot] learning cycle scheduled in ${(firstLearningDelay / 3600000).toFixed(1)}h, then every 14 days (14-day evidence window)`);
 
   setInterval(pruneExpiredCache, 60 * 60 * 1000);
   setInterval(() => {

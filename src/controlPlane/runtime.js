@@ -68,7 +68,7 @@ export function startControlPlaneRuntime() {
   setupControlPlaneTelegram();
   console.log(`[control-plane] active ${active.label} ${active.config_hash.slice(0, 12)}…`);
 
-  const weekMs = 7 * 24 * 60 * 60 * 1000;
+  const weekMs = 14 * 24 * 60 * 60 * 1000;
   const lastReviewAt = Number(db.prepare('SELECT MAX(created_at_ms) AS at_ms FROM strategy_review_runs').get()?.at_ms || 0);
   const firstReviewDelay = lastReviewAt
     ? Math.max(60_000, weekMs - (Date.now() - lastReviewAt))

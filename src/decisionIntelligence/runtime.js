@@ -9,6 +9,7 @@ import { ensureResearchSchema } from '../research/schema.js';
 import { now } from '../utils.js';
 import { fetchDecisionEntryQuote, fetchDecisionExitQuote } from './jupiterProbe.js';
 import { ensureDecisionIntelligenceSchema } from './schema.js';
+import { fetchJupiterAsset } from '../enrichment/jupiter.js';
 
 const activeReceipts = new Set();
 let runtimeStarted = false;
@@ -224,14 +225,17 @@ export async function processDueDecisionObservation(observationId) {
   if (Number(row.due_at_ms) > now() || row.probe_status !== 'ready') return false;
 
   try {
-    const quote = await fetchDecisionExitQuote(row.mint, row.token_amount_raw);
+    const [quote, market] = await Promise.all([
+      fetchDecisionExitQuote(row.mint, row.token_amount_raw),
+      fetchJupiterAsset(row.mint, { useCache: false }).catch(() => null),
+    ]);
     if (!quote || !Number.isFinite(Number(quote.outSol))) throw new Error('counterfactual exit quote unavailable');
     const observedAtMs = now();
     const economics = economicsForObservation(row, row, Number(quote.outSol));
     db.prepare(`
       UPDATE decision_outcome_observations
       SET observed_at_ms = ?, status = 'ready', attempt_count = attempt_count + 1,
-          out_sol = ?, pnl_sol = ?, pnl_percent = ?, r_multiple = ?, quote_json = ?, error = NULL
+          out_sol = ?, pnl_sol = ?, pnl_percent = ?, r_multiple = ?, quote_json = ?, market_json = ?, error = NULL
       WHERE id = ?
     `).run(
       observedAtMs,
@@ -240,6 +244,7 @@ export async function processDueDecisionObservation(observationId) {
       economics.pnlPercent,
       economics.rMultiple,
       JSON.stringify({ ...quote, sampledAtMs: observedAtMs }),
+      market ? JSON.stringify({ ...market, sampledAtMs: observedAtMs }) : null,
       row.id,
     );
     finalizeDecisionOutcomeIfReady(row.receipt_id);

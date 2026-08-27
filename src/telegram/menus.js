@@ -4,7 +4,6 @@ import { openPositionCount, allPositions } from '../db/positions.js';
 import { savedWallets } from '../enrichment/wallets.js';
 import { gmgnStatusText } from '../enrichment/gmgn.js';
 import { formatPosition } from './format.js';
-import { ENABLE_LLM, LLM_API_KEY } from '../config.js';
 import { configuredTradingMode } from '../research/policy.js';
 import { openResearchPositionCount, researchPositionCap } from '../research/engine.js';
 import { paperWalletSummary, formatPaperWalletSummary } from '../research/virtualWallet.js';
@@ -124,7 +123,7 @@ export const strategyNumericLabels = {
   trending_min_swaps: 'minimum trending swaps',
   trending_max_rug_ratio: 'maximum trending rug ratio (0.3 = 30%)',
   trending_max_bundler_rate: 'maximum trending bundler rate (0.5 = 50%)',
-  llm_min_confidence: 'LLM minimum confidence percent',
+  llm_min_confidence: 'deterministic decision confidence floor (legacy DB key)',
   position_size_sol: 'position size SOL',
   max_open_positions: 'maximum open positions',
   tp_percent: 'take profit percent',
@@ -160,7 +159,6 @@ export function agentText() {
   const strat = activeStrategy();
   const mode = modeMeta();
   const agentEnabled = boolSetting('agent_enabled', true);
-  const llmReady = Boolean(strat.use_llm && ENABLE_LLM && LLM_API_KEY);
   const paperOpen = openResearchPositionCount();
   const paperMax = researchPositionCap();
   const paperWallet = paperWalletSummary();
@@ -174,7 +172,8 @@ export function agentText() {
     '<b>Runtime</b>',
     `• Agent: <b>${enabledText(agentEnabled)}</b>`,
     `• Strategy: <b>${escapeHtml(strat.name)}</b>`,
-    `• Intelligence: <b>${llmReady ? 'LLM READY' : strat.use_llm ? 'LLM NOT CONFIGURED' : 'RULE-BASED'}</b>`,
+    '• Entry authority: <b>DETERMINISTIC EDGE</b>',
+    '• LLM role: configuration analyst only',
     `• Confidence floor: ${fmtPct(strat.llm_min_confidence || numSetting('llm_min_confidence'))}`,
     '',
     '<b>Paper trading laboratory</b>',
@@ -306,7 +305,7 @@ export function strategyMenuText() {
     `• Fee claim required: ${strat.require_fee_claim ? 'YES' : 'NO'}`,
     strat.max_ath_distance_pct < 0 ? `• Max ATH distance: ${strat.max_ath_distance_pct}%` : null,
     `• Win cooldown: ${strat.win_block_days ?? 'default'} days`,
-    `• Decision engine: ${strat.use_llm ? `LLM ≥ ${strat.llm_min_confidence}%` : 'Rule-based'}`,
+    `• Decision engine: Safety + Domains + Edge ≥ ${strat.llm_min_confidence}%`,
     '',
     '<b>Available strategies</b>',
     ...all.map(s => `${s.enabled ? '▶️' : '▫️'} ${escapeHtml(s.name)}`),
@@ -339,11 +338,10 @@ export function strategyKeyboard() {
     ],
     [
       { text: `Fee Req ${strat.require_fee_claim ? 'on' : 'off'}`, callback_data: 'stratcfg:require_fee_claim' },
-      { text: `LLM ${strat.use_llm ? 'on' : 'off'}`, callback_data: 'stratcfg:use_llm' },
     ],
     [
       { text: `Min Holders ${strat.min_holders}`, callback_data: 'stratinput:min_holders' },
-      { text: `Conf ${strat.llm_min_confidence}%`, callback_data: 'stratinput:llm_min_confidence' },
+      { text: `Edge Conf ${strat.llm_min_confidence}%`, callback_data: 'stratinput:llm_min_confidence' },
     ],
     [
       { text: `Win Block ${strat.win_block_days ?? 'def'}d`, callback_data: 'stratinput:win_block_days' },

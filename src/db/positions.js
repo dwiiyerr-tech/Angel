@@ -3,7 +3,7 @@ import { DRY_RUN_SIMULATOR_VERSION } from '../learning/simulatorVersion.js';
 import { now, json } from '../utils.js';
 import { numSetting, boolSetting, setting, activeStrategy, slippageAdjustedMcap } from './settings.js';
 import { DRY_RUN_NETWORK_FEE_SOL, DRY_RUN_PRIORITY_FEE_SOL, RISK_PER_TRADE_SOL } from '../config.js';
-import { effectivePositionSizeSol } from '../pipeline/llm.js';
+import { effectivePositionSizeSol } from '../pipeline/deterministicDecision.js';
 import { riskControlState } from '../execution/riskControls.js';
 
 export function riskRewardRatio(tpPercent, slPercent) {

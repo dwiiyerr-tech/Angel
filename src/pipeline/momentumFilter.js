@@ -15,6 +15,8 @@ function attachEdgeEvidence(candidate, momentumScore) {
     const edge = assessCandidateEdge(candidate);
     candidate.edge = edge;
     candidate.filters.qualityScore = edge.quality.score;
+    candidate.filters.survivalProbability = edge.survival.probability;
+    candidate.filters.survivalProbabilityEligible = edge.survival.decisionEligible;
     candidate.filters.runnerProbability = edge.runner.probability;
     candidate.filters.runnerProbabilityEligible = edge.runner.decisionEligible;
     candidate.filters.routeWinProbability = edge.route.pWin;
@@ -23,9 +25,12 @@ function attachEdgeEvidence(candidate, momentumScore) {
     candidate.filters.edgeOpportunityProbability = edge.combined.opportunityProbability;
     candidate.filters.edgeOpportunityConfidence = edge.combined.opportunityConfidence;
     candidate.filters.edgeEvidenceQuality = edge.combined.evidenceQuality;
+    candidate.filters.edgeAdmissionAction = edge.admission.action;
+    candidate.filters.edgeAdmissionEligible = edge.admission.decisionEligible;
+    candidate.filters.edgeRecommendedSizeFraction = edge.admission.recommendedSizeFraction;
   } catch (error) {
     candidate.edge = {
-      version: 'edge-assessment-v1',
+      version: 'edge-assessment-v2',
       error: error.message,
       quality: null,
       runner: null,

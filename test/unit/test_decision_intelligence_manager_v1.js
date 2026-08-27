@@ -1,7 +1,10 @@
 import assert from 'node:assert/strict';
 import { db, initDb } from '../../src/db/connection.js';
 import { ensureResearchSchema } from '../../src/research/schema.js';
-import { ensureDecisionIntelligenceSchema } from '../../src/decisionIntelligence/schema.js';
+import {
+  DECISION_OUTCOME_HORIZONS_MS,
+  ensureDecisionIntelligenceSchema,
+} from '../../src/decisionIntelligence/schema.js';
 import { ensureControlPlaneSchema } from '../../src/controlPlane/schema.js';
 import { upsertCandidate } from '../../src/db/candidates.js';
 import { logDecisionEvent, storeDecision } from '../../src/db/decisions.js';
@@ -80,7 +83,10 @@ const passReceipt = decisionReceiptByDecisionId(passDecisionId);
 assert(passReceipt, 'PASS receipt must exist');
 assert.equal(passReceipt.verdict, 'PASS');
 assert.equal(passReceipt.mode, 'research');
-assert.equal(db.prepare('SELECT COUNT(*) AS count FROM decision_outcome_observations WHERE receipt_id = ?').get(passReceipt.id).count, 4);
+assert.equal(
+  db.prepare('SELECT COUNT(*) AS count FROM decision_outcome_observations WHERE receipt_id = ?').get(passReceipt.id).count,
+  DECISION_OUTCOME_HORIZONS_MS.length,
+);
 assert.equal(db.prepare('SELECT status FROM decision_execution_probes WHERE receipt_id = ?').get(passReceipt.id).status, 'pending');
 assert.throws(
   () => db.prepare("UPDATE decision_receipts SET verdict = 'WATCH' WHERE id = ?").run(passReceipt.id),

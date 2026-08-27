@@ -6,6 +6,8 @@ import { db } from '../db/connection.js';
 import { storeSignalEvent } from '../signals/trending.js';
 import { validateLLMResponse } from './llmValidator.js';
 import { buildTradeMemory } from './tradeMemory.js';
+import { isRouteBlocked, parseBlockedRoutes } from './routePolicy.js';
+import { decideDeterministicBatch, effectivePositionSizeSol } from './deterministicDecision.js';
 
 // Read from DB setting (configurable per-strategy), fallback to 70 for backward compat
 import { activeStrategy } from '../db/settings.js';
@@ -53,7 +55,7 @@ export function normalizeDecision(parsed, fallbackReason = '', route = '') {
   const blockedRoutes = getBlockedRoutes();
 
   // Block unprofitable routes entirely
-  if (verdict === 'BUY' && blockedRoutes.some(br => String(route).includes(br))) {
+  if (verdict === 'BUY' && isRouteBlocked(String(route), new Set(blockedRoutes))) {
     console.log(`[llm] BUY blocked — route "${route}" is dynamically disabled`);
     verdict = 'WATCH';
   }
@@ -85,19 +87,7 @@ export function normalizeDecision(parsed, fallbackReason = '', route = '') {
   };
 }
 
-export function effectivePositionSizeSol(strat, decision) {
-  const base = Number(strat?.position_size_sol ?? numSetting('dry_run_buy_sol', 0.1));
-  if (decision?.verdict === 'BUY') {
-    const conf = Number(decision?.confidence) || 0;
-    // Scale dynamically based on confidence instead of fixed drops
-    // Example: 100 conf = 1.0x base, 50 conf = 0.5x base
-    const multiplier = Math.max(0.1, Math.min(1.0, conf / 100.0));
-    const size = base * multiplier;
-    console.log(`[llm] dynamic sizing: confidence ${conf} -> multiplier ${multiplier.toFixed(2)}x -> size ${size.toFixed(3)} SOL`);
-    return size;
-  }
-  return base;
-}
+export { effectivePositionSizeSol };
 
 export { llmBuyMinConfidence, llmLowConfidenceCap };
 
@@ -233,7 +223,10 @@ export function compactCandidateForLlm(row) {
   };
 }
 
-export async function decideCandidateBatch(rows, triggerCandidateId) {
+// Retained only as an offline/advisory implementation while historical prompt
+// tests and audit tools are migrated. It is intentionally not exported and is
+// never connected to execution authority.
+async function legacyLlmCandidateAnalysis(rows, triggerCandidateId) {
   if (!ENABLE_LLM || !LLM_API_KEY) {
     return {
       verdict: 'WATCH',
@@ -342,10 +335,10 @@ export async function decideCandidateBatch(rows, triggerCandidateId) {
     candidates: [],  // placeholder, filled below
   };
 
-  const blockedRoutes = getBlockedRoutes();
+  const blockedRoutes = parseBlockedRoutes(setting('blocked_routes', '[]'));
   user.candidates = rows.filter(row => {
     const route = row.candidate?.signals?.route || '';
-    if (blockedRoutes.some(br => route.includes(br))) {
+    if (isRouteBlocked(row.candidate, blockedRoutes)) {
       console.log(`[llm] filtered blocked route "${route}"`);
       return false;
     }
@@ -602,6 +595,10 @@ export async function decideCandidateBatch(rows, triggerCandidateId) {
       raw: { error: err.message },
     };
   }
+}
+
+export async function decideCandidateBatch(rows, triggerCandidateId) {
+  return decideDeterministicBatch(rows, triggerCandidateId, { researchMode: false });
 }
 
 export async function decideCandidate(candidate) {

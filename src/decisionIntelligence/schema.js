@@ -2,6 +2,7 @@ import { db } from '../db/connection.js';
 
 export const DECISION_RECEIPT_VERSION = 'decision-receipt-v1';
 export const DECISION_OUTCOME_HORIZONS_MS = Object.freeze([
+  2 * 60 * 1000,
   5 * 60 * 1000,
   15 * 60 * 1000,
   30 * 60 * 1000,
@@ -70,6 +71,7 @@ export function ensureDecisionIntelligenceSchema() {
       pnl_percent REAL,
       r_multiple REAL,
       quote_json TEXT,
+      market_json TEXT,
       error TEXT,
       UNIQUE(receipt_id, horizon_ms)
     );
@@ -115,6 +117,11 @@ export function ensureDecisionIntelligenceSchema() {
       SELECT RAISE(ABORT, 'decision receipt core is immutable');
     END;
   `);
+
+  const observationColumns = new Set(db.prepare('PRAGMA table_info(decision_outcome_observations)').all().map(row => row.name));
+  if (!observationColumns.has('market_json')) {
+    db.exec('ALTER TABLE decision_outcome_observations ADD COLUMN market_json TEXT');
+  }
 
   initialized = true;
 }

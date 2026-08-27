@@ -4,6 +4,7 @@ import { ensureControlPlaneSchema } from '../src/controlPlane/schema.js';
 import { buildStrategyEvidence } from '../src/controlPlane/evidence.js';
 import { latestStrategyReview } from '../src/controlPlane/analyst.js';
 import { activeConfigVersion, bootstrapConfigRegistry, openStrategyProposal } from '../src/controlPlane/registry.js';
+import { pendingReleaseRollback } from '../src/release/rollbackRequest.js';
 
 initDb();
 ensureResearchSchema();
@@ -13,6 +14,7 @@ bootstrapConfigRegistry('report_bootstrap');
 const active = activeConfigVersion();
 const proposal = openStrategyProposal();
 const review = latestStrategyReview();
+const releaseRollback = pendingReleaseRollback();
 const evidence = buildStrategyEvidence(7 * 24 * 60 * 60 * 1000);
 
 console.log(JSON.stringify({
@@ -37,6 +39,13 @@ console.log(JSON.stringify({
     id: review.id,
     status: review.status,
     activeConfigVersion: review.active_config_version,
+  } : null,
+  pendingReleaseRollback: releaseRollback ? {
+    id: releaseRollback.id,
+    fromRelease: releaseRollback.from_release,
+    toRelease: releaseRollback.to_release,
+    requestedAtMs: releaseRollback.requested_at_ms,
+    reason: releaseRollback.reason,
   } : null,
   evidence: {
     totalClosed: evidence.totalClosed,

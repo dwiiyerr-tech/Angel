@@ -45,9 +45,15 @@ function summarize(rows) {
   const breakeven = totalTrades - wins - losses;
   const winRate = totalTrades > 0 ? (wins / totalTrades * 100) : 0;
   const pnlSol = rows.reduce((sum, p) => sum + Number(p.pnl_sol || 0), 0);
-  const pnlPercent = totalTrades > 0
-    ? rows.reduce((sum, p) => sum + Number(p.pnl_percent || 0), 0) / totalTrades
-    : 0;
+  const capitalBasisSol = rows.reduce((sum, p) => sum
+    + Math.max(0, Number(p.size_sol || 0))
+    + Math.max(0, Number(p.realized_cost_sol || 0))
+    + Math.max(0, Number(p.entry_fee_sol || 0))
+    + Math.max(0, Number(p.realized_fee_sol || 0))
+    + Math.max(0, Number(p.exit_fee_sol || 0)), 0);
+  // Portfolio/deployed-capital return. The old arithmetic mean of per-trade
+  // percentages made a -0.099 SOL day look like -10% of the wallet.
+  const pnlPercent = capitalBasisSol > 0 ? pnlSol / capitalBasisSol * 100 : 0;
 
   const sorted = [...rows].sort((a, b) => Number(b.pnl_percent || 0) - Number(a.pnl_percent || 0));
   const bestTrade = totalTrades > 0
@@ -79,6 +85,7 @@ function summarize(rows) {
     winRate,
     pnlSol,
     pnlPercent,
+    capitalBasisSol,
     bestTrade,
     worstTrade,
     avgWin,
@@ -99,7 +106,8 @@ export async function buildDailyReport(nowMs = Date.now()) {
     const windowEndMs = Number(nowMs);
     const windowStartMs = windowEndMs - DAY_MS;
     const closed = db.prepare(`
-      SELECT id, mint, symbol, execution_mode, pnl_sol, pnl_percent, realized_r, closed_at_ms
+      SELECT id, mint, symbol, execution_mode, pnl_sol, pnl_percent, realized_r, closed_at_ms,
+             size_sol, realized_cost_sol, entry_fee_sol, realized_fee_sol, exit_fee_sol
       FROM dry_run_positions
       WHERE status = 'closed' AND closed_at_ms >= ? AND closed_at_ms <= ?
       ORDER BY closed_at_ms DESC
@@ -142,7 +150,7 @@ function modeLines(label, report, pnlLabel) {
   return [
     `<b>${label}</b>`,
     `Trades: ${report.totalTrades} · ${report.wins}W / ${report.losses}L${report.breakeven ? ` / ${report.breakeven}BE` : ''} · WR ${report.winRate.toFixed(1)}%`,
-    `${pnlLabel}: ${fmtPnl(report.pnlSol)} · Avg ${report.pnlPercent >= 0 ? '+' : ''}${report.pnlPercent.toFixed(2)}%`,
+    `${pnlLabel}: ${fmtPnl(report.pnlSol)} · Capital return ${report.pnlPercent >= 0 ? '+' : ''}${report.pnlPercent.toFixed(2)}%`,
     `Expectancy: ${fmtR(report.expectancyR, report.rSamples)}`,
   ];
 }

@@ -5,6 +5,8 @@ import { summarizeLearningWindow } from '../learning/summary.js';
 import { RUNNER_MODEL_VERSION } from '../edge/runnerModel.js';
 import { ROUTE_EDGE_MODEL_VERSION } from '../edge/routeEdgeModel.js';
 import { RESEARCH_SIMULATOR_VERSION } from '../research/engine.js';
+import { compareReplayPolicies } from '../learning/counterfactualReplay.js';
+import { executableDecisionPaths } from '../decisionIntelligence/learning.js';
 
 function finite(value) {
   if (value === null || value === undefined || value === '') return null;
@@ -27,7 +29,7 @@ function mean(values = []) {
 
 function researchRoute(position) {
   const snapshot = safeJson(position.snapshot_json, {});
-  return String(snapshot?.signalRoute || snapshot?.candidate?.signals?.route || 'unknown');
+  return String(snapshot?.candidate?.signals?.primaryRoute || snapshot?.signalRoute || snapshot?.candidate?.signals?.route || 'unknown');
 }
 
 function configVersion(position) {
@@ -91,9 +93,9 @@ function summarizeResearchRows(rows) {
   };
 }
 
-export function buildStrategyEvidence(windowMs = 7 * 24 * 60 * 60 * 1000) {
+export function buildStrategyEvidence(windowMs = 14 * 24 * 60 * 60 * 1000) {
   ensureResearchSchema();
-  const safeWindowMs = Math.max(24 * 60 * 60 * 1000, Number(windowMs) || 7 * 24 * 60 * 60 * 1000);
+  const safeWindowMs = Math.max(14 * 24 * 60 * 60 * 1000, Number(windowMs) || 14 * 24 * 60 * 60 * 1000);
   const cutoff = Date.now() - safeWindowMs;
   const researchRows = db.prepare(`
     SELECT id, candidate_id, status, closed_at_ms, opened_at_ms, realized_r, mfe_r, mae_r,
@@ -105,6 +107,21 @@ export function buildStrategyEvidence(windowMs = 7 * 24 * 60 * 60 * 1000) {
     ORDER BY closed_at_ms ASC
   `).all(cutoff);
   const research = summarizeResearchRows(researchRows);
+  const executablePaths = executableDecisionPaths({ sinceMs: cutoff, limit: 10000 });
+  const replayRows = executablePaths.map(path => compareReplayPolicies(path.observations))
+    .filter(result => result.deltaR != null);
+  const counterfactual = {
+    version: 'v32-v33-executable-counterfactual-v2',
+    methodology: 'decision-time Jupiter entry plus net executable exit quotes; discrete and gap-aware',
+    sample: replayRows.length,
+    verdictCoverage: Object.fromEntries(['BUY', 'WATCH', 'PASS'].map(verdict => [
+      verdict,
+      executablePaths.filter(path => path.receipt.verdict === verdict).length,
+    ])),
+    v32ExpectancyR: mean(replayRows.map(result => result.v32.exitR)),
+    v33ExpectancyR: mean(replayRows.map(result => result.v33.exitR)),
+    deltaExpectancyR: mean(replayRows.map(result => result.deltaR)),
+  };
 
   let shadow;
   try {
@@ -135,7 +152,7 @@ export function buildStrategyEvidence(windowMs = 7 * 24 * 60 * 60 * 1000) {
   }
 
   const totalClosed = research.closed + shadow.closed;
-  const minimumProposalTrades = 50;
+  const minimumProposalTrades = 100;
   return {
     version: 'strategy-evidence-v1',
     windowMs: safeWindowMs,
@@ -146,6 +163,7 @@ export function buildStrategyEvidence(windowMs = 7 * 24 * 60 * 60 * 1000) {
     proposalEligible: totalClosed >= minimumProposalTrades
       && (research.closed >= minimumProposalTrades || shadow.learningEligible),
     research,
+    counterfactual,
     shadow,
     models: {
       runner: RUNNER_MODEL_VERSION,

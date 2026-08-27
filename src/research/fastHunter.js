@@ -11,8 +11,7 @@ import { fetchTwitterNarrative } from '../enrichment/twitter.js';
 import { filterCandidate, signalLabel } from '../pipeline/candidateBuilder.js';
 import { preScoreCandidate } from '../pipeline/preScorer.js';
 import { momentumFilter } from '../pipeline/momentumFilter.js';
-import { decideCandidateBatch } from '../pipeline/llm.js';
-import { hunterPolicy } from '../pipeline/hunterPolicy.js';
+import { decideDeterministicBatch } from '../pipeline/deterministicDecision.js';
 import { applyContractSafetyGate } from '../execution/contractSafetyGate.js';
 import {
   canOpenResearchPosition,
@@ -169,10 +168,6 @@ function mergeRunPayload(runId, extra = {}) {
   const current = safeJson(row?.payload_json, {});
   db.prepare('UPDATE fast_hunter_runs SET payload_json = ? WHERE id = ?')
     .run(json({ ...current, ...extra }), runId);
-}
-
-function riskSeverity(candidate) {
-  return (candidate?.riskFlags || []).reduce((sum, flag) => sum + Math.max(0, Number(flag?.severity) || 0), 0);
 }
 
 function fastCapacity() {
@@ -345,38 +340,16 @@ async function buildEssentialCandidate(signals, signalAtMs) {
 }
 
 function buildFastDecision(candidate, candidateId) {
-  const strat = activeStrategy();
-  const prescore = Number(candidate.filters?.preScore);
-  const momentum = Number(candidate.filters?.momentumScore);
-  const derivedConfidence = Math.max(
-    numSetting('research_min_confidence', 30),
-    Math.min(100, Number.isFinite(prescore) ? prescore : 50),
-  );
-  const policy = hunterPolicy({
-    confidence: derivedConfidence,
-    preScore: prescore,
-    momentum,
-    totalSoftRiskSeverity: riskSeverity(candidate),
-    catastrophic: candidate.contractSafety?.passed === false,
-  });
-  const buy = policy.action === 'TRADE' && candidate.contractSafety?.passed !== false;
+  const row = { id: candidateId, candidate };
+  const decision = decideDeterministicBatch([row], candidateId, { researchMode: true });
   return {
-    verdict: buy ? 'BUY' : 'WATCH',
-    confidence: Math.max(0, Math.min(100, Number(policy.score ?? derivedConfidence) || 0)),
-    selected_candidate_id: buy ? candidateId : null,
-    selected_mint: buy ? candidate.token.mint : null,
+    ...decision,
     selected_row: null,
-    reason: `Research Fast Hunter ${policy.tier}: ${buy ? 'zero-capital sample admitted without waiting for deep enrichment/LLM' : 'insufficient deterministic edge for immediate sample'}.`,
-    risks: (candidate.riskFlags || []).map(flag => flag.reason || flag.type).filter(Boolean).slice(0, 8),
-    suggested_tp_percent: Number(strat.tp_percent ?? numSetting('default_tp_percent', 50)),
-    suggested_sl_percent: Number(strat.sl_percent ?? numSetting('default_sl_percent', -25)),
-    research_hunter_policy: policy,
     fast_hunter: {
       version: FAST_HUNTER_VERSION,
-      llmAdvisoryPending: true,
+      configurationAnalysisPending: true,
       deepEnrichmentPending: true,
     },
-    raw: null,
   };
 }
 
@@ -457,18 +430,13 @@ async function completeBackgroundEvidence({ runId, candidateId, positionId }) {
       status: 'late_enriched',
     });
 
-    let advisory = {
-      verdict: 'WATCH',
-      confidence: 0,
-      reason: 'Async LLM advisory disabled.',
-      risks: ['async_llm_disabled'],
-    };
-    if (boolSetting('research_fast_hunter_async_llm_enabled', true) && activeStrategy().use_llm) {
-      const latestRow = candidateById(candidateId);
-      advisory = latestRow
-        ? await decideCandidateBatch([latestRow], candidateId)
-        : advisory;
-    }
+    const latestRow = candidateById(candidateId);
+    const advisory = latestRow
+      ? decideDeterministicBatch([latestRow], candidateId, { researchMode: true })
+      : {
+          authority: 'deterministic_edge_v1', verdict: 'WATCH', confidence: 0,
+          reason: 'Candidate snapshot unavailable for deterministic comparison.', risks: ['missing_candidate'],
+        };
     const llmDone = now();
     patchRun(runId, {
       llm_done_ms: llmDone,

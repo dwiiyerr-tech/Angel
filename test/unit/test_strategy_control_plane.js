@@ -78,7 +78,8 @@ assert.throws(
 
 const testing = approveProposalForTest(created.proposalId, 'unit_test');
 assert.equal(testing.status, 'testing');
-assert.ok(Number(testing.test_until_ms) > Date.now());
+assert.ok(Number(testing.test_until_ms) - Number(testing.test_started_at_ms) >= 14 * 24 * 60 * 60 * 1000);
+assert.ok(Number(testing.min_test_sample) >= 100);
 
 const candidate = {
   signals: { route: 'pumpportal_graduated' },

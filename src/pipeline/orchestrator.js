@@ -1,12 +1,12 @@
 import { now, pruneSeen } from '../utils.js';
 import { numSetting, boolSetting, setting } from '../db/settings.js';
 import { db } from '../db/connection.js';
-import { upsertCandidate, updateCandidateStatus, updateCandidateSnapshot, recentEligibleCandidates, candidateById } from '../db/candidates.js';
+import { upsertCandidate, updateCandidateStatus, updateCandidateSnapshot, recentEligibleCandidates, candidateById, latestCandidateByMint } from '../db/candidates.js';
 import { storeDecision, storeBatchDecision, logDecisionEvent, checkDecisionCache } from '../db/decisions.js';
-import { buildCandidate } from './candidateBuilder.js';
+import { buildCandidate, filterCandidate } from './candidateBuilder.js';
 import { preScoreCandidate } from './preScorer.js';
 import { momentumFilter } from './momentumFilter.js';
-import { decideCandidateBatch } from './llm.js';
+import { decideDeterministicBatch } from './deterministicDecision.js';
 import { activeStrategy } from '../db/settings.js';
 import { calculatePositionSizeSol, canOpenMorePositions, openPositionCount, tradingMode, tryReservePositionSlot, decrementPendingPosition } from '../db/positions.js';
 import { sendBatchReveal, sendTelegram, sendPositionOpen, sendTradeIntent } from '../telegram/send.js';
@@ -29,7 +29,14 @@ import {
   openResearchPositionCount,
   researchPositionCap,
 } from '../research/engine.js';
-import { hunterPolicy } from './hunterPolicy.js';
+import { mergeCandidateEvidence } from './signalEvidence.js';
+import { isRouteBlocked, parseBlockedRoutes } from './routePolicy.js';
+import {
+  isIndependentLateRoute,
+  markEvidenceEventsProcessed,
+  recordSignalEvidence,
+  refreshLateEvidence,
+} from './evidenceWindow.js';
 
 // Fast-track bypass remains disabled. Research aggression comes from explicit
 // policy and zero-capital sampling, never from skipping contract safety.
@@ -38,13 +45,40 @@ const TRACK_A_ROUTES = new Set([]);
 export const seenSignalCandidates = new Map();
 export const processingCandidates = new Set();
 export const executingMints = new Set();
+const pendingSignalEvidence = new Map();
+
+function mergeRawSignals(target, incoming) {
+  const routes = [...new Set([
+    ...(target.signalRoutes || []), target.route,
+    ...(incoming.signalRoutes || []), incoming.route,
+  ].filter(Boolean))];
+  const evidenceEventIds = [...new Set([
+    ...(target._evidenceEventIds || []), ...(incoming._evidenceEventIds || []),
+  ])];
+  Object.assign(target, Object.fromEntries(
+    Object.entries(incoming).filter(([, value]) => value !== null && value !== undefined),
+  ));
+  target.signalRoutes = routes;
+  target._evidenceEventIds = evidenceEventIds;
+  target.route = routes.length > 1 ? 'dual_source' : routes[0];
+  return target;
+}
+
+export function edgeAdmissionBlockReason(candidate, { researchMode = false } = {}) {
+  const admission = candidate?.edge?.admission;
+  if (researchMode) {
+    if (!boolSetting('edge_admission_paper_enabled', true)) return null;
+    // LEARN is intentionally admitted as a small PAPER probe so the models can
+    // reach calibration sample minimums. An eligible REJECT is deterministic.
+    return admission?.action === 'REJECT' ? `edge_reject:${(admission.reasons || []).join(',')}` : null;
+  }
+  if (!boolSetting('edge_admission_live_enabled', false)) return null;
+  if (admission?.action !== 'GOOD') return `edge_not_good:${admission?.action || 'missing'}`;
+  return null;
+}
 
 setDegenHandler(maybeProcessDegenCandidate);
 setCandidateHandler(processCandidateFromSignals);
-
-function candidateRiskSeverity(candidate) {
-  return (candidate?.riskFlags || []).reduce((sum, flag) => sum + Math.max(0, Number(flag?.severity) || 0), 0);
-}
 
 function researchFilterAdmission(candidate, researchMode) {
   const filters = candidate?.filters || {};
@@ -94,18 +128,59 @@ function executionCapacity() {
   };
 }
 
+function persistScreeningOutcome(candidateId, candidate, reason, {
+  verdict = 'PASS',
+  risks = [],
+  category = 'screening_reject',
+} = {}) {
+  if (!candidateId || !candidate?.token?.mint) return null;
+  const existing = db.prepare('SELECT id FROM llm_decisions WHERE candidate_id = ? ORDER BY id DESC LIMIT 1').get(candidateId);
+  if (existing) return Number(existing.id);
+  const strat = activeStrategy();
+  const decision = {
+    authority: 'deterministic_screening_v1',
+    verdict,
+    confidence: 0,
+    selected_candidate_id: null,
+    selected_mint: null,
+    selected_row: null,
+    reason: String(reason || category),
+    risks: risks.map(String).slice(0, 8),
+    rejection_category: category,
+    suggested_tp_percent: strat.tp_percent ?? numSetting('default_tp_percent', 50),
+    suggested_sl_percent: strat.sl_percent ?? numSetting('default_sl_percent', -25),
+    recommended_size_fraction: 0,
+    raw: null,
+  };
+  const id = storeDecision(candidateId, candidate, decision);
+  updateCandidateStatus(candidateId, verdict.toLowerCase());
+  return id;
+}
+
 function activeCapacity(researchMode) {
   return researchMode ? researchCapacity() : executionCapacity();
 }
 
 export async function processCandidateFromSignals(signals) {
   recordSignalProcessed();
+  const evidenceEvent = recordSignalEvidence(signals);
+  if (evidenceEvent?.id) {
+    signals._evidenceEventIds = [...new Set([...(signals._evidenceEventIds || []), evidenceEvent.id])];
+  }
   pruneSeen(seenSignalCandidates, 10 * 60 * 1000);
-  if (processingCandidates.has(signals.mint)) return;
+  if (processingCandidates.has(signals.mint)) {
+    const pending = pendingSignalEvidence.get(signals.mint);
+    if (pending) mergeRawSignals(pending, signals);
+    return;
+  }
   processingCandidates.add(signals.mint);
+  const aggregate = mergeRawSignals({ mint: signals.mint }, signals);
+  pendingSignalEvidence.set(signals.mint, aggregate);
   try {
-    return await _processCandidateFromSignals(signals);
+    await new Promise(resolve => setTimeout(resolve, Math.max(0, numSetting('signal_fanin_window_ms', 1500))));
+    return await _processCandidateFromSignals(aggregate);
   } finally {
+    pendingSignalEvidence.delete(signals.mint);
     processingCandidates.delete(signals.mint);
   }
 }
@@ -117,35 +192,34 @@ async function _processCandidateFromSignals(signals) {
   // merely because the settlement currency is virtual.
   const paperLiveParity = researchMode && boolSetting('paper_live_parity_enabled', true);
   const strictPolicyMode = !researchMode || paperLiveParity;
-  const capacity = activeCapacity(researchMode);
-  if (!capacity.allowed) {
-    console.log(`[agent] ${researchMode ? 'research' : 'execution'} max positions reached (${capacity.open}/${capacity.max}), skipping ${signals.mint.slice(0, 8)}...`);
-    return;
-  }
-
   const strat = activeStrategy();
-  const blockedRoutes = (() => {
-    try { return JSON.parse(setting('blocked_routes', '[]')); } catch { return []; }
-  })();
-  const adaptivelyBlockedRoute = blockedRoutes.some(route => String(signals.route || '').includes(route));
-  if (adaptivelyBlockedRoute && strictPolicyMode) {
+  const blockedRoutes = parseBlockedRoutes(setting('blocked_routes', '[]'));
+  const adaptivelyBlockedRoute = isRouteBlocked(String(signals.route || ''), blockedRoutes);
+  if (adaptivelyBlockedRoute && !researchMode) {
     console.log(`[agent] blocked route ${signals.route} for ${signals.mint.slice(0, 8)}...`);
     return;
   }
-  if (adaptivelyBlockedRoute && researchMode && !paperLiveParity) {
-    console.log(`[research] observing adaptively-blocked route ${signals.route}; no capital is at risk`);
+  if (adaptivelyBlockedRoute && researchMode) {
+    console.log(`[research] observing adaptively-blocked route ${signals.route} for false-negative measurement; no capital is at risk`);
   }
 
   // Same-mint concurrent positions are forbidden for unambiguous accounting.
   // Research otherwise uses a short experiment cooldown rather than live bans.
   try {
     const openPos = db.prepare(
-      `SELECT id FROM dry_run_positions
+      `SELECT * FROM dry_run_positions
        WHERE mint = ? AND status IN ('open', 'entry_unknown', 'exit_unknown', 'partial_exit_unknown')
        LIMIT 1`
     ).get(signals.mint);
     if (openPos) {
-      console.log(`[agent] skipping ${signals.mint.slice(0, 8)}... — already has active position`);
+      try {
+        const late = await refreshLateEvidence(signals, { eventId: signals._evidenceEventIds?.at(-1) || null });
+        console.log(late.updated
+          ? `[evidence] refreshed active thesis for ${signals.mint.slice(0, 8)}... from late route ${signals.route}`
+          : `[agent] active position ${signals.mint.slice(0, 8)}... received no independent late evidence`);
+      } catch (error) {
+        console.warn(`[evidence] active thesis refresh degraded for ${signals.mint.slice(0, 8)}...: ${error.message}`);
+      }
       return;
     }
 
@@ -173,48 +247,49 @@ async function _processCandidateFromSignals(signals) {
         return;
       }
 
-      if (strat.use_llm) {
-        const recentDecision = db.prepare(`
-          SELECT id FROM llm_decisions
-          WHERE mint = ? AND created_at_ms > ?
-          LIMIT 1
-        `).get(signals.mint, recentMs);
-        if (recentDecision) {
-          console.log(`[agent] skipping ${signals.mint.slice(0, 8)}... — LLM decision exists (<2h)`);
-          return;
-        }
+      const recentDecision = db.prepare(`
+        SELECT id FROM llm_decisions
+        WHERE mint = ? AND created_at_ms > ?
+        LIMIT 1
+      `).get(signals.mint, recentMs);
+      const recentCandidate = latestCandidateByMint(signals.mint);
+      const independentLateRoute = recentCandidate
+        ? isIndependentLateRoute(signals, recentCandidate.candidate)
+        : false;
+      if (recentDecision && !independentLateRoute) {
+        console.log(`[agent] skipping ${signals.mint.slice(0, 8)}... — deterministic decision exists (<2h)`);
+        return;
+      }
+      if (recentDecision && independentLateRoute) {
+        console.log(`[evidence] reopening ${signals.mint.slice(0, 8)}... for independent late route ${signals.route}`);
       }
     }
   } catch (err) {
     console.warn(`[agent] duplicate precheck degraded: ${err.message}`);
   }
 
-  // Prevent route fan-in races.
-  try {
-    const recentCandidate = db.prepare(`
-      SELECT id FROM candidates
-      WHERE mint = ? AND created_at_ms > ?
-      LIMIT 1
-    `).get(signals.mint, Date.now() - 600000);
-    if (recentCandidate) {
-      console.log(`[agent] skipping ${signals.mint.slice(0, 8)}... — recent candidate (<10min) for any route`);
-      return;
-    }
-  } catch (err) {
-    console.warn(`[agent] candidate dedup degraded: ${err.message}`);
-  }
-
   // Decision cache is an execution optimization, not a research truth source.
   if (strictPolicyMode) {
     const cachedDecision = checkDecisionCache(signals.mint, signals.mcap || null, signals.holders || null);
-    if (cachedDecision) {
+    const priorCandidate = latestCandidateByMint(signals.mint);
+    const independentLateRoute = priorCandidate ? isIndependentLateRoute(signals, priorCandidate.candidate) : false;
+    if (cachedDecision && !independentLateRoute) {
       const ageMin = ((now() - cachedDecision.cachedAt) / 60000).toFixed(1);
       console.log(`[cache-hit] ${signals.mint.slice(0, 8)}... — verdict ${cachedDecision.verdict} (cached ${ageMin}m ago, reason: ${cachedDecision.reason?.slice(0, 60) || 'n/a'})`);
       return;
     }
   }
 
-  const candidate = await buildCandidate(signals);
+  const previousRow = latestCandidateByMint(signals.mint);
+  const recentPrevious = previousRow && Number(previousRow.created_at_ms) >= Date.now() - 10 * 60_000
+    ? previousRow
+    : null;
+  let candidate = await buildCandidate(signals);
+  if (recentPrevious) {
+    candidate = mergeCandidateEvidence(recentPrevious.candidate, candidate);
+    candidate.filters = filterCandidate(candidate);
+    console.log(`[candidate] merged ${candidate.signals.sourceCount} independent routes for ${signals.mint.slice(0, 8)}...`);
+  }
   const moneyMode = requiresMoneyGradeEvidence() || strictPolicyMode;
   await applyContractSafetyGate(candidate, {
     moneyMode,
@@ -223,6 +298,7 @@ async function _processCandidateFromSignals(signals) {
   });
   const signature = signals.signature || null;
   const candidateId = upsertCandidate(candidate, signature);
+  markEvidenceEventsProcessed(signals._evidenceEventIds || [], candidateId);
 
   // Copycat history protects capital but should not censor zero-capital research.
   if (strictPolicyMode) {
@@ -234,6 +310,9 @@ async function _processCandidateFromSignals(signals) {
         ).get(symbol, Date.now() - 86400000);
         if (symbolPos) {
           console.log(`[agent] skipping ${symbol} (${candidate.token.mint.slice(0, 8)}) — same symbol traded <24h ago`);
+          persistScreeningOutcome(candidateId, candidate, 'same symbol traded within 24h', {
+            category: 'copycat_cooldown', risks: ['same_symbol_recent_trade'],
+          });
           return;
         }
       }
@@ -243,7 +322,13 @@ async function _processCandidateFromSignals(signals) {
   }
 
   const filterAdmission = researchFilterAdmission(candidate, researchMode && !paperLiveParity);
-  if (!filterAdmission.allowed) return;
+  if (!filterAdmission.allowed) {
+    persistScreeningOutcome(candidateId, candidate, (candidate.filters?.failures || ['filter rejected']).join('; '), {
+      category: candidate.contractSafety?.passed === false ? 'contract_safety' : 'hard_filter',
+      risks: candidate.filters?.failures || [],
+    });
+    return;
+  }
   if (researchMode && !paperLiveParity && filterAdmission.softFailures.length > 0) {
     console.log(`[research] soft-filter override ${candidate.token.mint.slice(0, 8)}... ${filterAdmission.softFailures.slice(0, 3).join('; ')}`);
   }
@@ -260,6 +345,9 @@ async function _processCandidateFromSignals(signals) {
       candidate.filters.passed = false;
       candidate.filters.failures.push(`prescore catastrophic veto: ${preScore.score} <= ${preScoreVetoFloor}`);
       updateCandidateSnapshot(candidateId, candidate, 'filtered');
+      persistScreeningOutcome(candidateId, candidate, `prescore catastrophic veto: ${preScore.score} <= ${preScoreVetoFloor}`, {
+        category: 'prescore_veto', risks: candidate.filters.failures,
+      });
       return;
     }
     if (researchMode && !paperLiveParity && preScore.score <= preScoreVetoFloor) {
@@ -286,6 +374,10 @@ async function _processCandidateFromSignals(signals) {
       candidate.filters.momentumScore = momentumResult.score;
       console.log(`[momentum] safety-veto ${candidate.token.mint.slice(0, 8)}... score ${momentumResult.score}`);
       updateCandidateSnapshot(candidateId, candidate, 'filtered');
+      persistScreeningOutcome(candidateId, candidate, candidate.filters.failures.at(-1), {
+        category: liveMlUnavailable ? 'momentum_unavailable' : 'momentum_veto',
+        risks: candidate.filters.failures,
+      });
       return;
     }
     candidate.filters.momentumScore = momentumResult.score;
@@ -298,63 +390,11 @@ async function _processCandidateFromSignals(signals) {
   let batchDecision;
   let batchId;
 
-  if (!strat.use_llm || isTrackA) {
-    const selfRow = candidateById(candidateId);
-    rows = selfRow ? [selfRow] : [];
-    batchId = null;
-    batchDecision = {
-      verdict: 'BUY',
-      confidence: 100,
-      selected_candidate_id: candidateId,
-      selected_mint: candidate.token.mint,
-      selected_row: selfRow,
-      reason: isTrackA
-        ? `Track A Direct: ${signals.route} — deterministic filters passed.`
-        : `Strategy '${strat.id}' is rule-based; deterministic filters passed.`,
-      risks: [],
-      suggested_tp_percent: strat.tp_percent ?? numSetting('default_tp_percent', 50),
-      suggested_sl_percent: isTrackA ? -15 : (strat.sl_percent ?? numSetting('default_sl_percent', -25)),
-      raw: null,
-    };
-  } else {
-    rows = recentEligibleCandidates(numSetting('llm_candidate_pick_count', 10));
-    batchDecision = await decideCandidateBatch(rows, candidateId);
-    batchId = storeBatchDecision(candidateId, rows, batchDecision);
-  }
-
-  // In Research, LLM is advisory. A deterministic Hunter policy may sample an
-  // otherwise contract-safe candidate when the LLM says WATCH/PASS.
-  if (researchMode && !paperLiveParity && (!batchDecision?.selected_row || batchDecision.verdict !== 'BUY')) {
-    const selfRow = candidateById(candidateId);
-    const prescore = Number(candidate.filters?.preScore);
-    const momentum = Number(candidate.filters?.momentumScore);
-    const derivedConfidence = Math.max(
-      numSetting('research_min_confidence', 30),
-      Math.min(100, Number.isFinite(prescore) ? prescore : 50),
-    );
-    const policy = hunterPolicy({
-      confidence: derivedConfidence,
-      preScore: prescore,
-      momentum,
-      totalSoftRiskSeverity: candidateRiskSeverity(candidate),
-      catastrophic: false,
-    });
-    if (policy.action === 'TRADE' && selfRow) {
-      batchDecision = {
-        ...batchDecision,
-        verdict: 'BUY',
-        confidence: Math.max(30, Math.min(100, policy.score)),
-        selected_candidate_id: candidateId,
-        selected_mint: candidate.token.mint,
-        selected_row: selfRow,
-        reason: `Research Hunter ${policy.tier}: LLM advisory did not veto zero-capital sampling. ${batchDecision?.reason || ''}`.trim(),
-        risks: batchDecision?.risks || [],
-        suggested_tp_percent: Number(batchDecision?.suggested_tp_percent ?? strat.tp_percent ?? numSetting('default_tp_percent', 50)),
-        suggested_sl_percent: Number(batchDecision?.suggested_sl_percent ?? strat.sl_percent ?? numSetting('default_sl_percent', -25)),
-        research_hunter_policy: policy,
-      };
-    }
-  }
+  rows = recentEligibleCandidates(numSetting('llm_candidate_pick_count', 10));
+  const selfRow = candidateById(candidateId);
+  if (selfRow && !rows.some(row => Number(row.id) === Number(candidateId))) rows.push(selfRow);
+  batchDecision = decideDeterministicBatch(rows, candidateId, { researchMode });
+  batchId = storeBatchDecision(candidateId, rows, batchDecision);
 
   const selectedRow = batchDecision.selected_row;
   const selectedThisCandidate = selectedRow?.id === candidateId;
@@ -385,7 +425,10 @@ async function _processCandidateFromSignals(signals) {
   const isUsSessionExecute = currentUTCHourExecute >= 12 && currentUTCHourExecute <= 18;
   const configuredConfidence = numSetting('llm_min_confidence', 40);
   const sessionConfidenceFloor = 60;
-  const requiredConfidence = strictPolicyMode
+  const calibrationProbe = researchMode && batchDecision?.edge_action === 'LEARN';
+  const requiredConfidence = calibrationProbe
+    ? Math.max(0, numSetting('research_min_confidence', 30))
+    : strictPolicyMode
     ? (isUsSessionExecute ? Math.max(configuredConfidence, sessionConfidenceFloor) : configuredConfidence)
     : Math.max(0, numSetting('research_min_confidence', 30));
 
@@ -466,6 +509,16 @@ export async function handleApprovedBuy(selectedRow, decision, batchId, rows = [
       if (!freshSelectedRow.candidate.filters?.passed) {
         throw new Error(`PAPER fresh execution guard failed: ${(freshSelectedRow.candidate.filters?.failures || []).join('; ')}`);
       }
+      const edgeBlocked = edgeAdmissionBlockReason(freshSelectedRow.candidate, { researchMode: true });
+      if (edgeBlocked) {
+        logDecisionEvent({
+          batchId, triggerCandidateId, selectedRow: freshSelectedRow, rows, decision,
+          mode: 'research', action: 'research_entry_rejected_edge',
+          guardrails: { edgeAdmission: freshSelectedRow.candidate?.edge?.admission, reason: edgeBlocked },
+          execution: { rejectedBeforeEntry: true },
+        });
+        return { id: null, isNew: false, blockedBy: edgeBlocked };
+      }
       assertSafeLiveDecision(decision, activeStrategy());
       await assertContractSafetyForMoneyMode(freshSelectedRow.candidate, { stage: 'pre_execution' });
       const result = await executeResearchEntry(freshSelectedRow, decision, `paper_parity_batch_${batchId ?? 'rule'}`);
@@ -539,6 +592,18 @@ export async function handleApprovedBuy(selectedRow, decision, batchId, rows = [
         mode,
         action: 'entry_rejected_stale',
         guardrails: { failures },
+        execution: { rejectedBeforeEntry: true },
+      });
+      return;
+    }
+
+    const edgeBlocked = edgeAdmissionBlockReason(freshSelectedRow.candidate, { researchMode: false });
+    if (edgeBlocked) {
+      console.warn(`[edge-admission] ${mint} entry cancelled: ${edgeBlocked}`);
+      logDecisionEvent({
+        batchId, triggerCandidateId, selectedRow: freshSelectedRow, rows: executionRows, decision,
+        mode: tradingMode(), action: 'entry_rejected_edge',
+        guardrails: { edgeAdmission: freshSelectedRow.candidate?.edge?.admission, reason: edgeBlocked },
         execution: { rejectedBeforeEntry: true },
       });
       return;
