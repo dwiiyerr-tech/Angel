@@ -3,6 +3,7 @@ import { setting } from '../db/settings.js';
 import { assessCandidateEdge } from '../edge/edgeAssessment.js';
 import { calculateNeedleScore } from '../edge/needleScore.js';
 import { decorateCandidateControlPlane } from '../controlPlane/challenger.js';
+import { attachPipelineContract } from './workflow.js';
 
 const ML_SERVICE_PORT = process.env.ML_SERVICE_PORT || 8001;
 const ML_SERVICE_URL = `http://127.0.0.1:${ML_SERVICE_PORT}/predict`;
@@ -58,6 +59,12 @@ function attachEdgeEvidence(candidate, momentumScore) {
   }
 
   try {
+    attachPipelineContract(candidate, '9D Needle Score');
+  } catch (error) {
+    candidate.pipeline = { error: error.message, reachedStage: '9D Needle Score' };
+  }
+
+  try {
     decorateCandidateControlPlane(candidate);
   } catch (error) {
     candidate.controlPlane = { error: error.message, activeVersion: null, challengerVersion: null };
@@ -70,7 +77,8 @@ function attachEdgeEvidence(candidate, momentumScore) {
  * Research remains fail-open, but unavailable ML is represented as score=-1
  * instead of fake bullish momentum. Money-grade modes remain fail-closed upstream.
  * Runner/Route edge evidence plus the composite Needle Score are attached after
- * every outcome when possible.
+ * every outcome when possible. The canonical end-to-end pipeline contract is
+ * also persisted on the candidate for entry-snapshot provenance.
  */
 export async function momentumFilter(candidate, threshold = DEFAULT_THRESHOLD) {
   const startTime = Date.now();

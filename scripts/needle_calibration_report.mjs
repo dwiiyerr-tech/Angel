@@ -4,6 +4,11 @@ import { ensureResearchSchema } from '../src/research/schema.js';
 import { needleCalibrationSnapshot } from '../src/edge/needleCalibration.js';
 import { createNeedleCalibrationProposal } from '../src/edge/needleCalibrationProposal.js';
 import { BASE_NEEDLE_WEIGHTS, parseNeedleWeights } from '../src/edge/needleWeights.js';
+import {
+  SOLANA_TRENCHING_WORKFLOW,
+  SOLANA_TRENCHING_WORKFLOW_STAGES,
+  SOLANA_TRENCHING_WORKFLOW_VERSION,
+} from '../src/pipeline/workflow.js';
 
 initDb();
 ensureResearchSchema();
@@ -37,6 +42,11 @@ const diagnostics = Object.fromEntries(Object.entries(calibration.diagnostics ||
 console.log(JSON.stringify({
   generatedAt: new Date().toISOString(),
   model: calibration.version,
+  pipeline: {
+    version: SOLANA_TRENCHING_WORKFLOW_VERSION,
+    workflow: SOLANA_TRENCHING_WORKFLOW,
+    stages: SOLANA_TRENCHING_WORKFLOW_STAGES,
+  },
   invariants: {
     safetyWeightFixed: 20,
     contractSafetyBinaryAuthority: true,
