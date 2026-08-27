@@ -2,6 +2,14 @@
 
 Needle v2 turns the v1 composite score into a learning ranking system without allowing PAPER outcomes to silently rewrite LIVE behavior.
 
+## Canonical Solana microcap workflow
+
+`Signals → Enrichment → Contract Safety → PreScore/CoS → Momentum ML → Runner Probability → Route P(win)/Expected R → 9D Needle Score → Candidate Ranking → LLM Best-Candidate Selection → Market Allocator → Fresh Execution Recheck → PAPER/LIVE`
+
+This sequence is the canonical Angel trenching pipeline. Contract Safety remains the non-compensable authority. Needle ranks survivors; it does not bypass LLM selection, allocation, fresh execution checks, or LIVE approval.
+
+Candidates carry the workflow version and current reached stage in their entry-time snapshot. This gives PAPER calibration a stable provenance contract instead of learning from an ambiguous historical pipeline.
+
 ## Safety invariants
 
 - Contract Safety remains binary authority. A failed contract-safety assessment still forces `0 / HARD_REJECT` regardless of Needle weights.
@@ -59,7 +67,7 @@ Run:
 npm run needle:report
 ```
 
-The JSON report includes active weights, training/validation sample sizes, per-dimension 3R/5R/10R lift and reliability, target weights, shrunk challenger weights, active-vs-challenger runner ranking metrics, and readiness flags.
+The JSON report includes the canonical pipeline contract, active weights, training/validation sample sizes, per-dimension 3R/5R/10R lift and reliability, target weights, shrunk challenger weights, active-vs-challenger runner ranking metrics, and readiness flags.
 
 To request creation of a Strategy Control Plane proposal only when the historical OOS gate is already satisfied:
 
