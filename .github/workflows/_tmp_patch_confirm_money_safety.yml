@@ -1,0 +1,174 @@
+name: Temporary Confirm Money Safety Patch
+
+on:
+  push:
+    branches:
+      - fix/confirm-alias-money-safety
+
+permissions:
+  contents: write
+
+jobs:
+  patch:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - name: Apply guarded confirm-as-LIVE patches
+        shell: bash
+        run: |
+          python3 - <<'PY'
+          from pathlib import Path
+
+          def replace_exact(path, old, new, expected=1):
+              p = Path(path)
+              text = p.read_text()
+              count = text.count(old)
+              if count != expected:
+                  raise SystemExit(f'{path}: expected {expected} occurrence(s), found {count}: {old!r}')
+              p.write_text(text.replace(old, new))
+
+          # Atomic reservation: persisted real-money positions/history must include
+          # legacy confirm. Reservations created by current code stay normalized to live.
+          replace_exact(
+              'src/db/executionOperations.js',
+              "WHERE execution_mode = 'live' AND status IN ${ACTIVE_POSITION_STATUSES}",
+              "WHERE lower(trim(coalesce(execution_mode, 'dry_run'))) IN ('live', 'confirm') AND status IN ${ACTIVE_POSITION_STATUSES}",
+          )
+          replace_exact(
+              'src/db/executionOperations.js',
+              "WHERE eo.side = 'buy' AND COALESCE(eo.execution_mode, 'live') = 'live'",
+              "WHERE eo.side = 'buy' AND lower(trim(COALESCE(eo.execution_mode, 'live'))) IN ('live', 'confirm')",
+          )
+          replace_exact(
+              'src/db/executionOperations.js',
+              "WHERE execution_mode = 'live' AND status = 'closed' AND closed_at_ms >= ?",
+              "WHERE lower(trim(coalesce(execution_mode, 'dry_run'))) IN ('live', 'confirm') AND status = 'closed' AND closed_at_ms >= ?",
+          )
+
+          # Loss-streak controls: confirm shares persisted LIVE loss history.
+          replace_exact(
+              'src/execution/riskControls.js',
+              "if (normalizedMode === 'live') return \"AND COALESCE(execution_mode, 'dry_run') = 'live'\";",
+              "if (normalizedMode === 'live') return \"AND lower(trim(COALESCE(execution_mode, 'dry_run'))) IN ('live', 'confirm')\";",
+          )
+
+          # Pre-entry hard budget: canonicalize only persisted LIVE position/PnL
+          # accounting. Shadow-live remains isolated.
+          router = Path('src/execution/router.js')
+          text = router.read_text()
+          old_router = '''export function assertLiveRiskBudget(nextSizeSol, executionMode = 'live') {
+  const mode = normalizedRiskBudgetMode(executionMode);
+  const label = mode === 'shadow_live' ? 'shadow-live' : 'live';
+  const active = db.prepare(`
+    SELECT count(*) AS count, coalesce(sum(size_sol), 0) AS exposure
+    FROM dry_run_positions
+    WHERE execution_mode = ? AND status IN ('open', 'entry_unknown', 'exit_unknown', 'partial_exit_unknown')
+  `).get(mode);
+  if (Number(active.count) >= LIVE_MAX_OPEN_POSITIONS) throw new Error(`Hard ${label} position cap reached (${active.count}/${LIVE_MAX_OPEN_POSITIONS}).`);
+  if (Number(active.exposure) + Number(nextSizeSol) > LIVE_MAX_TOTAL_EXPOSURE_SOL) throw new Error(`Hard ${label} exposure cap exceeded (${LIVE_MAX_TOTAL_EXPOSURE_SOL} SOL).`);
+
+  const since = Date.now() - 24 * 60 * 60 * 1000;
+  const entries = mode === 'live'
+    ? db.prepare(`SELECT count(*) AS count FROM execution_operations WHERE side = 'buy' AND status IN ('completed', 'outcome_unknown') AND created_at_ms >= ?`).get(since).count
+    : db.prepare(`SELECT count(*) AS count FROM dry_run_positions WHERE execution_mode = 'shadow_live' AND opened_at_ms >= ?`).get(since).count;
+  if (Number(entries) >= LIVE_MAX_DAILY_ENTRIES) throw new Error(`Hard daily ${label} entry cap reached (${entries}/${LIVE_MAX_DAILY_ENTRIES}).`);
+
+  const pnl = Number(db.prepare(`
+    SELECT coalesce(sum(pnl_sol), 0) AS pnl
+    FROM dry_run_positions
+    WHERE execution_mode = ? AND status = 'closed' AND closed_at_ms >= ?
+  `).get(mode, since).pnl);
+  if (pnl <= -LIVE_MAX_DAILY_LOSS_SOL) throw new Error(`Hard daily ${label} loss limit reached (${pnl.toFixed(4)} SOL).`);
+  return { executionMode: mode, activePositions: Number(active.count), exposureSol: Number(active.exposure), dailyEntries: Number(entries), dailyPnlSol: pnl };
+}
+'''
+          new_router = '''export function assertLiveRiskBudget(nextSizeSol, executionMode = 'live') {
+  const mode = normalizedRiskBudgetMode(executionMode);
+  const label = mode === 'shadow_live' ? 'shadow-live' : 'live';
+  const active = mode === 'live'
+    ? db.prepare(`
+      SELECT count(*) AS count, coalesce(sum(size_sol), 0) AS exposure
+      FROM dry_run_positions
+      WHERE lower(trim(coalesce(execution_mode, 'dry_run'))) IN ('live', 'confirm')
+        AND status IN ('open', 'entry_unknown', 'exit_unknown', 'partial_exit_unknown')
+    `).get()
+    : db.prepare(`
+      SELECT count(*) AS count, coalesce(sum(size_sol), 0) AS exposure
+      FROM dry_run_positions
+      WHERE execution_mode = 'shadow_live'
+        AND status IN ('open', 'entry_unknown', 'exit_unknown', 'partial_exit_unknown')
+    `).get();
+  if (Number(active.count) >= LIVE_MAX_OPEN_POSITIONS) throw new Error(`Hard ${label} position cap reached (${active.count}/${LIVE_MAX_OPEN_POSITIONS}).`);
+  if (Number(active.exposure) + Number(nextSizeSol) > LIVE_MAX_TOTAL_EXPOSURE_SOL) throw new Error(`Hard ${label} exposure cap exceeded (${LIVE_MAX_TOTAL_EXPOSURE_SOL} SOL).`);
+
+  const since = Date.now() - 24 * 60 * 60 * 1000;
+  const entries = mode === 'live'
+    ? db.prepare(`SELECT count(*) AS count FROM execution_operations WHERE side = 'buy' AND status IN ('completed', 'outcome_unknown') AND created_at_ms >= ?`).get(since).count
+    : db.prepare(`SELECT count(*) AS count FROM dry_run_positions WHERE execution_mode = 'shadow_live' AND opened_at_ms >= ?`).get(since).count;
+  if (Number(entries) >= LIVE_MAX_DAILY_ENTRIES) throw new Error(`Hard daily ${label} entry cap reached (${entries}/${LIVE_MAX_DAILY_ENTRIES}).`);
+
+  const pnl = mode === 'live'
+    ? Number(db.prepare(`
+      SELECT coalesce(sum(pnl_sol), 0) AS pnl
+      FROM dry_run_positions
+      WHERE lower(trim(coalesce(execution_mode, 'dry_run'))) IN ('live', 'confirm')
+        AND status = 'closed' AND closed_at_ms >= ?
+    `).get(since).pnl)
+    : Number(db.prepare(`
+      SELECT coalesce(sum(pnl_sol), 0) AS pnl
+      FROM dry_run_positions
+      WHERE execution_mode = 'shadow_live' AND status = 'closed' AND closed_at_ms >= ?
+    `).get(since).pnl);
+  if (pnl <= -LIVE_MAX_DAILY_LOSS_SOL) throw new Error(`Hard daily ${label} loss limit reached (${pnl.toFixed(4)} SOL).`);
+  return { executionMode: mode, activePositions: Number(active.count), exposureSol: Number(active.exposure), dailyEntries: Number(entries), dailyPnlSol: pnl };
+}
+'''
+          count = text.count(old_router)
+          if count != 1:
+              raise SystemExit(f'src/execution/router.js: expected exact assertLiveRiskBudget block once, found {count}')
+          router.write_text(text.replace(old_router, new_router))
+
+          # Readiness: real-money legacy aliases must remain visible as blockers.
+          replace_exact(
+              'src/readiness/engine.js',
+              "WHERE execution_mode = 'live' AND status IN ('entry_unknown', 'exit_unknown', 'partial_exit_unknown')",
+              "WHERE lower(trim(coalesce(execution_mode, 'dry_run'))) IN ('live', 'confirm') AND status IN ('entry_unknown', 'exit_unknown', 'partial_exit_unknown')",
+          )
+          replace_exact(
+              'src/readiness/engine.js',
+              "WHERE execution_mode = 'live' AND status = 'open'",
+              "WHERE lower(trim(coalesce(execution_mode, 'dry_run'))) IN ('live', 'confirm') AND status = 'open'",
+          )
+          replace_exact(
+              'src/readiness/engine.js',
+              "WHERE o.side = 'buy' AND COALESCE(o.execution_mode, 'live') = 'live'",
+              "WHERE o.side = 'buy' AND lower(trim(COALESCE(o.execution_mode, 'live'))) IN ('live', 'confirm')",
+          )
+          replace_exact(
+              'src/readiness/engine.js',
+              "WHERE execution_mode = 'live' AND status IN ('open', 'entry_unknown', 'exit_unknown', 'partial_exit_unknown')",
+              "WHERE lower(trim(coalesce(execution_mode, 'dry_run'))) IN ('live', 'confirm') AND status IN ('open', 'entry_unknown', 'exit_unknown', 'partial_exit_unknown')",
+          )
+
+          # Orphan recovery must find a historical confirm position rather than
+          # leaving a finalized sell permanently UNKNOWN.
+          replace_exact(
+              'src/execution/reconciler.js',
+              "WHERE mint = ? AND execution_mode = 'live'",
+              "WHERE mint = ? AND lower(trim(coalesce(execution_mode, 'dry_run'))) IN ('live', 'confirm')",
+          )
+          PY
+      - name: Commit guarded source patch
+        shell: bash
+        run: |
+          if git diff --quiet -- src/db/executionOperations.js src/execution/riskControls.js src/execution/router.js src/readiness/engine.js src/execution/reconciler.js; then
+            echo "No source changes to commit"
+            exit 0
+          fi
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add src/db/executionOperations.js src/execution/riskControls.js src/execution/router.js src/readiness/engine.js src/execution/reconciler.js
+          git commit -m "fix: count confirm in money-grade LIVE safety"
+          git push origin HEAD:fix/confirm-alias-money-safety
