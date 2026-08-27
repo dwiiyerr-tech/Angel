@@ -23,10 +23,14 @@ export function candidateSummary(candidate, decision = null) {
   const chartWindow = candidate.chart?.windows?.find(row => row.label === 'ath_context_24h_5m' && row.available)
     || candidate.chart?.windows?.find(row => row.label === 'recent_24h_5m' && row.available);
   const route = candidate.signals?.label || signalLabel(candidate.signals);
+  const needleScore = Number(candidate.needle?.score);
   const lines = [
     `🛶 <b>Angel Candidate</b>`,
     '',
     `Signal: <b>${escapeHtml(route)}</b>`,
+    Number.isFinite(needleScore)
+      ? `🪡 Needle: <b>${needleScore.toFixed(1)}/100 · ${escapeHtml(candidate.needle?.classification || 'UNRANKED')}</b> · Evidence ${Number(candidate.needle?.evidenceCoveragePercent || 0).toFixed(0)}%`
+      : null,
     candidate.token?.name || candidate.token?.symbol ? `Name: <b>${escapeHtml(candidate.token?.name || candidate.token?.symbol)}${candidate.token?.symbol && candidate.token?.name ? ` (${escapeHtml(candidate.token.symbol)})` : ''}</b>` : null,
     `Token: <a href="${gmgnLink(candidate.token?.mint)}">${short(candidate.token?.mint)}</a>`,
     `<code>${escapeHtml(candidate.token?.mint)}</code>`,
@@ -76,10 +80,12 @@ export function compactCandidateLine(row, index = null) {
   const prefix = index == null ? '' : `${index}. `;
   const name = candidate.token?.symbol || candidate.token?.name || short(candidate.token?.mint || '');
   const signal = candidate.signals?.label || signalLabel(candidate.signals);
+  const needleScore = Number(candidate.needle?.score);
   return [
     `${prefix}<b>${escapeHtml(name)}</b>`,
     `<a href="${gmgnLink(candidate.token.mint)}">${short(candidate.token.mint)}</a>`,
     escapeHtml(signal),
+    Number.isFinite(needleScore) ? `🪡 ${needleScore.toFixed(1)} ${escapeHtml(candidate.needle?.classification || '')}` : null,
     `mcap ${fmtUsd(candidate.metrics?.marketCapUsd)}`,
     `liq ${fmtUsd(candidate.metrics?.liquidityUsd)}`,
     candidate.feeClaim ? `fee ${fmtSol(candidate.feeClaim.distributedSol)} SOL` : null,
@@ -157,6 +163,7 @@ export function compactDecisionCandidate(row) {
     metrics: c.metrics,
     feeClaim: c.feeClaim,
     trending: c.trending,
+    needle: c.needle,
     jupiterAsset: c.jupiterAsset ? {
       liquidity: c.jupiterAsset.liquidity,
       mcap: c.jupiterAsset.mcap,
