@@ -123,8 +123,8 @@ export function recentEligibleCandidates(limit = 10) {
   } catch (e) {
     BLOCKED_ROUTES = [];
   }
-  const blockedClause = BLOCKED_ROUTES.length > 0 
-    ? BLOCKED_ROUTES.map(() => `signal_key NOT LIKE ? || ':%'`).join(' AND ') 
+  const blockedClause = BLOCKED_ROUTES.length > 0
+    ? BLOCKED_ROUTES.map(() => `signal_key NOT LIKE ? || ':%'`).join(' AND ')
     : '1=1';
   const rows = db.prepare(`
     SELECT c.*
@@ -142,8 +142,10 @@ export function recentEligibleCandidates(limit = 10) {
         )
       GROUP BY mint
     ) latest ON c.id = latest.max_id
-    ORDER BY c.id DESC
+    ORDER BY
+      COALESCE(CAST(json_extract(c.candidate_json, '$.needle.score') AS REAL), -1) DESC,
+      c.id DESC
     LIMIT ?
   `).all(cutoff, ...BLOCKED_ROUTES, limit);
-  return rows.map(row => ({ ...row, candidate: safeJson(row.candidate_json, {}) })).reverse();
+  return rows.map(row => ({ ...row, candidate: safeJson(row.candidate_json, {}) }));
 }

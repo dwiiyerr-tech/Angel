@@ -1,6 +1,7 @@
 import axios from 'axios';
 import { setting } from '../db/settings.js';
 import { assessCandidateEdge } from '../edge/edgeAssessment.js';
+import { calculateNeedleScore } from '../edge/needleScore.js';
 import { decorateCandidateControlPlane } from '../controlPlane/challenger.js';
 
 const ML_SERVICE_PORT = process.env.ML_SERVICE_PORT || 8001;
@@ -33,6 +34,27 @@ function attachEdgeEvidence(candidate, momentumScore) {
       combined: { decisionEligible: false, evidenceQuality: 'LOW' },
     };
   }
+
+  try {
+    const needle = calculateNeedleScore(candidate);
+    candidate.needle = needle;
+    candidate.filters.needleScore = needle.score;
+    candidate.filters.needleClassification = needle.classification;
+    candidate.filters.needleEvidenceCoverage = needle.evidenceCoveragePercent;
+    candidate.filters.needleDimensions = Object.fromEntries(
+      Object.entries(needle.dimensions || {}).map(([key, value]) => [key, value.score]),
+    );
+  } catch (error) {
+    candidate.needle = {
+      version: 'needle-score-v1',
+      score: null,
+      classification: 'UNAVAILABLE',
+      hardReject: false,
+      evidenceCoveragePercent: 0,
+      error: error.message,
+    };
+  }
+
   try {
     decorateCandidateControlPlane(candidate);
   } catch (error) {
@@ -45,7 +67,8 @@ function attachEdgeEvidence(candidate, momentumScore) {
  * Score a candidate using the ML service.
  * Research remains fail-open, but unavailable ML is represented as score=-1
  * instead of fake bullish momentum. Money-grade modes remain fail-closed upstream.
- * Runner/Route edge evidence is attached after every outcome when possible.
+ * Runner/Route edge evidence plus the composite Needle Score are attached after
+ * every outcome when possible.
  */
 export async function momentumFilter(candidate, threshold = DEFAULT_THRESHOLD) {
   const startTime = Date.now();
