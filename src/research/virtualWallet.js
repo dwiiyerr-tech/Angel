@@ -1,5 +1,6 @@
 import { db } from '../db/connection.js';
 import { numSetting } from '../db/settings.js';
+import { isPaperExecutionMode } from '../tradingModePresentation.js';
 
 const PAPER_INITIAL_BALANCE_DEFAULT = 10;
 
@@ -15,11 +16,10 @@ export function paperInitialBalanceSol() {
 
 function paperPositions() {
   return db.prepare(`
-    SELECT status, size_sol, entry_fee_sol, realized_pnl_sol, realized_cost_sol,
-           mark_pnl_sol, pnl_sol, exit_fee_sol
+    SELECT status, execution_mode, size_sol, entry_fee_sol, realized_pnl_sol,
+           mark_pnl_sol, pnl_sol, trailing_enabled, trailing_armed
     FROM dry_run_positions
-    WHERE coalesce(execution_mode, 'dry_run') != 'live'
-  `).all();
+  `).all().filter(row => isPaperExecutionMode(row.execution_mode));
 }
 
 /**
@@ -35,10 +35,13 @@ export function paperWalletSummary() {
   const realizedPnlSol = closedRows.reduce((sum, row) => sum + finite(row.pnl_sol), 0)
     + openRows.reduce((sum, row) => sum + finite(row.realized_pnl_sol), 0);
 
+  // size_sol is reduced whenever a partial exit settles, so it is already the
+  // remaining open cost basis. realized_cost_sol is historical sold cost basis
+  // and must not be reserved again or PAPER would permanently lock capital that
+  // has already returned to the virtual wallet.
   const committedSol = openRows.reduce((sum, row) => (
     sum
       + Math.max(0, finite(row.size_sol))
-      + Math.max(0, finite(row.realized_cost_sol))
       + Math.max(0, finite(row.entry_fee_sol))
   ), 0);
 
@@ -57,13 +60,14 @@ export function paperWalletSummary() {
   // follows cash/equity realized to date, not an unrealized quote mark.
   const availableCashSol = initialBalanceSol + realizedPnlSol - committedSol;
 
-  const trailing = db.prepare(`
-    SELECT
-      SUM(CASE WHEN status = 'open' AND trailing_enabled = 1 THEN 1 ELSE 0 END) AS enabled,
-      SUM(CASE WHEN status = 'open' AND trailing_enabled = 1 AND trailing_armed = 1 THEN 1 ELSE 0 END) AS armed
-    FROM dry_run_positions
-    WHERE coalesce(execution_mode, 'dry_run') != 'live'
-  `).get();
+  const trailingEnabled = openRows.reduce(
+    (count, row) => count + (Number(row.trailing_enabled) === 1 ? 1 : 0),
+    0,
+  );
+  const trailingArmed = openRows.reduce(
+    (count, row) => count + (Number(row.trailing_enabled) === 1 && Number(row.trailing_armed) === 1 ? 1 : 0),
+    0,
+  );
 
   return {
     initialBalanceSol,
@@ -76,8 +80,8 @@ export function paperWalletSummary() {
     unrealizedPnlSol: openMarkPnlSol - openRows.reduce((sum, row) => sum + finite(row.realized_pnl_sol), 0),
     openPositions: openRows.length,
     closedPositions: closedRows.length,
-    trailingEnabled: Number(trailing?.enabled || 0),
-    trailingArmed: Number(trailing?.armed || 0),
+    trailingEnabled,
+    trailingArmed,
     source: 'paper_virtual_ledger',
   };
 }

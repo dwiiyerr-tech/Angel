@@ -17,19 +17,32 @@ const insert = db.prepare(`
 `);
 
 const closed = insert.run('virtual-wallet-closed', 'CLOSED', 'closed', now, 0.1, 1000, 25, -15, 1, 10, 0.000005, 0.02, 0, null, 0.02).lastInsertRowid;
-const open = insert.run('virtual-wallet-open', 'OPEN', 'open', now, 0.2, 1000, 25, -15, 1, 10, 0.000005, 0.01, 0.2, 0.03, null).lastInsertRowid;
+// Model a PAPER position after a 25% partial exit: size_sol has already been
+// reduced to the remaining 0.75 SOL while realized_cost_sol records the 0.25
+// SOL historical cost basis that was sold. Only the remaining size is still
+// committed; the sold principal must be available for compounding again.
+const open = insert.run('virtual-wallet-open', 'OPEN', 'open', now, 0.75, 1000, 25, -15, 1, 10, 0.000005, 0.01, 0.25, 0.03, null).lastInsertRowid;
+
+// Historical `confirm` is a LIVE compatibility alias. Give it deliberately
+// large wallet fields so any accidental `execution_mode != live` classification
+// visibly corrupts every PAPER aggregate.
+const legacyConfirm = insert.run('virtual-wallet-confirm', 'CONFIRM', 'open', now, 4, 1000, 25, -15, 1, 10, 0.5, 4, 2, 8, null).lastInsertRowid;
+db.prepare("UPDATE dry_run_positions SET execution_mode = 'confirm', trailing_armed = 1 WHERE id = ?").run(legacyConfirm);
 
 const summary = paperWalletSummary();
 const closeTo = (actual, expected) => assert.ok(Math.abs(actual - expected) < 1e-9, `${actual} !== ${expected}`);
 assert.equal(summary.initialBalanceSol, 5);
 assert.equal(summary.openPositions, before.openPositions + 1);
 assert.equal(summary.closedPositions, before.closedPositions + 1);
-closeTo(summary.committedSol - before.committedSol, 0.400005);
+assert.equal(summary.trailingEnabled, before.trailingEnabled + 1);
+assert.equal(summary.trailingArmed, before.trailingArmed);
+closeTo(summary.committedSol - before.committedSol, 0.750005);
 closeTo(summary.realizedPnlSol - before.realizedPnlSol, 0.03);
 closeTo(summary.unrealizedPnlSol - before.unrealizedPnlSol, 0.02);
 closeTo(summary.totalPnlSol - before.totalPnlSol, 0.05);
 closeTo(summary.equitySol - before.equitySol, 0.05);
+closeTo(summary.availableCashSol - before.availableCashSol, -0.720005);
 
-db.prepare('DELETE FROM dry_run_positions WHERE id IN (?, ?)').run(closed, open);
+db.prepare('DELETE FROM dry_run_positions WHERE id IN (?, ?, ?)').run(closed, open, legacyConfirm);
 setSetting('paper_initial_balance_sol', previousInitialBalance);
-console.log('[virtual-wallet] PAPER equity, committed capital, and split PnL verified');
+console.log('[virtual-wallet] PAPER partial-capital release and LIVE-alias isolation verified');
