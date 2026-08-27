@@ -92,8 +92,11 @@ export function extractNeedleCalibrationSample(row = {}) {
   const needle = candidate?.needle;
   const realizedR = finite(row.realized_r);
   if (!needle || realizedR == null || !needle.dimensions) return null;
-  const dimensionScores = {};
-  const dimensionKnown = {};
+  const safety = needle.dimensions?.safety;
+  const safetyScore = finite(safety?.score);
+  if (safetyScore == null) return null;
+  const dimensionScores = { safety: clamp(safetyScore, 0, 100) };
+  const dimensionKnown = { safety: safety?.known !== false };
   for (const key of NEEDLE_CALIBRATION_DIMENSIONS) {
     const dimension = needle.dimensions?.[key];
     const score = finite(dimension?.score);
