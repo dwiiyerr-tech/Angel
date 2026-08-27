@@ -108,7 +108,7 @@ assert(['HARD_REJECT', 'WEAK', 'OBSERVE', 'WATCH'].includes(weakScore.classifica
 assert.equal(strongScore.dimensions.runnerProbability.score, 74);
 assert(strongScore.dimensions.expectedR.score > 70, 'positive expected R should be rewarded');
 
-const unsafe = structuredClone(strong);
+const unsafe = JSON.parse(JSON.stringify(strong));
 unsafe.contractSafety = { passed: false, auditComplete: true, rugcheck: { scoreNormalised: 20 } };
 const unsafeScore = calculateNeedleScore(unsafe);
 assert.equal(unsafeScore.score, 0, 'catastrophic safety failure must dominate every opportunity signal');
