@@ -12,6 +12,7 @@
     "research:report": "node scripts/research_report.mjs",
     "research:exit-report": "node scripts/research_exit_report.mjs",
     "edge:report": "node scripts/edge_report.mjs",
+    "needle:calibrate": "node scripts/needle_calibration_report.mjs",
     "control:report": "node scripts/control_plane_report.mjs",
     "fast:report": "node scripts/fast_hunter_report.mjs",
     "chaos:report": "node scripts/live_chaos_report.mjs",
