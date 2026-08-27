@@ -447,7 +447,15 @@ export function rollbackToParent(targetVersion, reason = 'manual rollback', acto
   db.transaction(() => {
     if (configuredTradingMode() !== 'paper') setSetting('trading_mode', 'paper');
     for (const key of CONTROL_PLANE_PROPOSABLE_SETTINGS) {
-      if (target.config?.settings?.[key] !== undefined) setSetting(key, target.config.settings[key]);
+      if (target.config?.settings?.[key] !== undefined) {
+        setSetting(key, target.config.settings[key]);
+      } else {
+        // A child config may introduce a newly managed setting (for example
+        // Needle weights) that did not exist in its parent. Rollback must
+        // restore absence as well as values or the parent config hash cannot
+        // be reconstructed exactly. This runs only after forcing PAPER mode.
+        db.prepare('DELETE FROM settings WHERE key = ?').run(key);
+      }
     }
     const actualHash = hashJson(currentManagedConfig());
     if (actualHash !== target.config_hash) throw new Error('Rollback config hash mismatch');
