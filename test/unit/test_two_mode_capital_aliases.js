@@ -21,12 +21,13 @@ const now = Date.now();
 const inserted = [];
 
 const insertPosition = ({ mint, mode, status = 'open', pnlPercent = null, closedAtMs = null }) => {
+  const simNotionalSol = mode === 'research' ? 0.1 : null;
   const result = db.prepare(`
     INSERT INTO dry_run_positions (
       mint, symbol, status, opened_at_ms, closed_at_ms, size_sol, entry_mcap,
       tp_percent, sl_percent, trailing_enabled, trailing_percent,
-      execution_mode, snapshot_json, pnl_percent, pnl_sol
-    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, '{}', ?, ?)
+      execution_mode, sim_notional_sol, snapshot_json, pnl_percent, pnl_sol
+    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, '{}', ?, ?)
   `).run(
     mint,
     mode.toUpperCase().slice(0, 10),
@@ -40,6 +41,7 @@ const insertPosition = ({ mint, mode, status = 'open', pnlPercent = null, closed
     1,
     10,
     mode,
+    simNotionalSol,
     pnlPercent,
     pnlPercent == null ? null : pnlPercent / 100 * 0.1,
   );
